@@ -332,6 +332,13 @@ func (h *Handler) RequireAdmin(next echo.HandlerFunc) echo.HandlerFunc {
 // gated; the SPA's HTML / static assets are also served by Echo but
 // they're outside /api so they're fine — the React side handles the
 // "redirect to /login" flow itself.
+//
+// Exact-match list + a prefix list. The prefix list exists because the
+// TMDB image cache (/api/v1/tmdb/img/<size>/<path>) is a stateless CDN
+// proxy — gating it behind a session means the cookie has to ride along
+// on every <img> tag, which is flaky on cross-origin dev proxies and
+// COEP "credentialless" mode. The images themselves are publicly
+// available on image.tmdb.org so there's nothing to protect.
 func isPublicEndpoint(path string) bool {
 	publics := []string{
 		"/api/v1/status",
@@ -339,6 +346,14 @@ func isPublicEndpoint(path string) bool {
 	}
 	for _, p := range publics {
 		if path == p {
+			return true
+		}
+	}
+	publicPrefixes := []string{
+		"/api/v1/tmdb/img/",
+	}
+	for _, p := range publicPrefixes {
+		if strings.HasPrefix(path, p) {
 			return true
 		}
 	}
