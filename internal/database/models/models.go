@@ -9,6 +9,32 @@ type BaseModel struct {
 }
 
 // +---------------------+
+// |       Auth          |
+// +---------------------+
+
+// User is a login account. The admin (one per install, bootstrapped via
+// NOTFLIX_ADMIN_USERNAME / NOTFLIX_ADMIN_PASSWORD env vars) can create
+// "child" users — non-admin accounts with the same browsing surface but
+// no admin actions.
+type User struct {
+	BaseModel
+	Username     string `gorm:"column:username;uniqueIndex;size:64;not null" json:"username"`
+	PasswordHash string `gorm:"column:password_hash;size:255;not null" json:"-"`
+	IsAdmin      bool   `gorm:"column:is_admin;default:false" json:"isAdmin"`
+	DisplayName  string `gorm:"column:display_name;size:64" json:"displayName"`
+}
+
+// Session is a server-side opaque token issued at login and looked up on
+// every request. Lives in the DB so revocation works (admin deletes a
+// user → their sessions vanish in the same transaction).
+type Session struct {
+	Token     string    `gorm:"primarykey;size:64" json:"-"`
+	UserID    uint      `gorm:"column:user_id;not null;index" json:"userId"`
+	ExpiresAt time.Time `gorm:"column:expires_at;index" json:"expiresAt"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// +---------------------+
 // |     Profiles        |
 // +---------------------+
 

@@ -14,14 +14,33 @@
  */
 import { NetflixBottomTab } from "@/app/(main)/_features/netflix/netflix-bottom-tab"
 import { NetflixDetailModal } from "@/app/(main)/_features/netflix/netflix-detail-modal"
+import { NetflixLogin } from "@/app/(main)/_features/netflix/netflix-login"
 import { NetflixTopBar } from "@/app/(main)/_features/netflix/netflix-top-bar"
+import { LoadingOverlayWithLogo } from "@/components/shared/loading-overlay-with-logo"
 import { AppLayout, AppLayoutContent, AppSidebarProvider } from "@/components/ui/app-layout"
+import { useCurrentUser } from "@/lib/auth"
 import { usePathname, useRouter } from "@/lib/navigation"
 import { activeProfileIdAtom, useProfilesQuery } from "@/lib/profiles/profiles"
 import { useAtomValue } from "jotai"
 import React from "react"
 
 export const MainLayout = ({ children }: { children: React.ReactNode }) => {
+    const { data: user, isLoading } = useCurrentUser()
+
+    // Three-state gate. The login screen is *not* a separate route, so
+    // deep links (`/lists`, `/watch?id=…`) survive the auth round trip —
+    // the user lands back on the URL they wanted once `useCurrentUser`
+    // resolves to a real account.
+    if (isLoading) return <LoadingOverlayWithLogo />
+    if (!user) return <NetflixLogin />
+
+    return <AuthenticatedShell>{children}</AuthenticatedShell>
+}
+
+// Hooks below are only mounted when an authenticated user is present —
+// keeps the hook order stable across renders and avoids firing the
+// profile-gate logic on the public login screen.
+function AuthenticatedShell({ children }: { children: React.ReactNode }) {
     useProfileGate()
 
     return (

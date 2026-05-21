@@ -24,7 +24,24 @@ func New(app *core.App) *Handler { return &Handler{App: app} }
 func RegisterRoutes(e *echo.Echo, h *Handler) {
 	v1 := e.Group("/api/v1")
 
+	// Auth middleware fires on every /api/v1/* request. Public
+	// endpoints (status, login) are allow-listed inside the middleware.
+	v1.Use(h.AuthMiddleware)
+
 	v1.GET("/status", h.HandleStatus)
+
+	// Auth — login is the only un-gated endpoint along with /status.
+	auth := v1.Group("/auth")
+	auth.POST("/login", h.HandleLogin)
+	auth.POST("/logout", h.HandleLogout)
+	auth.GET("/me", h.HandleAuthMe)
+
+	// Users — admin-only CRUD on child accounts.
+	users := v1.Group("/users", h.RequireAdmin)
+	users.GET("", h.HandleListUsers)
+	users.POST("", h.HandleCreateUser)
+	users.DELETE("/:id", h.HandleDeleteUser)
+	users.POST("/:id/password", h.HandleResetUserPassword)
 
 	// TMDB image cache — disk-backed proxy for image.tmdb.org so posters,
 	// backdrops and stills are served at LAN speed and survive browser

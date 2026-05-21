@@ -7,11 +7,12 @@ import { LanguageSwitcher } from "@/components/shared/language-switcher"
 import { SeaLink } from "@/components/shared/sea-link"
 import { cn } from "@/components/ui/core/styling"
 import { DropdownMenu, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu"
+import { useCurrentUser, useLogout } from "@/lib/auth"
 import { usePathname, useRouter } from "@/lib/navigation"
 import { useActiveProfile, useProfileActions } from "@/lib/profiles/profiles"
 import React from "react"
 import { useTranslation } from "react-i18next"
-import { BiUser } from "react-icons/bi"
+import { BiLogOut, BiShield, BiUser } from "react-icons/bi"
 import { FiSearch } from "react-icons/fi"
 import { LuSettings, LuUsers } from "react-icons/lu"
 
@@ -98,10 +99,9 @@ function ProfileDropdown() {
     const router = useRouter()
     const activeProfile = useActiveProfile()
     const { profiles, select } = useProfileActions()
+    const { data: user } = useCurrentUser()
+    const logout = useLogout()
 
-    // Switch profile = drop the active selection then bounce to /profiles. The
-    // gate in MainLayout would do this anyway but the explicit push gives an
-    // instant transition with no flash of the previous page.
     const onSwitchProfile = () => {
         select(null)
         router.push("/profiles")
@@ -132,6 +132,16 @@ function ProfileDropdown() {
                 </button>
             }
         >
+            {!!user && (
+                <div className="px-2 py-1.5 text-xs text-[--muted] truncate max-w-[14rem]">
+                    <span className="text-white font-semibold">{user.displayName || user.username}</span>
+                    {user.isAdmin && (
+                        <span className="ml-2 text-[9px] uppercase tracking-wider text-brand-300 font-bold">
+                            admin
+                        </span>
+                    )}
+                </div>
+            )}
             {!!activeProfile && (
                 <div className="px-2 py-1.5 text-xs text-[--muted] truncate max-w-[14rem]">
                     {activeProfile.avatar}  {activeProfile.name}
@@ -154,10 +164,23 @@ function ProfileDropdown() {
                 <BiUser /> {profiles.length === 0 ? t("profiles.enable", "Activer les profils") : t("profiles.manage", "Gérer les profils")}
             </DropdownMenuItem>
 
+            {user?.isAdmin && (
+                <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => router.push("/admin/users")}>
+                        <BiShield /> {t("nav.admin_users", "Comptes utilisateurs")}
+                    </DropdownMenuItem>
+                </>
+            )}
+
             <DropdownMenuSeparator />
 
             <DropdownMenuItem onClick={() => router.push("/settings")}>
                 <LuSettings /> {t("nav.settings", "Paramètres")}
+            </DropdownMenuItem>
+
+            <DropdownMenuItem onClick={() => logout.mutate()}>
+                <BiLogOut /> {t("nav.logout", "Déconnexion")}
             </DropdownMenuItem>
         </DropdownMenu>
     )

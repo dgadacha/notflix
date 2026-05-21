@@ -35,20 +35,24 @@ func main() {
 	e.Use(middleware.Recover())
 	e.Use(middleware.Logger())
 
-	// CORS — the dev frontend (rsbuild) runs on :43210 while the API listens
-	// on :43212, so XHR preflight needs the right headers. In production the
-	// SPA is served by this same Echo instance so the same-origin path is
-	// also fine. Allow everything in dev; tighten later if we ever expose
-	// the API to a different origin.
+	// CORS — the dev frontend (rsbuild) runs on :43210 while the API
+	// listens on :43212. Session cookies require AllowCredentials: true,
+	// which means AllowOrigins can't be a wildcard — we list the dev
+	// origins explicitly. In production the SPA is served by this same
+	// Echo instance (same-origin) so CORS doesn't fire there.
 	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins: []string{"*"},
+		AllowOrigins: []string{
+			"http://127.0.0.1:43210",
+			"http://localhost:43210",
+		},
+		AllowCredentials: true,
 		AllowMethods: []string{
 			http.MethodGet, http.MethodHead, http.MethodPost,
 			http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions,
 		},
 		AllowHeaders: []string{
 			echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept,
-			echo.HeaderAuthorization, echo.HeaderXRequestedWith,
+			echo.HeaderAuthorization, echo.HeaderXRequestedWith, echo.HeaderCookie,
 		},
 	}))
 

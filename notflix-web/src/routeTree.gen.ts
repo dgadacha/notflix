@@ -21,6 +21,7 @@ import { Route as MainSettingsIndexRouteImport } from './routes/_main/settings/i
 import { Route as MainSearchIndexRouteImport } from './routes/_main/search/index'
 import { Route as MainProfilesIndexRouteImport } from './routes/_main/profiles/index'
 import { Route as MainCategoriesIndexRouteImport } from './routes/_main/categories/index'
+import { Route as MainAdminUsersIndexRouteImport } from './routes/_main/admin/users/index'
 
 const ScanLogViewerIndexLazyRouteImport = createFileRoute('/scan-log-viewer/')()
 const IssueReportIndexLazyRouteImport = createFileRoute('/issue-report/')()
@@ -110,6 +111,13 @@ const MainCategoriesIndexRoute = MainCategoriesIndexRouteImport.update({
 } as any).lazy(() =>
   import('./routes/_main/categories/index.lazy').then((d) => d.Route),
 )
+const MainAdminUsersIndexRoute = MainAdminUsersIndexRouteImport.update({
+  id: '/admin/users/',
+  path: '/admin/users/',
+  getParentRoute: () => MainRoute,
+} as any).lazy(() =>
+  import('./routes/_main/admin/users/index.lazy').then((d) => d.Route),
+)
 
 export interface FileRoutesByFullPath {
   '/': typeof MainIndexRoute
@@ -125,6 +133,7 @@ export interface FileRoutesByFullPath {
   '/public/auth/': typeof PublicAuthIndexRoute
   '/splashscreen/crash/': typeof SplashscreenCrashIndexRoute
   '/lists/': typeof MainListsIndexLazyRoute
+  '/admin/users/': typeof MainAdminUsersIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof MainIndexRoute
@@ -140,6 +149,7 @@ export interface FileRoutesByTo {
   '/public/auth': typeof PublicAuthIndexRoute
   '/splashscreen/crash': typeof SplashscreenCrashIndexRoute
   '/lists': typeof MainListsIndexLazyRoute
+  '/admin/users': typeof MainAdminUsersIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -157,6 +167,7 @@ export interface FileRoutesById {
   '/public/auth/': typeof PublicAuthIndexRoute
   '/splashscreen/crash/': typeof SplashscreenCrashIndexRoute
   '/_main/lists/': typeof MainListsIndexLazyRoute
+  '/_main/admin/users/': typeof MainAdminUsersIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -174,6 +185,7 @@ export interface FileRouteTypes {
     | '/public/auth/'
     | '/splashscreen/crash/'
     | '/lists/'
+    | '/admin/users/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -189,6 +201,7 @@ export interface FileRouteTypes {
     | '/public/auth'
     | '/splashscreen/crash'
     | '/lists'
+    | '/admin/users'
   id:
     | '__root__'
     | '/_main'
@@ -205,6 +218,7 @@ export interface FileRouteTypes {
     | '/public/auth/'
     | '/splashscreen/crash/'
     | '/_main/lists/'
+    | '/_main/admin/users/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -317,6 +331,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof MainCategoriesIndexRouteImport
       parentRoute: typeof MainRoute
     }
+    '/_main/admin/users/': {
+      id: '/_main/admin/users/'
+      path: '/admin/users'
+      fullPath: '/admin/users/'
+      preLoaderRoute: typeof MainAdminUsersIndexRouteImport
+      parentRoute: typeof MainRoute
+    }
   }
 }
 
@@ -328,6 +349,7 @@ interface MainRouteChildren {
   MainSettingsIndexRoute: typeof MainSettingsIndexRoute
   MainWatchIndexRoute: typeof MainWatchIndexRoute
   MainListsIndexLazyRoute: typeof MainListsIndexLazyRoute
+  MainAdminUsersIndexRoute: typeof MainAdminUsersIndexRoute
 }
 
 const MainRouteChildren: MainRouteChildren = {
@@ -338,6 +360,7 @@ const MainRouteChildren: MainRouteChildren = {
   MainSettingsIndexRoute: MainSettingsIndexRoute,
   MainWatchIndexRoute: MainWatchIndexRoute,
   MainListsIndexLazyRoute: MainListsIndexLazyRoute,
+  MainAdminUsersIndexRoute: MainAdminUsersIndexRoute,
 }
 
 const MainRouteWithChildren = MainRoute._addFileChildren(MainRouteChildren)

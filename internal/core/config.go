@@ -29,6 +29,14 @@ type Config struct {
 		// X-Api-Key value from Prowlarr's General settings.
 		APIKey string
 	}
+	Auth struct {
+		// Bootstrap credentials for the admin user. Only used on first
+		// boot — once the user exists in the DB the env vars are ignored.
+		// Defaults to admin/admin so a fresh install isn't blocked, but
+		// the README warns users to override these.
+		AdminUsername string
+		AdminPassword string
+	}
 	Data struct {
 		Dir string // resolved at boot
 	}
@@ -66,6 +74,12 @@ func loadConfig() (*Config, error) {
 	cfg.TorBox.APIKey = os.Getenv("NOTFLIX_TORBOX_API_KEY")
 	cfg.Prowlarr.BaseURL = firstNonEmpty(os.Getenv("NOTFLIX_PROWLARR_URL"), "http://127.0.0.1:9696")
 	cfg.Prowlarr.APIKey = os.Getenv("NOTFLIX_PROWLARR_API_KEY")
+
+	// Auth bootstrap — defaults are intentionally weak so a fresh
+	// install boots without setup; the README tells the user to set
+	// real values in `.env` and reset the password from the admin UI.
+	cfg.Auth.AdminUsername = firstNonEmpty(os.Getenv("NOTFLIX_ADMIN_USERNAME"), "admin")
+	cfg.Auth.AdminPassword = firstNonEmpty(os.Getenv("NOTFLIX_ADMIN_PASSWORD"), "admin")
 
 	return cfg, nil
 }

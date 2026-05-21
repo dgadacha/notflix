@@ -2,6 +2,7 @@ package db
 
 import (
 	"errors"
+	"time"
 
 	"notflix/internal/database/models"
 
@@ -23,6 +24,8 @@ func Open(path string) (*Database, error) {
 		return nil, err
 	}
 	if err := g.AutoMigrate(
+		&models.User{},
+		&models.Session{},
 		&models.Profile{},
 		&models.ProfileWatchHistory{},
 		&models.ProfileListEntry{},
@@ -189,4 +192,91 @@ func (db *Database) DeleteProfileListEntry(profileUID string, tmdbID int, mediaT
 	return db.gormdb.
 		Where("profile_uid = ? AND tmdb_id = ? AND media_type = ?", profileUID, tmdbID, mediaType).
 		Delete(&models.ProfileListEntry{}).Error
+}
+
+// -----------------------------------------------------------------------------
+// Users (auth)
+// -----------------------------------------------------------------------------
+
+func (db *Database) ListUsers() ([]*models.User, error) {
+	var res []*models.User
+	err := db.gormdb.Order("is_admin DESC, created_at ASC").Find(&res).Error
+	return res, err
+}
+
+func (db *Database) GetUserByUsername(username string) (*models.User, error) {
+	if username == "" {
+		return nil, errors.New("username required")
+	}
+	var u models.User
+	if err := db.gormdb.Where("username = ?", username).First(&u).Error; err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (db *Database) GetUserByID(id uint) (*models.User, error) {
+	var u models.User
+	if err := db.gormdb.First(&u, id).Error; err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (db *Database) CountUsers() (int64, error) {
+	var n int64
+	if err := db.gormdb.Model(&models.User{}).Count(&n).Error; err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func (db *Database) CreateUser(u *models.User) (*models.User, error) {
+	if err := db.gormdb.Create(u).Error; err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+func (db *Database) UpdateUserPasswordHash(id uint, hash string) error {
+	return db.gormdb.Model(&models.User{}).Where("id = ?", id).
+		Update("password_hash", hash).Error
+}
+
+func (db *Database) DeleteUser(id uint) error {
+	return db.gormdb.Transaction(func(tx *gorm.DB) error {
+		// Cascade: drop their sessions first so they can't keep using
+		// the app between the user delete and the session reaper run.
+		if err := tx.Where("user_id = ?", id).Delete(&models.Session{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&models.User{}, id).Error
+	})
+}
+
+// -----------------------------------------------------------------------------
+// Sessions (auth)
+// -----------------------------------------------------------------------------
+
+func (db *Database) CreateSession(s *models.Session) error {
+	return db.gormdb.Create(s).Error
+}
+
+func (db *Database) GetSession(token string) (*models.Session, error) {
+	if token == "" {
+		return nil, errors.New("session token required")
+	}
+	var s models.Session
+	if err := db.gormdb.Where("token = ? AND expires_at > ?", token, time.Now()).First(&s).Error; err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (db *Database) DeleteSession(token string) error {
+	return db.gormdb.Where("token = ?", token).Delete(&models.Session{}).Error
+}
+
+func (db *Database) ReapExpiredSessions() error {
+	return db.gormdb.Where("expires_at <= ?", time.Now()).Delete(&models.Session{}).Error
 }
