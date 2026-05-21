@@ -362,6 +362,39 @@ export default function WatchPage() {
         void launchRelease(filteredReleases[0])
     }, [phase, resumeRelease, search.isFetching, search.isError, filteredReleases, autoPickDisabled, launchRelease, t])
 
+    // Background sub-prep poller — runs throughout the "playing" phase
+    // when subPrepMode is "background", so we can show a small corner
+    // indicator and auto-activate the track once the backend cache
+    // is ready. Independent from the blocking polling loop below.
+    React.useEffect(() => {
+        if (phase !== "playing") return
+        if (!streamSessionId) return
+        if (subLangPref === "off") return
+        if (subPrepMode !== "background") return
+        // Already known to be ready → nothing to poll for.
+        if (subPrep?.state === "ready") return
+
+        let cancelled = false
+        const tick = async () => {
+            try {
+                const status = await getSubPrepStatus(streamSessionId)
+                if (cancelled) return
+                setSubPrep(status)
+                if (status.state === "ready" || status.state === "failed") {
+                    return // stop polling
+                }
+            } catch (err) {
+                console.warn("[Notflix] background prep poll failed:", err)
+                return
+            }
+            if (!cancelled) window.setTimeout(tick, 1500)
+        }
+        void tick()
+        return () => {
+            cancelled = true
+        }
+    }, [phase, streamSessionId, subLangPref, subPrepMode, subPrep?.state])
+
     // Subtitle prep loop — fires when phase enters "preparing_subs".
     // Kicks off the backend's extract+translate pipeline, polls the
     // status endpoint every 500 ms, and transitions to "playing" once
@@ -523,6 +556,7 @@ export default function WatchPage() {
                     subtitles={streamSubtitles}
                     sessionId={streamSessionId}
                     subLangPref={subLangPref}
+                    subPrep={subPrep}
                     resumeSec={resumeSec}
                     onBack={handleClose}
                     onChangeSource={handleChangeSource}
@@ -971,6 +1005,7 @@ function Player({
     subtitles,
     sessionId,
     subLangPref,
+    subPrep,
     resumeSec,
     onBack,
     onChangeSource,
@@ -983,6 +1018,7 @@ function Player({
     subtitles: SubtitleTrack[]
     sessionId: string
     subLangPref: SubtitleLangPref
+    subPrep: SubPrepStatus | null
     resumeSec: number
     onBack: () => void
     onChangeSource: () => void
@@ -1153,6 +1189,48 @@ function Player({
         return () => document.removeEventListener("visibilitychange", onVisibilityChange)
     }, [])
 
+    // Auto-activate the preferred subtitle track once the backend
+    // reports the cache is ready. Chrome eagerly fetches `default`
+    // tracks at mount time; if the cache wasn't warm yet, that
+    // initial fetch can fail silently and the track stays disabled
+    // for the rest of playback. Solution: don't mark anything default,
+    // and manually flip mode = "showing" once subPrep.state === ready.
+    const [autoShownTrack, setAutoShownTrack] = React.useState(false)
+    React.useEffect(() => {
+        if (autoShownTrack) return
+        if (subPrep?.state !== "ready") return
+        const video = videoRef.current
+        if (!video) return
+        const target = subLangPref === "off" ? null : normaliseSubLang(subLangPref === "auto" ? "fr" : subLangPref)
+        if (!target) return
+        // Re-mount the textTrack by toggling .mode. The browser
+        // (re)loads the cue source on first activation.
+        for (let i = 0; i < video.textTracks.length; i++) {
+            const tt = video.textTracks[i]
+            if (tt.kind !== "subtitles") continue
+            if (tt.language?.startsWith(target)) {
+                tt.mode = "showing"
+                setAutoShownTrack(true)
+                break
+            }
+        }
+    }, [subPrep?.state, subLangPref, autoShownTrack])
+
+    // Show a small corner pill while subs prep is in progress, plus a
+    // brief "subs ready" toast when it transitions to ready. Lets the
+    // user see something IS happening without blocking the video.
+    const subPrepBusy =
+        subPrep && (subPrep.state === "extracting" || subPrep.state === "translating" || subPrep.state === "picking")
+    const [readyToastShown, setReadyToastShown] = React.useState(false)
+    React.useEffect(() => {
+        if (subPrep?.state !== "ready") return
+        if (readyToastShown) return
+        setReadyToastShown(true)
+        // Auto-dismiss after a short delay.
+        const handle = window.setTimeout(() => {}, 4000)
+        return () => window.clearTimeout(handle)
+    }, [subPrep?.state, readyToastShown])
+
     return (
         <div className="fixed inset-0 z-[100] bg-black flex flex-col">
             {/* Top bar — back button, title, transmux toggle, change-source. */}
@@ -1179,6 +1257,28 @@ function Player({
                     {t("watch.change_source", "Changer de source")}
                 </button>
             </div>
+
+            {/* Bottom-right corner: small sub-prep indicator. Disappears
+                once subPrep.state === "ready" (then briefly shows a
+                "ready" toast before disappearing). */}
+            {subPrepBusy && (
+                <div className="absolute bottom-20 right-4 z-10 bg-black/80 backdrop-blur-sm border border-white/10 rounded-lg px-3 py-2 text-xs text-white max-w-xs">
+                    <div className="flex items-center gap-2">
+                        <FiLoader className="size-3.5 animate-spin text-brand-400" />
+                        <span className="font-semibold">
+                            {t("watch.sub_prep_corner", "Sous-titres en préparation")}
+                        </span>
+                        <span className="font-mono tabular-nums text-[--muted]">
+                            {(subPrep?.progress ?? 0).toFixed(1)} %
+                        </span>
+                    </div>
+                </div>
+            )}
+            {subPrep?.state === "ready" && readyToastShown && (
+                <div className="absolute bottom-20 right-4 z-10 bg-green-500/20 backdrop-blur-sm border border-green-500/40 rounded-lg px-3 py-2 text-xs text-green-200 animate-pulse">
+                    {t("watch.sub_prep_corner_ready", "Sous-titres activés")}
+                </div>
+            )}
 
             {/* src is set imperatively in the effect above — either
                 directly (native HTTP playback) or via Hls.attachMedia
@@ -1207,7 +1307,12 @@ function Player({
                             src={track.translateTo ? `${base}?translateTo=${track.translateTo}` : base}
                             srcLang={track.srcLang}
                             label={track.label}
-                            default={track.isDefault}
+                            // Never `default` — Chrome eagerly loads default
+                            // tracks at mount time, and if the backend cache
+                            // isn't warm yet that initial fetch fails and the
+                            // track stays disabled forever. We activate it
+                            // ourselves via textTracks[i].mode = "showing"
+                            // after subPrep.state becomes ready.
                         />
                     )
                 })}

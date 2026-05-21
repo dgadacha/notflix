@@ -65,7 +65,9 @@
     "sub_prep_ready": "Sous-titres prêts, lancement…",
     "sub_prep_failed": "Préparation échouée — lecture sans sous-titres.",
     "sub_prep_translate_note": "Aucun sous-titre dans la langue choisie — Claude traduit depuis {{lang}}. La traduction est mise en cache, donc le prochain lancement sera instantané.",
-    "sub_prep_skip": "Lancer sans attendre"
+    "sub_prep_skip": "Lancer sans attendre",
+    "sub_prep_corner": "Sous-titres en préparation",
+    "sub_prep_corner_ready": "Sous-titres activés"
   },
   "profiles": {
     "who_is_watching": "Qui regarde ?",

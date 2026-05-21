@@ -81,7 +81,13 @@ export const qualityPrefAtom = atomWithStorage<QualityPref>("notflix-pref-qualit
 export const audioPrefAtom = atomWithStorage<AudioPref>("notflix-pref-audio", "auto")
 export const sourcePickModeAtom = atomWithStorage<SourcePickMode>("notflix-pref-source-pick", "auto")
 export const subtitleLangPrefAtom = atomWithStorage<SubtitleLangPref>("notflix-pref-subtitle", "fr")
-export const subPrepModeAtom = atomWithStorage<SubPrepMode>("notflix-pref-sub-prep-mode", "wait")
+// Default changed from "wait" to "background" after the user pointed
+// out the prep overlay felt agonizingly slow: extracting subs from a
+// remote 1.4 GB MKV over a CDN is bandwidth-bound and takes 1-3 min
+// even with optimal flags. Backgrounding it lets the video play
+// immediately; a small corner indicator surfaces the prep progress,
+// and the player remounts the <track> elements once the cache is ready.
+export const subPrepModeAtom = atomWithStorage<SubPrepMode>("notflix-pref-sub-prep-mode", "background")
 
 export function useQualityPref() {
     return useAtom(qualityPrefAtom)

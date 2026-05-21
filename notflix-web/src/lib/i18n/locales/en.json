@@ -65,7 +65,9 @@
     "sub_prep_ready": "Subtitles ready, starting…",
     "sub_prep_failed": "Preparation failed — playing without subtitles.",
     "sub_prep_translate_note": "No subtitle in the chosen language — Claude is translating from {{lang}}. The translation is cached so the next launch will be instant.",
-    "sub_prep_skip": "Play without waiting"
+    "sub_prep_skip": "Play without waiting",
+    "sub_prep_corner": "Subtitles loading",
+    "sub_prep_corner_ready": "Subtitles enabled"
   },
   "profiles": {
     "who_is_watching": "Who's watching?",
