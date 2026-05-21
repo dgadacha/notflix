@@ -641,7 +641,10 @@ func (h *Handler) extractEmbeddedSubtitleWithProgress(
 		// ones (reconnect_on_network_error / on_http_error / at_eof)
 		// caused immediate crashes on the user's setup.
 		"-multiple_requests", "1",
-		"-http_seekable", "1",
+		// CLI name is `-seekable`, NOT `-http_seekable` (which is the
+		// internal libavformat name and is rejected at the CLI). User
+		// hit "Option http_seekable not found" on ffmpeg 4.4.
+		"-seekable", "1",
 		"-reconnect", "1",
 		"-reconnect_streamed", "1",
 		"-reconnect_delay_max", "5",
