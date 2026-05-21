@@ -110,6 +110,7 @@ func (h *Handler) HandleSearchMovie(c echo.Context) error {
 			return RespondErr(c, err)
 		}
 		results = filterByTitleRelevance(fresh, title, mediaMovie)
+		results = filterByContentType(results, title, mediaMovie)
 		if year > 0 {
 			results = filterByReleaseYear(results, year, 2)
 		}
@@ -138,6 +139,7 @@ func (h *Handler) HandleSearchTV(c echo.Context) error {
 			return RespondErr(c, err)
 		}
 		results = filterByTitleRelevance(fresh, title, mediaTV)
+		results = filterByContentType(results, title, mediaTV)
 		if episode > 0 {
 			results = filterByEpisodeMatch(results, season, episode)
 		}
@@ -340,6 +342,93 @@ var formatMarkerTokens = map[string]bool{
 	"remastered": true, "anime": true, "ova": true, "ona": true,
 	"special": true, "specials": true, "movie": true, "film": true,
 	"hdr": true, "hdr10": true, "dv": true, "10bit": true, "8bit": true,
+}
+
+// filterByContentType drops releases whose content type doesn't match
+// the search type. The title filter alone is too forgiving — it accepts
+// any release whose series-portion equals the search, which lets:
+//
+//   - "Jujutsu Kaisen Movie 01" (the spin-off film) leak into a search
+//     for the TV series, because "movie" was treated as a format marker
+//     and the series portion ["jujutsu", "kaisen"] matched. The standalone
+//     "01" then passed the episode filter as if it were ep 1.
+//   - TV episode releases ("Foo S01E01") leak into movie searches,
+//     because SxxExx is stripped as a format marker and the series
+//     ["foo"] matches the movie name.
+//
+// The rule: a release must not advertise a content type incompatible
+// with the search. For TV: reject "movie" / "film" / "ova" / "ona" /
+// "special" tokens UNLESS they appear in the search title itself (rare
+// but possible — a show named "The Movie Quiz"). For movies: reject
+// any release that carries a season or episode marker (SxxExx, Sxx,
+// "season", "episode", "ep").
+func filterByContentType(results []prowlarr.SearchResult, searched string, ctx mediaCtx) []prowlarr.SearchResult {
+	searchTokens := tokenizeRaw(searched)
+	searchHas := func(tok string) bool {
+		for _, t := range searchTokens {
+			if t == tok {
+				return true
+			}
+		}
+		return false
+	}
+
+	out := make([]prowlarr.SearchResult, 0, len(results))
+	for _, r := range results {
+		releaseTokens := tokenizeRaw(stripLeadingBrackets(r.Title))
+		if !hasContentTypeMismatch(releaseTokens, ctx, searchHas) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// tokenizeRaw splits a string on every non-alphanumeric character and
+// lowercases the result. Same convention as releaseAdvertisesEpisode.
+func tokenizeRaw(s string) []string {
+	s = strings.ToLower(s)
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+	})
+}
+
+// hasContentTypeMismatch reports whether the release advertises a
+// content type at odds with the search (movie-tagged release in a TV
+// search, TV-episode-tagged release in a movie search).
+//
+// `searchHas` is consulted before rejecting on "movie"/"film": if the
+// search itself contains that token, the release is welcome to as well.
+func hasContentTypeMismatch(tokens []string, ctx mediaCtx, searchHas func(string) bool) bool {
+	switch ctx {
+	case mediaTV:
+		for _, tok := range tokens {
+			switch tok {
+			case "movie", "film":
+				if !searchHas(tok) {
+					return true
+				}
+			case "ova", "ona":
+				return true
+			}
+		}
+	case mediaMovie:
+		for _, tok := range tokens {
+			// S01E01 / S01 / standalone "season" or "episode" → TV signal.
+			if sxxExxFullPattern.MatchString(tok) {
+				return true
+			}
+			if seasonOnlyPattern.MatchString(tok) {
+				return true
+			}
+			switch tok {
+			case "season", "episode", "ep":
+				if !searchHas(tok) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // filterByEpisodeMatch drops TV releases that don't advertise the right

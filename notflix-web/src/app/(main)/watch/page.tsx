@@ -600,10 +600,12 @@ function ErrorPanel({
 }
 
 /**
- * Release picker — shows the top 12 results in a compact list. Backend
- * already sorted by (cached, score, seeders), so the first row is the
- * recommended choice (and what auto-picked, if the user is here it's
- * because they wanted to override).
+ * Release picker — shows every release the backend returned, in the
+ * order it ranked them (cached × score × seeders). The first row is
+ * the recommended choice and what auto-pick would have launched. We
+ * used to cap at 12 but the user can have 30-50 anime sources in one
+ * shot and capping was hiding the alternatives they wanted to choose
+ * between, so the full list is now shown.
  */
 function ReleasePicker({
     releases,
@@ -613,7 +615,6 @@ function ReleasePicker({
     onPick: (release: Release) => void
 }) {
     const { t } = useTranslation()
-    const top = releases.slice(0, 12)
 
     return (
         <div className="w-full max-w-3xl text-left">
@@ -626,7 +627,7 @@ function ReleasePicker({
                 </span>
             </div>
             <ul className="space-y-2">
-                {top.map((release, i) => (
+                {releases.map((release, i) => (
                     <li key={release.guid || release.infoHash || release.title}>
                         <button
                             type="button"
