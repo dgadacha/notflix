@@ -109,7 +109,7 @@ func (h *Handler) HandleSearchMovie(c echo.Context) error {
 		if err != nil {
 			return RespondErr(c, err)
 		}
-		results = filterByTitleRelevance(fresh, title)
+		results = filterByTitleRelevance(fresh, title, mediaMovie)
 		if year > 0 {
 			results = filterByReleaseYear(results, year, 2)
 		}
@@ -137,11 +137,25 @@ func (h *Handler) HandleSearchTV(c echo.Context) error {
 		if err != nil {
 			return RespondErr(c, err)
 		}
-		results = filterByTitleRelevance(fresh, title)
+		results = filterByTitleRelevance(fresh, title, mediaTV)
+		if episode > 0 {
+			results = filterByEpisodeMatch(results, season, episode)
+		}
 		prowlarrCachePut(cacheKey, results)
 	}
 	return RespondOK(c, h.annotateAndSort(c, results))
 }
+
+// mediaCtx is the search context — controls a couple of tokenisation
+// decisions that differ between movies and TV. The big one is whether
+// 1-2 digit standalone numbers count as title characters (they can —
+// "Apollo 13", "Die Hard 2") or as episode markers ("Naruto - 01").
+type mediaCtx int
+
+const (
+	mediaMovie mediaCtx = iota
+	mediaTV
+)
 
 // filterByTitleRelevance drops Prowlarr results whose series title doesn't
 // match the searched title exactly. Prowlarr's Torznab search is fuzzy
@@ -176,14 +190,14 @@ func (h *Handler) HandleSearchTV(c echo.Context) error {
 //
 // Empty needles → pass-through (don't filter on a title we can't reason
 // about, e.g. the user typed a single stopword).
-func filterByTitleRelevance(results []prowlarr.SearchResult, searched string) []prowlarr.SearchResult {
-	needles := significantTitleTokens(searched)
+func filterByTitleRelevance(results []prowlarr.SearchResult, searched string, ctx mediaCtx) []prowlarr.SearchResult {
+	needles := extractSeriesTokens(searched, ctx)
 	if len(needles) == 0 {
 		return results
 	}
 	out := make([]prowlarr.SearchResult, 0, len(results))
 	for _, r := range results {
-		releaseToks := significantTitleTokens(stripLeadingBrackets(r.Title))
+		releaseToks := extractSeriesTokens(stripLeadingBrackets(r.Title), ctx)
 		if matchesTitlePrefix(releaseToks, needles) {
 			out = append(out, r)
 		}
@@ -191,11 +205,11 @@ func filterByTitleRelevance(results []prowlarr.SearchResult, searched string) []
 	return out
 }
 
-// matchesTitlePrefix returns true iff the first len(needles) significant
-// tokens of `releaseToks` equal `needles` AND the release has no extra
-// significant tokens after them — i.e. the series portion is exactly
-// the searched title. Anything that pads more words onto the front
-// ("Boruto Naruto …") or the back ("Naruto Shippuden") is rejected.
+// matchesTitlePrefix returns true iff the series tokens of `releaseToks`
+// equal `needles` exactly — same length, same content, same order. The
+// series portion has already been trimmed at the first format marker,
+// so anything that pads extra words onto the front ("Boruto Naruto …")
+// or the back ("Naruto Shippuden") is rejected.
 func matchesTitlePrefix(releaseToks, needles []string) bool {
 	if len(releaseToks) != len(needles) {
 		return false
@@ -208,25 +222,24 @@ func matchesTitlePrefix(releaseToks, needles []string) bool {
 	return true
 }
 
-// significantTitleTokens normalises a string and returns its
-// "significant" tokens — i.e. tokens that aren't stopwords ("the", "of",
-// "le", …) and aren't release-format markers (SxxExx, 1080p, BluRay,
-// years, languages, codecs, …). This is the canonical representation
-// used for title comparison.
+// extractSeriesTokens returns the LEADING significant tokens of a title,
+// stopping at the first format marker. Tokens past the first marker are
+// release metadata — quality tags, codec, group name suffix, etc — and
+// would otherwise pollute the comparison (e.g. "Naruto.S01E01-FGT"
+// would tokenise to ["naruto", "fgt"] without the truncation).
 //
-// Used for both sides of the comparison: the search query is reduced
-// to its needles, and each release title is reduced to its series
-// portion (because the format markers naturally cut off everything
-// from SxxExx / year / quality onwards).
-func significantTitleTokens(s string) []string {
+// Stopwords are silently skipped (they don't end the series portion,
+// just don't count as content tokens).
+func extractSeriesTokens(s string, ctx mediaCtx) []string {
 	normed := normalizeTitle(s)
 	out := make([]string, 0, 8)
 	for _, w := range strings.Fields(normed) {
 		if titleStopwords[w] {
 			continue
 		}
-		if isFormatMarkerToken(w) {
-			continue
+		if isFormatMarkerToken(w, ctx) {
+			// First marker hit — everything past this point is metadata.
+			break
 		}
 		out = append(out, w)
 	}
@@ -249,21 +262,29 @@ func stripLeadingBrackets(s string) string {
 // year, source) rather than a part of the title. Used to find where
 // the series portion ends.
 //
-// The map covers the well-known scene tags; the regexes catch
-// season/episode markers (s01, e01, s01e01) and standalone 3-4 digit
-// numbers (years, anime absolute episode numbers).
-func isFormatMarkerToken(t string) bool {
+// Behaviour depends on the search context: for TV searches we ALSO
+// strip 1-2 digit standalone numbers (anime episodes like "Naruto - 01"
+// or short-padded "Naruto - 7"). For movie searches those stay in the
+// title because they can legitimately be part of it ("Apollo 13",
+// "Die Hard 2", "Toy Story 3").
+func isFormatMarkerToken(t string, ctx mediaCtx) bool {
 	if formatMarkerTokens[t] {
 		return true
 	}
 	if sxxExxPattern.MatchString(t) || exxPattern.MatchString(t) {
 		return true
 	}
-	// 3-4 digit standalone number: year (1990-2039) or anime absolute
-	// episode (001-9999). 1-2 digit numbers are kept because they can
-	// be part of the title ("Apollo 13", "Die Hard 2").
-	if len(t) >= 3 && len(t) <= 4 && allDigits(t) {
+	if !allDigits(t) {
+		return false
+	}
+	switch len(t) {
+	case 3, 4:
+		// Year or anime absolute episode (e.g. "001", "2023").
 		return true
+	case 1, 2:
+		// For TV, almost always an episode number ("01" in "Naruto 01").
+		// For movies, conservative — keep as a title token.
+		return ctx == mediaTV
 	}
 	return false
 }
@@ -319,6 +340,127 @@ var formatMarkerTokens = map[string]bool{
 	"remastered": true, "anime": true, "ova": true, "ona": true,
 	"special": true, "specials": true, "movie": true, "film": true,
 	"hdr": true, "hdr10": true, "dv": true, "10bit": true, "8bit": true,
+}
+
+// filterByEpisodeMatch drops TV releases that don't advertise the right
+// episode in their title. Needed because we now fire two Prowlarr
+// queries (SxxExx + bare "Title NN"), and the bare-NN variant can pull
+// in releases for other episodes (e.g. "Naruto 220" when we want ep 1).
+//
+// Tokenises each release title and inspects every token, tracking
+// whether we saw:
+//   - the exact SxxExx for our episode (best signal)
+//   - any SxxExx — if wrong-season-or-episode, the release is rejected
+//   - the right season alone (S0x with no Ex) — accepted as a season pack
+//   - any season alone (wrong number) — rejected
+//   - a standalone episode marker (E01, EP01, 01, 001) — accepted
+//
+// Tokenisation strips non-alphanumeric noise (dots, dashes, brackets)
+// so "Naruto.S01E01", "Naruto S01 E01" and "[Group] Naruto - S01E01"
+// all become the same token stream.
+func filterByEpisodeMatch(results []prowlarr.SearchResult, season, episode int) []prowlarr.SearchResult {
+	out := make([]prowlarr.SearchResult, 0, len(results))
+	for _, r := range results {
+		if releaseAdvertisesEpisode(r.Title, season, episode) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+var (
+	sxxExxFullPattern = regexp.MustCompile(`^s(\d{1,3})e(\d{1,4})$`)
+	seasonOnlyPattern = regexp.MustCompile(`^s(\d{1,3})$`)
+	episodeOnlyEPat   = regexp.MustCompile(`^e(\d{1,4})$`)
+	episodeOnlyEpPat  = regexp.MustCompile(`^ep(\d{1,4})$`)
+)
+
+func releaseAdvertisesEpisode(release string, season, episode int) bool {
+	cleaned := strings.ToLower(stripLeadingBrackets(release))
+	// Tokenise on any non-alphanumeric run — same idea as normalizeTitle
+	// but we keep tokens as-is (no accent folding needed for these
+	// alphanumeric markers).
+	tokens := strings.FieldsFunc(cleaned, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+	})
+
+	var (
+		hasCorrectSxxExx  bool
+		hasWrongSxxExx    bool
+		hasCorrectSeason  bool
+		hasWrongSeason    bool
+		hasStandaloneEpHit bool
+	)
+
+	for _, tok := range tokens {
+		// SxxExx — the strongest signal: explicit season + episode.
+		if m := sxxExxFullPattern.FindStringSubmatch(tok); m != nil {
+			s, _ := strconv.Atoi(m[1])
+			e, _ := strconv.Atoi(m[2])
+			if s == season && e == episode {
+				hasCorrectSxxExx = true
+			} else {
+				hasWrongSxxExx = true
+			}
+			continue
+		}
+		// Sxx alone (no episode part). A release tagged "Naruto.S01" is
+		// a season pack containing every S01 episode — accept if season
+		// matches.
+		if m := seasonOnlyPattern.FindStringSubmatch(tok); m != nil {
+			s, _ := strconv.Atoi(m[1])
+			if s == season {
+				hasCorrectSeason = true
+			} else {
+				hasWrongSeason = true
+			}
+			continue
+		}
+		// Exx — explicit episode marker, no season tag (anime + some
+		// scene releases).
+		if m := episodeOnlyEPat.FindStringSubmatch(tok); m != nil {
+			e, _ := strconv.Atoi(m[1])
+			if e == episode {
+				hasStandaloneEpHit = true
+			}
+			continue
+		}
+		// EPxx — same idea, longer prefix.
+		if m := episodeOnlyEpPat.FindStringSubmatch(tok); m != nil {
+			e, _ := strconv.Atoi(m[1])
+			if e == episode {
+				hasStandaloneEpHit = true
+			}
+			continue
+		}
+		// Pure digit token — anime absolute episode "Naruto 01" / "001".
+		// Skip 4-digit numbers (years, never episode IDs in practice).
+		if allDigits(tok) && len(tok) <= 3 {
+			n, _ := strconv.Atoi(tok)
+			if n == episode {
+				hasStandaloneEpHit = true
+			}
+			continue
+		}
+	}
+
+	// Decision tree — strongest signal first.
+	if hasCorrectSxxExx {
+		return true
+	}
+	if hasWrongSxxExx {
+		// Has SxxExx but for a different ep/season — definitely not us.
+		return false
+	}
+	if hasCorrectSeason {
+		// Season pack containing our episode — keep.
+		return true
+	}
+	if hasWrongSeason {
+		// Wrong season pack — skip even if a stray "01" digit matches.
+		return false
+	}
+	return hasStandaloneEpHit
 }
 
 // filterByReleaseYear drops releases whose year, as advertised in the

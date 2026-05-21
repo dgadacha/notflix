@@ -204,12 +204,68 @@ func (c *Client) SearchMovie(ctx context.Context, title string, year int) ([]Sea
 	return c.Search(ctx, q, MovieCategories)
 }
 
+// SearchTV fires multiple Prowlarr queries with different episode formats
+// and merges the results, keyed by GUID/infoHash/title. Indexers vary
+// wildly in their naming conventions:
+//
+//   - Scene / western indexers (TPB, 1337x, RARBG-style): "Show S01E01"
+//   - Anime indexers (Nyaa.si, AnimeTosho): "[Group] Show - 01 [1080p]"
+//     and "[Group] Show - 001 [BD]" (3-digit padding common)
+//
+// Firing one combined query for both formats would just return the
+// scene format with the anime indexers ignoring it. Firing both as
+// separate queries gets us full coverage, at the cost of an extra
+// round-trip per episode click (cheap — Prowlarr caches and the
+// handler caches the merged set for an hour).
 func (c *Client) SearchTV(ctx context.Context, title string, season, episode int) ([]SearchResult, error) {
-	q := title
-	if season > 0 && episode > 0 {
-		q = fmt.Sprintf("%s S%02dE%02d", title, season, episode)
-	} else if season > 0 {
-		q = fmt.Sprintf("%s S%02d", title, season)
+	queries := buildTVQueries(title, season, episode)
+
+	seen := map[string]bool{}
+	var merged []SearchResult
+	for _, q := range queries {
+		res, err := c.Search(ctx, q, TVCategories)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range res {
+			key := dedupeKey(r)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			merged = append(merged, r)
+		}
 	}
-	return c.Search(ctx, q, TVCategories)
+	return merged, nil
+}
+
+func buildTVQueries(title string, season, episode int) []string {
+	if episode > 0 {
+		// Always include the SxxExx variant (scene + most western
+		// indexers). Add the anime variant — just "Title NN" — so
+		// Nyaa-style indexers return matching releases too.
+		return []string{
+			fmt.Sprintf("%s S%02dE%02d", title, season, episode),
+			fmt.Sprintf("%s %02d", title, episode),
+		}
+	}
+	if season > 0 {
+		// Season pack — both formats look the same; just one query.
+		return []string{fmt.Sprintf("%s S%02d", title, season)}
+	}
+	return []string{title}
+}
+
+// dedupeKey picks the strongest identifier we have for de-duping. GUID
+// is Prowlarr's own ID (per-indexer-per-release), infoHash is the
+// torrent's content hash (same across indexers), and falling back to
+// the title is a safe last resort.
+func dedupeKey(r SearchResult) string {
+	if r.GUID != "" {
+		return "g:" + r.GUID
+	}
+	if r.InfoHash != "" {
+		return "h:" + strings.ToLower(r.InfoHash)
+	}
+	return "t:" + r.Title
 }
