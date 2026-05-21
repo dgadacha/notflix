@@ -26,7 +26,14 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 
 	v1.GET("/status", h.HandleStatus)
 
-	// TMDB proxy — the only place the API key lives.
+	// TMDB image cache — disk-backed proxy for image.tmdb.org so posters,
+	// backdrops and stills are served at LAN speed and survive browser
+	// cache evictions. Registered BEFORE the catch-all /tmdb/* so the
+	// /tmdb/img/<size>/<path> shape doesn't get swallowed by the JSON
+	// proxy.
+	v1.GET("/tmdb/img/:size/*", h.HandleTMDBImage)
+
+	// TMDB JSON proxy — the only place the API key lives.
 	v1.GET("/tmdb/*", h.HandleTMDBProxy)
 
 	// TorBox — debrid stream resolution.

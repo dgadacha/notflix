@@ -81,8 +81,21 @@ export const titleOf = (m: TMDBMedia) => m.title || m.name || ""
 export const yearOf  = (m: TMDBMedia) =>
     (m.release_date || m.first_air_date || "").slice(0, 4)
 
-export const tmdbImage = (size: string, p?: string | null) =>
-    p ? `https://image.tmdb.org/t/p/${size}${p}` : ""
+/**
+ * Build a URL for a TMDB image. Routes through the backend's cache proxy
+ * (`/api/v1/tmdb/img/<size>/<path>`) so the file is served from local
+ * disk after the first hit — instant on repeat loads, immune to browser
+ * cache evictions, and the request count to TMDB drops to once per
+ * unique image.
+ *
+ * Backwards-compatible signature: pass the TMDB path verbatim (with or
+ * without the leading slash). Empty path → empty string (caller checks).
+ */
+export const tmdbImage = (size: string, p?: string | null) => {
+    if (!p) return ""
+    const cleaned = p.startsWith("/") ? p.slice(1) : p
+    return `/api/v1/tmdb/img/${size}/${cleaned}`
+}
 
 export function mediaTypeOf(m: TMDBMedia, fallback: "movie" | "tv" = "movie"): "movie" | "tv" {
     if (m.media_type === "movie" || m.media_type === "tv") return m.media_type
