@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notflix
+  namespace: notflix
+  labels:
+    app: notflix
+spec:
+  replicas: 1
+  # SQLite db on a RWO PVC — only one pod at a time. Recreate avoids the
+  # "rolling update tries to bind the PVC twice" race during deploys.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: notflix
+  template:
+    metadata:
+      labels:
+        app: notflix
+    spec:
+      imagePullSecrets:
+        - name: gitlab-registry
+      # The runtime image pre-seeds /data/config.toml — but a PVC mount
+      # shadows that. This initContainer rewrites the [server] block every
+      # start so changes here are authoritative without a config.toml edit
+      # by hand on the PVC.
+      initContainers:
+        - name: init-config
+          image: busybox:1.36
+          command: ["sh","-c"]
+          args:
+            - |
+              set -e
+              CFG=/data/config.toml
+              touch "$CFG"
+              awk '
+                BEGIN{skip=0}
+                /^\[server\]/   {skip=1; next}
+                /^\[/ && skip==1 {skip=0}
+                skip==0
+              ' "$CFG" > "$CFG.tail"
+              {
+                echo '[server]'
+                echo 'host = "0.0.0.0"'
+                echo 'port = 43211'
+                echo 'secureMode = "lax"'
+                echo 'externalURL = "https://notflix.nc-maiz.org"'
+                echo 'accessAllowlist = ["notflix.nc-maiz.org"]'
+                echo ''
+                cat "$CFG.tail"
+              } > "$CFG.new"
+              mv "$CFG.new" "$CFG"
+              # Runtime container runs as the non-root `notflix` user (uid 999 in
+              # the Debian-slim base image). The mv above leaves the file as
+              # root:root mode 600 — fix that.
+              chown 999:999 "$CFG"
+              chmod 0644 "$CFG"
+              # Idempotent first-run datadir ownership.
+              chown -R 999:999 /data
+              rm -f "$CFG.tail"
+              echo "=== final config.toml ==="
+              cat "$CFG"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: notflix
+          image: registry.gitlab.com/kidnar/notflix:latest
+          imagePullPolicy: Always
+          args: ["--datadir=/data"]
+          ports:
+            - containerPort: 43211
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          # TCP probes — the embedded HTTP handler doesn't expose a /healthz
+          # but a successful TCP accept on 43211 means the binary is past
+          # config init.
+          readinessProbe:
+            tcpSocket:
+              port: 43211
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 43211
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: notflix-data
