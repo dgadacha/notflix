@@ -808,6 +808,30 @@ function Player({
         )
     }, [audioCodec, needsTransmux])
 
+    // Debug: log what subtitle tracks we're trying to render. Lets the
+    // user (and us) tell whether the issue is "backend returned 0 subs",
+    // "backend returned subs but with empty language tags" or "tracks
+    // mounted but the browser refused to load them".
+    React.useEffect(() => {
+        if (!sessionId) {
+            console.info(`[Notflix] subtitles: no HLS session yet (skipping <track> render)`)
+            return
+        }
+        if (subtitles.length === 0) {
+            console.info(`[Notflix] subtitles: probe returned 0 tracks`)
+            return
+        }
+        console.info(
+            `[Notflix] subtitles: ${subtitles.length} tracks from probe`,
+            subtitles.map(s => `${s.codec}/${s.language || "??"}${s.supported ? "" : " (UNSUPPORTED)"}`),
+        )
+        const resolved = resolveSubtitleTracks(subtitles, subLangPref)
+        console.info(
+            `[Notflix] subtitles: ${resolved.length} <track> rendered (pref=${subLangPref})`,
+            resolved.map(t => `${t.srcLang}${t.translateTo ? " (translated)" : ""}${t.isDefault ? " *default*" : ""}`),
+        )
+    }, [sessionId, subtitles, subLangPref])
+
     // Drive the <video> source imperatively so we can:
     //   - flip between native src and hls.js attachMedia
     //   - tear down hls.js cleanly on unmount or source switch

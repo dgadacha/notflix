@@ -419,6 +419,21 @@ func probeMediaInfo(parent context.Context, url string) (float64, string) {
 //
 // Subtitle indices are 0-based among the subtitle streams themselves,
 // not the global stream index — what we hand to `-map 0:s:N` later.
+//
+// Parser note: ffprobe's "default" output groups attributes per stream
+// in declaration order. A subtitle stream block looks like:
+//
+//     codec_name=ass
+//     codec_type=subtitle
+//     TAG:language=fre
+//     TAG:title=Forced
+//
+// The language + title tags come AFTER codec_type, so we can't flush
+// the stream on codec_type — we'd record an empty language. Instead we
+// accumulate attributes until the NEXT codec_name= (or EOF) and flush
+// the previous stream then. This caught us out on JJK VOSTFR releases
+// where every subtitle landed with Language="" and the player picked
+// none of them as preferred.
 func probeMediaFull(parent context.Context, url string) (float64, string, []SubtitleTrack) {
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
@@ -436,24 +451,18 @@ func probeMediaFull(parent context.Context, url string) (float64, string, []Subt
 		return 0, "", nil
 	}
 
-	// Parse the per-stream key=value blocks. Each stream block looks like:
-	//   codec_name=ass
-	//   codec_type=subtitle
-	//   TAG:language=fre
-	//   TAG:title=Forced
-	// Blocks are separated by the `format=` lines at the top so we just
-	// track "current stream attributes" and flush them on codec_type.
 	var (
-		dur     float64
-		audio   string
-		subs    []SubtitleTrack
-		subIdx  int
-		curName string
-		curLang string
+		dur      float64
+		audio    string
+		subs     []SubtitleTrack
+		subIdx   int
+		curName  string
+		curType  string
+		curLang  string
 		curTitle string
 	)
-	flush := func(typ string) {
-		switch typ {
+	flush := func() {
+		switch curType {
 		case "audio":
 			if audio == "" {
 				audio = strings.ToLower(curName)
@@ -468,7 +477,7 @@ func probeMediaFull(parent context.Context, url string) (float64, string, []Subt
 			})
 			subIdx++
 		}
-		curName, curLang, curTitle = "", "", ""
+		curName, curType, curLang, curTitle = "", "", "", ""
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
@@ -479,16 +488,30 @@ func probeMediaFull(parent context.Context, url string) (float64, string, []Subt
 				dur = v
 			}
 		case strings.HasPrefix(line, "codec_name="):
+			// Start of a new stream block — flush the previous one.
+			flush()
 			curName = strings.TrimPrefix(line, "codec_name=")
+		case strings.HasPrefix(line, "codec_type="):
+			curType = strings.TrimPrefix(line, "codec_type=")
 		case strings.HasPrefix(line, "TAG:language="):
 			curLang = strings.ToLower(strings.TrimPrefix(line, "TAG:language="))
 		case strings.HasPrefix(line, "TAG:title="):
 			curTitle = strings.TrimPrefix(line, "TAG:title=")
-		case strings.HasPrefix(line, "codec_type="):
-			flush(strings.TrimPrefix(line, "codec_type="))
 		}
 	}
-	log.Printf("ffprobe OK: duration=%.1fs audio=%q subs=%d", dur, audio, len(subs))
+	// Final stream — no more codec_name= lines to trigger a flush.
+	flush()
+
+	if len(subs) > 0 {
+		summary := make([]string, 0, len(subs))
+		for _, s := range subs {
+			summary = append(summary, fmt.Sprintf("%s/%s", s.Codec, s.Language))
+		}
+		log.Printf("ffprobe OK: duration=%.1fs audio=%q subs=%d [%s]",
+			dur, audio, len(subs), strings.Join(summary, ", "))
+	} else {
+		log.Printf("ffprobe OK: duration=%.1fs audio=%q subs=0", dur, audio)
+	}
 	return dur, audio, subs
 }
 
