@@ -58,11 +58,17 @@ var (
 
 // HandleStreamHLSStart — POST /api/v1/stream/hls/start
 //
-// Body: {"url": "<torbox-cdn-url>"}
+// Body: {"url": "<torbox-cdn-url>", "durationSec"?: float, "audioCodec"?: string}
 // Returns: {"sessionId", "playlistUrl", "durationSec", "audioCodec"}
+//
+// If the caller already ffprobed the URL (e.g. /torbox/play just did it),
+// they can pass `durationSec` + `audioCodec` and the HLS handler skips
+// the re-probe — saves ~1-2s on the second hop.
 func (h *Handler) HandleStreamHLSStart(c echo.Context) error {
 	var body struct {
-		URL string `json:"url"`
+		URL         string  `json:"url"`
+		DurationSec float64 `json:"durationSec,omitempty"`
+		AudioCodec  string  `json:"audioCodec,omitempty"`
 	}
 	if err := c.Bind(&body); err != nil {
 		return RespondErr(c, err)
@@ -86,9 +92,14 @@ func (h *Handler) HandleStreamHLSStart(c echo.Context) error {
 	hlsLock.Unlock()
 
 	if !exists {
-		// Probe duration + audio codec in one ffprobe call so we know
-		// the playlist length up front.
-		dur, codec := probeMediaInfo(c.Request().Context(), raw)
+		// Reuse caller's ffprobe result when provided, otherwise run
+		// our own. Either way we need a valid duration to build the
+		// VOD playlist.
+		dur := body.DurationSec
+		codec := body.AudioCodec
+		if dur == 0 {
+			dur, codec = probeMediaInfo(c.Request().Context(), raw)
+		}
 		if dur == 0 {
 			return c.JSON(http.StatusBadGateway, map[string]any{
 				"error": "ffprobe failed to read duration",

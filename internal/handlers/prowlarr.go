@@ -1,15 +1,58 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"notflix/internal/prowlarr"
 
 	"github.com/labstack/echo/v4"
 )
+
+// In-memory cache for Prowlarr search results.
+//
+// Prowlarr search fans out to multiple indexers + waits for the slowest
+// (1-3s typically). Caching repeats means clicking back on a film you
+// already opened today returns sources instantly.
+//
+// Keyed by (kind, title, year[, season, episode]). TTL is 1h — long
+// enough to absorb the same browsing session, short enough to pick up
+// new releases when the user comes back tomorrow.
+const prowlarrCacheTTL = 1 * time.Hour
+
+type prowlarrCacheEntry struct {
+	results   []prowlarr.SearchResult
+	expiresAt time.Time
+}
+
+var (
+	prowlarrCache     = map[string]*prowlarrCacheEntry{}
+	prowlarrCacheLock sync.Mutex
+)
+
+func prowlarrCacheGet(key string) ([]prowlarr.SearchResult, bool) {
+	prowlarrCacheLock.Lock()
+	defer prowlarrCacheLock.Unlock()
+	e, ok := prowlarrCache[key]
+	if !ok || time.Now().After(e.expiresAt) {
+		return nil, false
+	}
+	return e.results, true
+}
+
+func prowlarrCachePut(key string, results []prowlarr.SearchResult) {
+	prowlarrCacheLock.Lock()
+	defer prowlarrCacheLock.Unlock()
+	prowlarrCache[key] = &prowlarrCacheEntry{
+		results:   results,
+		expiresAt: time.Now().Add(prowlarrCacheTTL),
+	}
+}
 
 // Prowlarr handlers — expose three endpoints to the frontend:
 //
@@ -48,7 +91,9 @@ func (h *Handler) HandleProwlarrStatus(c echo.Context) error {
 //
 // Returns the Prowlarr release list sorted by quality heuristic and
 // annotated with TorBox cache status (so the frontend can show ✓ cached
-// badges without a second call).
+// badges without a second call). Raw Prowlarr response is cached for 1h
+// per (title, year); TorBox cache state is re-annotated on every call
+// so freshly-cached torrents show up correctly.
 func (h *Handler) HandleSearchMovie(c echo.Context) error {
 	title := c.QueryParam("title")
 	if title == "" {
@@ -56,15 +101,23 @@ func (h *Handler) HandleSearchMovie(c echo.Context) error {
 	}
 	year, _ := strconv.Atoi(c.QueryParam("year"))
 
-	results, err := h.App.Prowlarr.SearchMovie(c.Request().Context(), title, year)
-	if err != nil {
-		return RespondErr(c, err)
+	cacheKey := fmt.Sprintf("movie|%s|%d", strings.ToLower(title), year)
+	results, ok := prowlarrCacheGet(cacheKey)
+	if !ok {
+		fresh, err := h.App.Prowlarr.SearchMovie(c.Request().Context(), title, year)
+		if err != nil {
+			return RespondErr(c, err)
+		}
+		results = filterByTitleRelevance(fresh, title)
+		prowlarrCachePut(cacheKey, results)
 	}
-	results = filterByTitleRelevance(results, title)
 	return RespondOK(c, h.annotateAndSort(c, results))
 }
 
 // HandleSearchTV — GET /api/v1/prowlarr/search/tv?title=…&season=…&episode=…
+//
+// Cached separately per (title, season, episode) so flipping between
+// episodes in the same series doesn't refetch the whole show.
 func (h *Handler) HandleSearchTV(c echo.Context) error {
 	title := c.QueryParam("title")
 	if title == "" {
@@ -73,11 +126,16 @@ func (h *Handler) HandleSearchTV(c echo.Context) error {
 	season, _ := strconv.Atoi(c.QueryParam("season"))
 	episode, _ := strconv.Atoi(c.QueryParam("episode"))
 
-	results, err := h.App.Prowlarr.SearchTV(c.Request().Context(), title, season, episode)
-	if err != nil {
-		return RespondErr(c, err)
+	cacheKey := fmt.Sprintf("tv|%s|%d|%d", strings.ToLower(title), season, episode)
+	results, ok := prowlarrCacheGet(cacheKey)
+	if !ok {
+		fresh, err := h.App.Prowlarr.SearchTV(c.Request().Context(), title, season, episode)
+		if err != nil {
+			return RespondErr(c, err)
+		}
+		results = filterByTitleRelevance(fresh, title)
+		prowlarrCachePut(cacheKey, results)
 	}
-	results = filterByTitleRelevance(results, title)
 	return RespondOK(c, h.annotateAndSort(c, results))
 }
 

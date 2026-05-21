@@ -4,7 +4,7 @@
  * TMDB lives in `./tmdb.ts`. Profiles + watch history are in
  * `./profiles/profiles.ts` (carried over from Kuro, only path renamed).
  */
-import { useMutation, useQuery } from "@tanstack/react-query"
+import { QueryClient, useMutation, useQuery } from "@tanstack/react-query"
 
 const BASE = "/api/v1"
 
@@ -56,6 +56,8 @@ export type TorBoxPlayResult = {
      *  "ac3", "eac3", "dts", "truehd". Empty string when probe fails or
      *  no audio stream was found. */
     audioCodec?: string
+    /** Total duration in seconds from ffprobe. 0 on probe failure. */
+    durationSec?: number
 }
 
 /**
@@ -162,6 +164,37 @@ export function useSearchTV(title: string, season?: number, episode?: number) {
         queryKey: ["prowlarr", "search", "tv", title, season, episode],
         queryFn: () => jget(`/prowlarr/search/tv?${q}`),
         enabled: !!title,
+        staleTime: 5 * 60_000,
+    })
+}
+
+/**
+ * Fire-and-forget warmups used by the home cards on hover. They share
+ * a query key with useSearchMovie / useSearchTV so the actual /watch
+ * mount picks up the cached result instantly when the user clicks.
+ *
+ * The hover delay (~300ms) lives at the call site — we don't want a
+ * scroll past the row to spam Prowlarr.
+ */
+export function prefetchSearchMovie(qc: QueryClient, title: string, year?: number) {
+    if (!title) return
+    return qc.prefetchQuery({
+        queryKey: ["prowlarr", "search", "movie", title, year],
+        queryFn: () => jget<Release[]>(
+            `/prowlarr/search/movie?title=${encodeURIComponent(title)}${year ? `&year=${year}` : ""}`,
+        ),
+        staleTime: 5 * 60_000,
+    })
+}
+
+export function prefetchSearchTV(qc: QueryClient, title: string, season?: number, episode?: number) {
+    if (!title) return
+    const q = new URLSearchParams({ title })
+    if (season) q.set("season", String(season))
+    if (episode) q.set("episode", String(episode))
+    return qc.prefetchQuery({
+        queryKey: ["prowlarr", "search", "tv", title, season, episode],
+        queryFn: () => jget<Release[]>(`/prowlarr/search/tv?${q}`),
         staleTime: 5 * 60_000,
     })
 }

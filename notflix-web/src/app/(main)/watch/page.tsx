@@ -67,6 +67,7 @@ export default function WatchPage() {
     const [pickedRelease, setPickedRelease] = React.useState<Release | null>(null)
     const [streamUrl, setStreamUrl] = React.useState<string | null>(null)
     const [streamAudioCodec, setStreamAudioCodec] = React.useState<string>("")
+    const [streamDurationSec, setStreamDurationSec] = React.useState<number>(0)
     const [errorMsg, setErrorMsg] = React.useState<string | null>(null)
     // Lets the user opt out of the auto-pick: once they click "Changer de
     // source" we stop trying to launch the top result behind their back.
@@ -83,6 +84,7 @@ export default function WatchPage() {
         setPickedRelease(null)
         setStreamUrl(null)
         setStreamAudioCodec("")
+        setStreamDurationSec(0)
         setErrorMsg(null)
         setAutoPickDisabled(false)
         setSkipKeys(new Set())
@@ -199,12 +201,18 @@ export default function WatchPage() {
             setPickedRelease(release)
             setStreamUrl(null)
             setStreamAudioCodec("")
+            setStreamDurationSec(0)
             setErrorMsg(null)
             setPhase("preparing")
             try {
                 const result = await play.mutateAsync(payload)
                 setStreamUrl(result.streamUrl)
                 setStreamAudioCodec(result.audioCodec ?? "")
+                setStreamDurationSec(
+                    typeof (result as { durationSec?: number }).durationSec === "number"
+                        ? (result as { durationSec: number }).durationSec
+                        : 0,
+                )
                 setPhase("playing")
                 setFallbackAttempt(0)
             } catch (err) {
@@ -256,6 +264,7 @@ export default function WatchPage() {
         setPickedRelease(null)
         setStreamUrl(null)
         setStreamAudioCodec("")
+        setStreamDurationSec(0)
         setAutoPickDisabled(false)
         setSkipKeys(new Set())
         setFallbackAttempt(0)
@@ -293,6 +302,7 @@ export default function WatchPage() {
                 title={displayTitle}
                 releaseTitle={pickedRelease?.title ?? ""}
                 audioCodec={streamAudioCodec}
+                durationSec={streamDurationSec}
                 onBack={handleClose}
                 onChangeSource={handleChangeSource}
             />
@@ -617,6 +627,7 @@ function Player({
     title,
     releaseTitle,
     audioCodec,
+    durationSec,
     onBack,
     onChangeSource,
 }: {
@@ -624,6 +635,7 @@ function Player({
     title: string
     releaseTitle: string
     audioCodec: string
+    durationSec: number
     onBack: () => void
     onChangeSource: () => void
 }) {
@@ -673,14 +685,20 @@ function Player({
         }
 
         // Kick off an HLS session on the backend, then wire hls.js to
-        // the playlist URL it returns. Safari natively plays HLS, so
-        // we skip hls.js there.
+        // the playlist URL it returns. We forward the codec + duration
+        // we already learnt from /torbox/play so the backend can skip
+        // a second ffprobe (~1-2s saved). Safari natively plays HLS,
+        // so we skip hls.js there.
         ;(async () => {
             try {
                 const r = await fetch("/api/v1/stream/hls/start", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ url: src }),
+                    body: JSON.stringify({
+                        url: src,
+                        durationSec,
+                        audioCodec,
+                    }),
                 })
                 if (!r.ok) {
                     console.error("[Notflix] HLS start failed:", r.status, await r.text())

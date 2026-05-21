@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os/exec"
 	"path"
 	"strconv"
 	"strings"
@@ -252,11 +251,12 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 		return RespondErr(c, err)
 	}
 
-	// 5) Peek at the real audio codec via ffprobe so the frontend knows
-	//    whether to route through the transmux (no seek) or stream
-	//    directly (full seek). Probe failure is non-fatal — frontend
-	//    falls back to "needs transmux" by default.
-	audioCodec := probeAudioCodec(ctx, streamURL)
+	// 5) Single ffprobe call covers both pieces of info we need: the
+	//    audio codec (frontend decides direct vs HLS transmux) and the
+	//    duration (HLS playlist is built from that). The frontend
+	//    forwards both to /hls/start so the HLS handler can skip
+	//    reprobing — saves 1-2s on the second hop.
+	durationSec, audioCodec := probeMediaInfo(ctx, streamURL)
 
 	return RespondOK(c, map[string]any{
 		"streamUrl":   streamURL,
@@ -264,42 +264,9 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 		"fileId":      fileID,
 		"torrentName": ready.Name,
 		"cached":      ready.Cached,
-		"audioCodec":  audioCodec, // "aac" / "ac3" / "eac3" / "dts" / … / "" on failure
+		"audioCodec":  audioCodec,  // "aac" / "ac3" / "eac3" / "dts" / … / ""
+		"durationSec": durationSec, // 0 on probe failure
 	})
-}
-
-// probeAudioCodec runs ffprobe against the given URL and returns the
-// name of the FIRST audio stream codec ("aac", "ac3", "eac3", "dts",
-// "truehd", …) or "" if probing fails. Tied to a 6-second timeout so a
-// slow CDN doesn't block the play handler.
-//
-// We only need the audio side — the video stream is always copied
-// verbatim downstream — so we limit ffprobe to audio streams to keep
-// the output minimal.
-//
-// stderr is captured separately so a 404 / 403 / range-not-satisfiable
-// from the CDN shows up in the server log explicitly, not just as
-// "exit status 1".
-func probeAudioCodec(parent context.Context, url string) string {
-	ctx, cancel := context.WithTimeout(parent, 6*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "ffprobe",
-		"-v", "error",
-		"-select_streams", "a:0",
-		"-show_entries", "stream=codec_name",
-		"-of", "default=noprint_wrappers=1:nokey=1",
-		url,
-	)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		log.Printf("ffprobe FAIL: %v | stderr: %s", err, strings.TrimSpace(stderr.String()))
-		return ""
-	}
-	codec := strings.ToLower(strings.TrimSpace(string(out)))
-	log.Printf("ffprobe OK: audio codec = %q", codec)
-	return codec
 }
 
 // HandleTorBoxList — for an admin "manage my queue" view.
