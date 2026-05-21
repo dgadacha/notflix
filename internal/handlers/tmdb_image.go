@@ -28,9 +28,23 @@ import (
 // id), so files are immutable — `Cache-Control: max-age=31536000,
 // immutable` is safe.
 
+// validImageSizes — the full set documented at
+// https://developer.themoviedb.org/reference/configuration-details.
+//
+//   Posters    : w92, w154, w185, w342, w500, w780, original
+//   Backdrops  : w300, w780, w1280, original
+//   Stills     : w92, w185, w300, original  ← episode thumbnails live here
+//   Logos      : w45, w92, w154, w185, w300, w500, original
+//   Profiles   : w45, w185, h632, original
+//
+// We accept the union so any TMDB image path the frontend asks for goes
+// through the cache. Forgetting w300 silently broke the episode-thumbnail
+// rendering after Phase 4.4 — the handler was returning 400 and the UI
+// rendered the empty-placeholder branch with no obvious clue why.
 var validImageSizes = map[string]bool{
-	"w92": true, "w154": true, "w185": true, "w342": true, "w500": true,
-	"w780": true, "w1280": true, "h632": true, "original": true,
+	"w45": true, "w92": true, "w154": true, "w185": true, "w300": true,
+	"w342": true, "w500": true, "w780": true, "w1280": true,
+	"h632": true, "original": true,
 }
 
 func (h *Handler) HandleTMDBImage(c echo.Context) error {
