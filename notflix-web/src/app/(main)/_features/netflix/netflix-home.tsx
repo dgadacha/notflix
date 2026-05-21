@@ -1,88 +1,134 @@
-import { NetflixContinueWatching } from "@/app/(main)/_features/netflix/netflix-continue-watching"
 import { NetflixHero } from "@/app/(main)/_features/netflix/netflix-hero"
 import { NetflixRow } from "@/app/(main)/_features/netflix/netflix-row"
-import {
-    useDiscoverCurrentSeasonAnime,
-    useDiscoverPastSeasonAnime,
-    useDiscoverPopularAnime,
-    useDiscoverTrendingAnime,
-    useDiscoverTrendingMovies,
-    useDiscoverUpcomingAnime,
-} from "@/app/(main)/discover/_lib/handle-discover-queries"
+import { useDiscover, useTrending } from "@/lib/tmdb"
 import React from "react"
 import { useTranslation } from "react-i18next"
 
+/**
+ * Notflix home — hero + a stack of TMDB-fed rows.
+ *
+ * The endpoints are all served by our local Go proxy at /api/v1/tmdb, so the
+ * TMDB API key never leaves the backend. Each row owns its own query so they
+ * fetch in parallel and can fail independently.
+ */
 export function NetflixHome() {
     return (
         <div data-netflix-home className="contents">
-            {/* Hero opts out of the route's top padding so it can sit flush
-                under the transparent navbar — Netflix-style. */}
+            {/* Hero opts out of the route's top padding so it sits flush under
+                the transparent navbar — Netflix-style. */}
             <div className="-mt-16 lg:-mt-[68px]">
                 <NetflixHero />
             </div>
 
             <div className="relative z-[2] mt-4 space-y-10 pb-20">
-                <NetflixContinueWatching />
-                <TrendingRow />
-                <PopularRow />
-                <CurrentSeasonRow />
-                <PastSeasonRow />
-                <MoviesRow />
-                <UpcomingRow />
+                <TrendingMoviesRow />
+                <PopularMoviesRow />
+                <TopRatedMoviesRow />
+                <NowPlayingMoviesRow />
+                <TrendingTVRow />
+                <PopularTVRow />
+                <UpcomingMoviesRow />
             </div>
         </div>
     )
 }
 
-/*
- * Each row owns its own ref + query. This keeps the lazy `useInView` ref
- * co-located with the element it observes, instead of plumbing 6 refs through
- * the parent. The first row uses priority image loading (above the fold).
- */
+// ---------------------------------------------------------------------------
+// Movie rows
+// ---------------------------------------------------------------------------
 
-function TrendingRow() {
+function TrendingMoviesRow() {
     const { t } = useTranslation()
-    const { data, isLoading } = useDiscoverTrendingAnime()
+    const { data, isLoading } = useTrending("movie", "week")
     return (
         <NetflixRow
-            title={t("home.rows.trending")}
-            media={data?.Page?.media}
+            title={t("home.rows.trending_movies", "Films tendance")}
+            media={data?.results}
             isLoading={isLoading}
+            priorityImages
+            fallbackType="movie"
         />
     )
 }
 
-function PopularRow() {
+function PopularMoviesRow() {
     const { t } = useTranslation()
-    const ref = React.useRef<HTMLDivElement>(null)
-    const { data, isLoading } = useDiscoverPopularAnime(ref)
-    return <NetflixRow rootRef={ref} title={t("home.rows.popular")} media={data?.Page?.media} isLoading={isLoading} />
+    const { data, isLoading } = useDiscover("/movie/popular")
+    return (
+        <NetflixRow
+            title={t("home.rows.popular_movies", "Films populaires")}
+            media={data?.results}
+            isLoading={isLoading}
+            fallbackType="movie"
+        />
+    )
 }
 
-function CurrentSeasonRow() {
+function TopRatedMoviesRow() {
     const { t } = useTranslation()
-    const ref = React.useRef<HTMLDivElement>(null)
-    const { data, isLoading } = useDiscoverCurrentSeasonAnime(ref)
-    return <NetflixRow rootRef={ref} title={t("home.rows.current_season")} media={data?.Page?.media} isLoading={isLoading} />
+    const { data, isLoading } = useDiscover("/movie/top_rated")
+    return (
+        <NetflixRow
+            title={t("home.rows.top_rated_movies", "Films les mieux notés")}
+            media={data?.results}
+            isLoading={isLoading}
+            fallbackType="movie"
+        />
+    )
 }
 
-function PastSeasonRow() {
+function NowPlayingMoviesRow() {
     const { t } = useTranslation()
-    const ref = React.useRef<HTMLDivElement>(null)
-    const { data, isLoading } = useDiscoverPastSeasonAnime(ref)
-    return <NetflixRow rootRef={ref} title={t("home.rows.past_season")} media={data?.Page?.media} isLoading={isLoading} />
+    const { data, isLoading } = useDiscover("/movie/now_playing")
+    return (
+        <NetflixRow
+            title={t("home.rows.now_playing", "Au cinéma en ce moment")}
+            media={data?.results}
+            isLoading={isLoading}
+            fallbackType="movie"
+        />
+    )
 }
 
-function MoviesRow() {
+function UpcomingMoviesRow() {
     const { t } = useTranslation()
-    const ref = React.useRef<HTMLDivElement>(null)
-    const { data, isLoading } = useDiscoverTrendingMovies(ref)
-    return <NetflixRow rootRef={ref} title={t("home.rows.movies")} media={data?.Page?.media} isLoading={isLoading} />
+    const { data, isLoading } = useDiscover("/movie/upcoming")
+    return (
+        <NetflixRow
+            title={t("home.rows.upcoming_movies", "Bientôt en salles")}
+            media={data?.results}
+            isLoading={isLoading}
+            fallbackType="movie"
+        />
+    )
 }
 
-function UpcomingRow() {
+// ---------------------------------------------------------------------------
+// TV rows
+// ---------------------------------------------------------------------------
+
+function TrendingTVRow() {
     const { t } = useTranslation()
-    const ref = React.useRef<HTMLDivElement>(null)
-    const { data, isLoading } = useDiscoverUpcomingAnime(ref)
-    return <NetflixRow rootRef={ref} title={t("home.rows.upcoming")} media={data?.Page?.media} isLoading={isLoading} />
+    const { data, isLoading } = useTrending("tv", "week")
+    return (
+        <NetflixRow
+            title={t("home.rows.trending_tv", "Séries tendance")}
+            media={data?.results}
+            isLoading={isLoading}
+            fallbackType="tv"
+        />
+    )
+}
+
+function PopularTVRow() {
+    const { t } = useTranslation()
+    const { data, isLoading } = useDiscover("/tv/popular")
+    return (
+        <NetflixRow
+            title={t("home.rows.popular_tv", "Séries populaires")}
+            media={data?.results}
+            isLoading={isLoading}
+            fallbackType="tv"
+        />
+    )
 }

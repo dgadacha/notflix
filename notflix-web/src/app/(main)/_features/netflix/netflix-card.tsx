@@ -1,12 +1,11 @@
-import { AL_BaseAnime } from "@/api/generated/types"
 import { useNetflixDetailModal } from "@/app/(main)/_features/netflix/netflix-detail-modal"
-import { FORMAT_LABEL, ROW } from "@/app/(main)/_features/netflix/netflix.constants"
-import { SeaImage } from "@/components/shared/sea-image"
+import { ROW } from "@/app/(main)/_features/netflix/netflix.constants"
+import { mediaTypeOf, TMDBMedia, tmdbImage, titleOf, yearOf } from "@/lib/tmdb"
 import { cn } from "@/components/ui/core/styling"
 import React from "react"
 
 type Props = {
-    media: AL_BaseAnime
+    media: TMDBMedia
     /** Hint loader to fetch eagerly for above-the-fold rows. */
     priority?: boolean
     /**
@@ -14,31 +13,28 @@ type Props = {
      * stretches to fill its grid cell.
      */
     variant?: "row" | "grid"
+    /** Forced media type when the API didn't include one (TMDB /discover doesn't). */
+    fallbackType?: "movie" | "tv"
 }
 
-export const NetflixCard = React.memo(function NetflixCard({ media, priority, variant = "row" }: Props) {
+export const NetflixCard = React.memo(function NetflixCard({ media, priority, variant = "row", fallbackType = "movie" }: Props) {
     const { openDetail } = useNetflixDetailModal()
-    const img = media.bannerImage || media.coverImage?.extraLarge || media.coverImage?.large || ""
-    const title = media.title?.userPreferred || ""
-
-    const meta = React.useMemo(() => {
-        const parts: string[] = []
-        if (media.seasonYear) parts.push(String(media.seasonYear))
-        if (media.format) parts.push(FORMAT_LABEL[media.format] ?? media.format)
-        if (media.episodes) parts.push(`${media.episodes} ép.`)
-        return parts.join(" • ")
-    }, [media.seasonYear, media.format, media.episodes])
+    const type = mediaTypeOf(media, fallbackType)
+    // Prefer backdrop (more cinematic 16:9), fall back to poster.
+    const img = tmdbImage("w780", media.backdrop_path) || tmdbImage("w500", media.poster_path)
+    const title = titleOf(media)
+    const year = yearOf(media)
 
     return (
         <a
-            href={`/entry?id=${media.id}`}
+            href={`/title/${type}/${media.id}`}
             aria-label={title}
             onClick={(e) => {
                 // Plain left-click → modal. Cmd/Ctrl-click, middle-click, etc.
                 // → fall through to native nav so "open in new tab" still works.
                 if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
                 e.preventDefault()
-                openDetail(media.id)
+                openDetail(media.id, type)
             }}
             className={cn(
                 "group relative snap-start block cursor-pointer",
@@ -50,12 +46,11 @@ export const NetflixCard = React.memo(function NetflixCard({ media, priority, va
             )}
         >
             {img && (
-                <SeaImage
+                <img
                     src={img}
                     alt={title}
-                    fill
-                    priority={priority}
-                    className="object-cover object-center"
+                    loading={priority ? "eager" : "lazy"}
+                    className="absolute inset-0 w-full h-full object-cover object-center"
                 />
             )}
 
@@ -63,11 +58,10 @@ export const NetflixCard = React.memo(function NetflixCard({ media, priority, va
                 <p className="text-white font-semibold text-sm lg:text-base line-clamp-1 drop-shadow-md">
                     {title}
                 </p>
-                {!!meta && (
-                    <p className="text-gray-300 text-xs mt-0.5 line-clamp-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-                        {meta}
-                    </p>
-                )}
+                <p className="text-gray-300 text-xs mt-0.5 line-clamp-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                    {year}
+                    {type === "tv" && " · Série"}
+                </p>
             </div>
         </a>
     )

@@ -1,174 +1,30 @@
-import { INTERNAL_FeatureKey } from "@/api/generated/types"
-import { serverAuthTokenAtom, serverStatusAtom } from "@/app/(main)/_atoms/server-status.atoms"
-import { createNakamaHMACAuth, createServerPasswordHMACAuth } from "@/lib/server/hmac-auth"
-import { TORRENT_PROVIDER } from "@/lib/server/settings"
-import { useAtomValue } from "jotai"
-import { useAtom } from "jotai"
-import { useSetAtom } from "jotai/react"
+/**
+ * Stubbed Seanime server-status hooks.
+ *
+ * Notflix has no password gate and no "feature disabled" flags surfaced to
+ * the client; the backend just answers requests or doesn't. These hooks
+ * mirror the original signatures so files we haven't migrated yet can keep
+ * importing them.
+ */
+import { serverStatusAtom, ServerStatus } from "@/app/(main)/_atoms/server-status.atoms"
+import { useAtom, useAtomValue } from "jotai"
 import React from "react"
-import { toast } from "sonner"
 
-export function useServerStatus() {
+export function useServerStatus(): ServerStatus | null {
     return useAtomValue(serverStatusAtom)
 }
 
 export function useSetServerStatus() {
-    return useSetAtom(serverStatusAtom)
+    const [, setStatus] = useAtom(serverStatusAtom)
+    return React.useCallback((status: ServerStatus | null) => setStatus(status), [setStatus])
 }
 
-export function useCurrentUser() {
-    const serverStatus = useServerStatus()
-    return React.useMemo(() => serverStatus?.user, [serverStatus?.user])
+/** No simulated user, no AniList account — always null. */
+export function useCurrentUser(): null {
+    return null
 }
 
-export function useHasTorrentProvider() {
-    const serverStatus = useServerStatus()
-    return {
-        hasTorrentProvider: React.useMemo(() => !!serverStatus?.settings?.library?.torrentProvider && serverStatus?.settings?.library?.torrentProvider !== TORRENT_PROVIDER.NONE,
-            [serverStatus?.settings?.library?.torrentProvider]),
-    }
-}
-
-export function useHasDebridService() {
-    const serverStatus = useServerStatus()
-    return {
-        hasDebridService: React.useMemo(() => !!serverStatus?.debridSettings?.enabled && !!serverStatus?.debridSettings?.provider,
-            [serverStatus?.debridSettings]),
-    }
-}
-
-export function useHasTorrentStreaming() {
-    const serverStatus = useServerStatus()
-    return {
-        hasTorrentStreaming: React.useMemo(() => !!serverStatus?.torrentstreamSettings?.enabled,
-            [serverStatus?.torrentstreamSettings]),
-    }
-}
-
-export function useHasOnlineStreaming() {
-    const serverStatus = useServerStatus()
-    return {
-        hasOnlineStreaming: React.useMemo(() =>
-                (!!serverStatus?.settings?.library?.enableOnlinestream),
-            [serverStatus?.settings?.library]),
-    }
-}
-
-export function useSelectedDebridService() {
-    const serverStatus = useServerStatus()
-    return {
-        selectedDebridService: React.useMemo(() => serverStatus?.debridSettings?.provider,
-            [serverStatus?.debridSettings]),
-    }
-}
-
-export function useHasTorrentOrDebridInclusion() {
-    const serverStatus = useServerStatus()
-    const { hasDebridService } = useHasDebridService()
-    const { hasTorrentStreaming } = useHasTorrentStreaming()
-    const { hasOnlineStreaming } = useHasOnlineStreaming()
-    return {
-        hasStreamingEnabled: hasOnlineStreaming || hasTorrentStreaming || hasDebridService,
-        hasTorrentOrDebridInclusion: React.useMemo(() =>
-                (!!serverStatus?.debridSettings?.enabled && !!serverStatus?.debridSettings?.provider && !!serverStatus?.debridSettings?.includeDebridStreamInLibrary) ||
-                (!!serverStatus?.torrentstreamSettings?.enabled && serverStatus?.torrentstreamSettings?.includeInLibrary),
-            [serverStatus?.debridSettings, serverStatus?.torrentstreamSettings]),
-    }
-}
-
-export function useServerPassword() {
-    const serverStatus = useServerStatus()
-    const [password] = useAtom(serverAuthTokenAtom)
-    return {
-        getServerPasswordQueryParam: (symbol?: string) => {
-            if (!serverStatus?.serverHasPassword) return ""
-            return `${symbol ? `${symbol}` : "?"}password=${password ?? ""}`
-        },
-    }
-}
-
-export function useServerHMACAuth() {
-    const serverStatus = useServerStatus()
-    const [password] = useAtom(serverAuthTokenAtom)
-
-    return {
-        password,
-        getHMACTokenQueryParam: async (endpoint: string, symbol?: string): Promise<string> => {
-            if (!serverStatus?.serverHasPassword || !password) return ""
-
-            try {
-                const hmacAuth = createServerPasswordHMACAuth(password)
-                return await hmacAuth.generateQueryParam(endpoint, symbol)
-            }
-            catch (error) {
-                console.error("Failed to generate HMAC token:", error)
-                return ""
-            }
-        },
-        generateHMACToken: async (endpoint: string) => {
-            if (!serverStatus?.serverHasPassword || !password) return ""
-
-            try {
-                const hmacAuth = createServerPasswordHMACAuth(password)
-                return await hmacAuth.generateToken(endpoint)
-            }
-            catch (error) {
-                console.error("Failed to generate HMAC token:", error)
-                return ""
-            }
-        },
-    }
-}
-
-export function useNakamaHMACAuth() {
-    const serverStatus = useServerStatus()
-
-    const nakamaPassword = serverStatus?.settings?.nakama?.isHost
-        ? serverStatus?.settings?.nakama?.hostPassword
-        : serverStatus?.settings?.nakama?.remoteServerPassword
-
-    return {
-        getHMACTokenQueryParam: async (endpoint: string, symbol?: string) => {
-            if (!serverStatus?.settings?.nakama?.enabled) return ""
-
-            if (!nakamaPassword) return ""
-
-            try {
-                const hmacAuth = createNakamaHMACAuth(nakamaPassword)
-                return await hmacAuth.generateQueryParam(endpoint, symbol)
-            }
-            catch (error) {
-                console.error("Failed to generate Nakama HMAC token:", error)
-                return ""
-            }
-        },
-        generateHMACToken: async (endpoint: string) => {
-            if (!serverStatus?.settings?.nakama?.enabled) return ""
-
-            if (!nakamaPassword) return ""
-
-            try {
-                const hmacAuth = createNakamaHMACAuth(nakamaPassword)
-                return await hmacAuth.generateToken(endpoint)
-            }
-            catch (error) {
-                console.error("Failed to generate Nakama HMAC token:", error)
-                return ""
-            }
-        },
-    }
-}
-
-export function useServerDisabledFeatures() {
-    const status = useServerStatus()
-
-    return {
-        isFeatureDisabled: (feature: INTERNAL_FeatureKey) => {
-            if (!status?.disabledFeatures?.length) return false
-            return status?.disabledFeatures?.includes(feature)
-        },
-        showFeatureWarning: () => {
-            return toast.warning("This feature is disabled")
-        },
-    }
+/** Notflix has no disabled-feature gating; every feature is on. */
+export function useServerDisabledFeatures(): string[] {
+    return []
 }

@@ -1,23 +1,32 @@
-import { AL_BaseAnime } from "@/api/generated/types"
 import { NetflixCard } from "@/app/(main)/_features/netflix/netflix-card"
 import { ROW } from "@/app/(main)/_features/netflix/netflix.constants"
 import { cn } from "@/components/ui/core/styling"
 import { Skeleton } from "@/components/ui/skeleton"
+import { TMDBMedia } from "@/lib/tmdb"
 import React from "react"
 
 type Props = {
     title: string
-    media: ReadonlyArray<AL_BaseAnime | null | undefined> | undefined
+    media: ReadonlyArray<TMDBMedia | null | undefined> | undefined
     isLoading?: boolean
     /** Forwarded to the section root for in-view lazy data hooks. */
     rootRef?: React.Ref<HTMLDivElement>
     /** Mark first row above the fold so its images load eagerly. */
     priorityImages?: boolean
+    /**
+     * TMDB's /discover endpoints don't include `media_type` on each item.
+     * Rows that fetch a single kind (movies-only / tv-only) pass it down
+     * so the card knows how to route + open the modal.
+     */
+    fallbackType?: "movie" | "tv"
 }
 
-export function NetflixRow({ title, media, isLoading, rootRef, priorityImages }: Props) {
+export function NetflixRow({ title, media, isLoading, rootRef, priorityImages, fallbackType = "movie" }: Props) {
     const items = React.useMemo(
-        () => (media ?? []).filter((m): m is AL_BaseAnime => !!m),
+        () =>
+            (media ?? []).filter(
+                (m): m is TMDBMedia => !!m && (!!m.backdrop_path || !!m.poster_path),
+            ),
         [media],
     )
 
@@ -32,7 +41,14 @@ export function NetflixRow({ title, media, isLoading, rootRef, priorityImages }:
                         className={cn("flex-none aspect-video rounded-md", ROW.cardWidthClass)}
                     />
                 ))
-                : items.map(m => <NetflixCard key={m.id} media={m} priority={priorityImages} />)}
+                : items.map(m => (
+                    <NetflixCard
+                        key={`${m.media_type ?? fallbackType}-${m.id}`}
+                        media={m}
+                        priority={priorityImages}
+                        fallbackType={fallbackType}
+                    />
+                ))}
         </NetflixRowShell>
     )
 }

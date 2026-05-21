@@ -1,9 +1,13 @@
-import { AL_BaseAnime } from "@/api/generated/types"
-import { useAnilistListAnime } from "@/api/hooks/anilist.hooks"
+/**
+ * Notflix search — TMDB-backed multi-search (films + séries + people, though
+ * the card grid filters to movies + tv only since people don't have a watch
+ * page).
+ */
 import { NetflixCard } from "@/app/(main)/_features/netflix/netflix-card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { TextInput } from "@/components/ui/text-input"
 import { useDebounce } from "@/hooks/use-debounce"
+import { TMDBMedia, useTMDBSearch } from "@/lib/tmdb"
 import React from "react"
 import { useTranslation } from "react-i18next"
 import { FiSearch } from "react-icons/fi"
@@ -14,30 +18,27 @@ export function NetflixSearch() {
     const debounced = useDebounce(input.trim(), 350)
 
     const enabled = debounced.length >= 2
+    const { data, isFetching } = useTMDBSearch(enabled ? debounced : "")
 
-    const { data, isFetching } = useAnilistListAnime(
-        {
-            search: debounced,
-            page: 1,
-            perPage: 36,
-            sort: ["SEARCH_MATCH"],
-            status: ["FINISHED", "RELEASING", "NOT_YET_RELEASED", "CANCELLED", "HIATUS"],
-        },
-        enabled,
+    // Drop person results — only movie / tv have a useful card.
+    const media: TMDBMedia[] = React.useMemo(
+        () =>
+            (data?.results ?? []).filter(
+                (m) => m.media_type === "movie" || m.media_type === "tv",
+            ),
+        [data],
     )
-
-    const media = (data?.Page?.media ?? []).filter((m): m is AL_BaseAnime => !!m)
 
     return (
         <div className="px-4 sm:px-6 lg:px-16 py-6 lg:py-8 space-y-8 lg:space-y-10">
             <div className="max-w-3xl mx-auto space-y-4 lg:space-y-5 text-center">
                 <h1 className="text-2xl sm:text-3xl lg:text-4xl font-extrabold text-white tracking-tight">
-                    {t("search.title")}
+                    {t("search.title", "Rechercher")}
                 </h1>
                 <TextInput
                     autoFocus
                     size="lg"
-                    placeholder={t("search.placeholder")}
+                    placeholder={t("search.placeholder", "Films, séries…")}
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     leftIcon={<FiSearch className="size-5" />}
@@ -47,7 +48,7 @@ export function NetflixSearch() {
 
             {!enabled && (
                 <p className="text-center text-[--muted] py-12">
-                    {t("search.start_typing")}
+                    {t("search.start_typing", "Tapez au moins 2 caractères pour lancer la recherche.")}
                 </p>
             )}
 
@@ -61,13 +62,19 @@ export function NetflixSearch() {
 
             {enabled && !isFetching && media.length === 0 && (
                 <p className="text-center text-[--muted] py-12">
-                    {t("search.no_results")}
+                    {t("search.no_results", "Aucun résultat.")}
                 </p>
             )}
 
             {media.length > 0 && (
                 <ResultGrid>
-                    {media.map(m => <NetflixCard key={m.id} media={m} variant="grid" />)}
+                    {media.map(m => (
+                        <NetflixCard
+                            key={`${m.media_type}-${m.id}`}
+                            media={m}
+                            variant="grid"
+                        />
+                    ))}
                 </ResultGrid>
             )}
         </div>
