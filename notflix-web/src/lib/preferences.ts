@@ -68,3 +68,26 @@ export function releaseMatchesAudio(title: string, pref: AudioPref): boolean {
     const isFrench = releaseHasFrenchAudio(title)
     return pref === "fr" ? isFrench : !isFrench
 }
+
+/**
+ * Audio codecs that Chrome can't decode (Safari can — Apple has the
+ * Dolby licence — but Notflix's typical user is on Chrome). Releases
+ * tagged with one of these play the video silently and the volume
+ * control is greyed out. The release picker filters them out unless
+ * nothing else is available.
+ */
+const INCOMPATIBLE_AUDIO_TOKENS = [
+    "ddp",      // Dolby Digital Plus (DDP2.0, DDP5.1)
+    "dd+",      // Alternative spelling
+    "eac3",     // Enhanced AC-3
+    "e-ac3",
+    "e-ac-3",
+    "dts",      // DTS Core / DTS-HD / DTS-X
+    "truehd",   // Dolby TrueHD
+    "atmos",    // Dolby Atmos (usually muxed on top of TrueHD or EAC3)
+]
+
+export function releaseHasIncompatibleAudio(title: string): boolean {
+    const t = title.toLowerCase()
+    return INCOMPATIBLE_AUDIO_TOKENS.some(tok => t.includes(tok))
+}

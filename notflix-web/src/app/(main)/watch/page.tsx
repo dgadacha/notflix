@@ -23,6 +23,7 @@ import {
     AudioPref,
     QualityPref,
     releaseHasFrenchAudio,
+    releaseHasIncompatibleAudio,
     releaseMatchesAudio,
     releaseMatchesQuality,
 } from "@/lib/preferences"
@@ -95,19 +96,31 @@ export default function WatchPage() {
 
     const play = useTorBoxPlay()
 
-    // Apply the user's quality / audio prefs as a post-search filter. The
-    // backend score still drives the ranking; we just drop everything that
-    // doesn't match. If the filter wipes the list, we fall back to the
-    // unfiltered set with a non-blocking warning so the user can still play.
+    // Apply the user's quality / audio prefs as a post-search filter, then
+    // drop browser-incompatible audio codecs (Chrome can't decode DDP /
+    // DTS / TrueHD / Atmos; Safari can but it's a minority). If a filter
+    // step wipes the list, we relax it gracefully so the user can still
+    // play *something*.
     const filteredReleases = React.useMemo(() => {
         const all = search.data ?? []
-        if (qualityPref === "auto" && audioPref === "auto") return all
-        const filtered = all.filter(
-            r =>
-                releaseMatchesQuality(r.quality, qualityPref) &&
-                releaseMatchesAudio(r.title, audioPref),
-        )
-        return filtered.length > 0 ? filtered : all
+        if (all.length === 0) return all
+
+        // Step 1: user prefs (quality + lang)
+        const prefMatched =
+            qualityPref === "auto" && audioPref === "auto"
+                ? all
+                : all.filter(
+                    r =>
+                        releaseMatchesQuality(r.quality, qualityPref) &&
+                        releaseMatchesAudio(r.title, audioPref),
+                )
+        const base = prefMatched.length > 0 ? prefMatched : all
+
+        // Step 2: browser-decodable audio. Keep DDP/DTS/etc. as a last-
+        // resort if every release would be filtered out — better a muted
+        // playback than nothing at all.
+        const browserOk = base.filter(r => !releaseHasIncompatibleAudio(r.title))
+        return browserOk.length > 0 ? browserOk : base
     }, [search.data, qualityPref, audioPref])
 
     // True when the user set a non-auto pref but nothing matched, so we
