@@ -252,8 +252,10 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 	}
 
 	// 5) Single ffprobe call covers most of what we need for playback:
-	//    duration + audio codec + every embedded subtitle stream.
-	durationSec, audioCodec, _ := probeMediaFull(ctx, streamURL)
+	//    duration + audio codec + every embedded subtitle stream. The
+	//    result is passed through to openHLSSession so it doesn't
+	//    re-probe (saves 1-2 s on the second hop).
+	durationSec, audioCodec, embeddedSubs := probeMediaFull(ctx, streamURL)
 
 	// 6) Many anime releases ship subtitles as sidecar files in the
 	//    same torrent (.ass / .srt / .vtt). Enumerate them and ask
@@ -290,7 +292,7 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 	//    itself works.
 	var sessionID string
 	var allSubs []SubtitleTrack
-	if sess, err := openHLSSession(ctx, streamURL, durationSec, audioCodec, externals); err == nil {
+	if sess, err := openHLSSession(ctx, streamURL, durationSec, audioCodec, embeddedSubs, externals); err == nil {
 		sessionID = sess.id
 		allSubs = sess.subtitles
 	}
