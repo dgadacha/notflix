@@ -69,18 +69,25 @@ export function useLogin() {
 }
 
 export function useLogout() {
-    const qc = useQueryClient()
     return useMutation<boolean, Error, void>({
         mutationFn: async () => {
             await fetch("/api/v1/auth/logout", { method: "POST" })
             return true
         },
         onSuccess: () => {
-            // Wipe every cached query — different user might land
-            // here next, and we don't want their profile / history
-            // bleeding into the previous account's view.
-            qc.clear()
-            qc.setQueryData([...QK_ME], null)
+            // Hard reload after logout — gives us three things at once:
+            //   1. Bulletproof state reset: React Query cache, jotai
+            //      atoms, in-memory hls.js instances, everything goes
+            //      back to defaults. No risk of the previous user's
+            //      profile / history leaking into the next session.
+            //   2. No timing fragility: relying on qc.clear() + a
+            //      single render pass to swap MainLayout → NetflixLogin
+            //      was flaky in practice (observers weren't always
+            //      notified before the next paint).
+            //   3. Cookie state lines up with the freshly-rendered
+            //      app — no half-second window where the layout still
+            //      thinks the user is authed.
+            window.location.href = "/"
         },
     })
 }
