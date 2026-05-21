@@ -27,6 +27,7 @@ import {
     releaseMatchesAudio,
     releaseMatchesQuality,
 } from "@/lib/preferences"
+import { HiOutlineSpeakerWave } from "react-icons/hi2"
 import { titleOf, tmdbImage, useTMDBDetail, yearOf } from "@/lib/tmdb"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/components/ui/core/styling"
@@ -620,6 +621,22 @@ function Player({
     const { t } = useTranslation()
     const videoRef = React.useRef<HTMLVideoElement>(null)
 
+    // Auto-enable the ffmpeg transmux when the picked release's name
+    // signals an audio codec this browser said it can't decode. The
+    // user can also flip it manually if they hit a silent file even
+    // when feature-detect said yes.
+    const [useTransmux, setUseTransmux] = React.useState<boolean>(
+        () => releaseHasIncompatibleAudio(releaseTitle),
+    )
+    React.useEffect(() => {
+        // Reset on release change (back-to-picker → new pick).
+        setUseTransmux(releaseHasIncompatibleAudio(releaseTitle))
+    }, [releaseTitle])
+
+    const videoSrc = useTransmux
+        ? `/api/v1/stream/transmux?url=${encodeURIComponent(src)}`
+        : src
+
     // Picture-in-Picture on tab blur — Netflix-style "keep playing while I
     // check Slack". Restored when the user comes back.
     React.useEffect(() => {
@@ -641,7 +658,7 @@ function Player({
 
     return (
         <div className="fixed inset-0 z-[100] bg-black flex flex-col">
-            {/* Top bar — back button, title, change-source escape hatch. */}
+            {/* Top bar — back button, title, transmux toggle, change-source. */}
             <div className="absolute top-0 inset-x-0 z-10 p-3 sm:p-4 flex items-center gap-2 sm:gap-3 bg-gradient-to-b from-black/80 to-transparent">
                 <button
                     type="button"
@@ -655,6 +672,36 @@ function Player({
                     <p className="text-white font-semibold truncate">{title}</p>
                     <p className="text-[--muted] text-xs truncate">{releaseTitle}</p>
                 </div>
+
+                {/* Audio AAC transmux toggle — hidden on mobile to save
+                    space; the desktop tooltip explains the trade-off. */}
+                <button
+                    type="button"
+                    onClick={() => setUseTransmux(v => !v)}
+                    title={
+                        useTransmux
+                            ? t(
+                                "watch.transmux_on_tooltip",
+                                "Audio reconverti en AAC par le serveur. Désactiver pour la qualité d'origine.",
+                            )
+                            : t(
+                                "watch.transmux_off_tooltip",
+                                "Activer si pas de son — Notflix reconvertit l'audio en AAC compatible navigateur.",
+                            )
+                    }
+                    className={cn(
+                        "hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors",
+                        useTransmux
+                            ? "bg-brand-500/30 text-white border border-brand-500/60"
+                            : "bg-white/10 text-white hover:bg-white/20",
+                    )}
+                >
+                    <HiOutlineSpeakerWave className="size-4" />
+                    {useTransmux
+                        ? t("watch.transmux_on", "Audio AAC")
+                        : t("watch.transmux_off", "Audio")}
+                </button>
+
                 <button
                     type="button"
                     onClick={onChangeSource}
@@ -665,15 +712,19 @@ function Player({
                 </button>
             </div>
 
+            {/* key={videoSrc} forces a fresh <video> when the user toggles
+                the transmux — otherwise the browser keeps trying to load
+                the previous URL into the existing element. */}
             <video
+                key={videoSrc}
                 ref={videoRef}
-                src={src}
+                src={videoSrc}
                 autoPlay
                 controls
                 playsInline
                 className="w-full h-full object-contain"
                 onError={() => {
-                    console.error("[Notflix] video error on", src)
+                    console.error("[Notflix] video error on", videoSrc)
                 }}
             />
         </div>

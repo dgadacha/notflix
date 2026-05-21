@@ -44,6 +44,12 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	pr.GET("/search/movie", h.HandleSearchMovie)
 	pr.GET("/search/tv", h.HandleSearchTV)
 
+	// Stream transmux — pipes a TorBox URL through ffmpeg to swap the
+	// audio codec for AAC. Used as a fallback when the browser can't
+	// decode the source audio (DDP / DTS / TrueHD on non-Apple Chrome).
+	s := v1.Group("/stream")
+	s.GET("/transmux", h.HandleStreamTransmux)
+
 	// Profiles
 	p := v1.Group("/profiles")
 	p.GET("", h.HandleListProfiles)
