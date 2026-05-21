@@ -84,6 +84,37 @@ type hlsSession struct {
 	subtitles    []SubtitleTrack
 	externalSubs []externalSub // per-index URL/filename for ext_<idx>.vtt
 	lastUsed     time.Time
+
+	// Subtitle-prep state — populated when the frontend POSTs to
+	// /prep. The watch page polls the GET counterpart to render a
+	// progress bar before transitioning to actual playback.
+	prepMu sync.Mutex
+	prep   SubPrepStatus
+}
+
+// SubPrepStatus is what the watch page polls to drive its
+// "Préparation des sous-titres" overlay.
+type SubPrepStatus struct {
+	// State machine:
+	//   idle         — no prep requested yet (or lang was "off")
+	//   picking      — backend deciding which native track to use
+	//   extracting   — ffmpeg pulling the chosen sub from the source
+	//   translating  — Claude rewriting cues into the target language
+	//   ready        — cache file written, frontend can start playback
+	//   failed       — see Error for the reason
+	State string `json:"state"`
+	// 0-100. For "extracting" it climbs slowly toward 30; for
+	// "translating" it walks linearly with batch completion.
+	Progress int `json:"progress"`
+	// Index into session.subtitles of the source we picked. -1 when
+	// no suitable source was available.
+	ChosenSubIdx int `json:"chosenSubIdx"`
+	// Language tag of the chosen source (ISO-639 from ffprobe).
+	ChosenLang string `json:"chosenLang"`
+	// True when ChosenLang != requested → Claude is invoked.
+	WillTranslate bool   `json:"willTranslate"`
+	TargetLang    string `json:"targetLang"`
+	Error         string `json:"error,omitempty"`
 }
 
 var (
@@ -320,147 +351,271 @@ func (h *Handler) serveHLSExternalSubtitle(c echo.Context, sess *hlsSession, fil
 	return nil
 }
 
-// prewarmSessionSubtitles kicks off ffmpeg extractions for every
-// supported subtitle in the session, writing results directly into the
-// disk cache. Meant to run as a background goroutine straight after
-// /torbox/play returns, so by the time the user opens the CC menu
-// (or scrubs to a position that triggers a track load) the bytes are
-// already on disk — instant response instead of a 1-3 min cold extract.
+// pickSubtitleForLang chooses ONE subtitle source for the user's
+// preferred language, prioritising in this order:
 //
-// Embedded subs are extracted in a SINGLE ffmpeg invocation with one
-// output per track. ffmpeg reads the source file once and demuxes all
-// the subtitle streams in parallel — much cheaper than N separate
-// ffmpeg processes each reading the whole MKV from TorBox's CDN.
+//   1. A native track in the preferred language (best — no translation).
+//   2. A native track in English (good source for Claude → target).
+//   3. A native track in Japanese (anime fallback).
+//   4. The first supported track of any language.
 //
-// External (sidecar) subs run sequentially since each has its own URL.
-// They're tiny so the loop is fast.
-//
-// Errors are logged but never propagated — pre-warm is best-effort.
-// The on-demand extraction path still works as a fallback.
-func (h *Handler) prewarmSessionSubtitles(sess *hlsSession) {
-	if sess == nil {
-		return
+// Returns -1 when no supported subtitle exists in the session. The
+// boolean reports whether Claude translation is needed.
+func pickSubtitleForLang(subs []SubtitleTrack, prefLang string) (chosenIdx int, willTranslate bool) {
+	if prefLang == "" || prefLang == "off" {
+		return -1, false
+	}
+	if prefLang == "auto" {
+		prefLang = "fr"
 	}
 
-	// Collect embedded subs that aren't already cached. Two slices
-	// instead of a struct so the helper signature stays plain.
-	var cacheIdxs []int  // per-subtitles[] position, used for cache key
-	var streamIdxs []int // ffmpeg's `0:s:N` index
-	for i, t := range sess.subtitles {
-		if t.Source != "embedded" || !t.Supported {
-			continue
+	matches := func(track SubtitleTrack, wantCode string) bool {
+		if !track.Supported {
+			return false
 		}
-		if h.hasCachedTranslation(sess.id, i, "") {
-			continue
-		}
-		cacheIdxs = append(cacheIdxs, i)
-		streamIdxs = append(streamIdxs, t.Index)
+		return languageMatches(track.Language, wantCode)
 	}
 
-	if len(cacheIdxs) > 0 {
-		h.prewarmEmbeddedBatch(sess, cacheIdxs, streamIdxs)
+	// 1. Preferred lang native.
+	for i, t := range subs {
+		if matches(t, prefLang) {
+			return i, false
+		}
 	}
-
-	// External subs — one ffmpeg per URL, sequential.
-	for i, t := range sess.subtitles {
-		if t.Source != "external" || !t.Supported {
-			continue
+	// 2. English (translated).
+	for i, t := range subs {
+		if matches(t, "en") {
+			return i, true
 		}
-		cacheIdx := t.Index + 10_000
-		if h.hasCachedTranslation(sess.id, cacheIdx, "") {
-			continue
-		}
-		ext := sess.externalSubs[t.Index]
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		out, err := h.extractExternalSubtitleVTT(ctx, ext.URL)
-		cancel()
-		if err != nil {
-			log.Printf("hls prewarm: external sub %d (%s) failed: %v", i, ext.Filename, err)
-			continue
-		}
-		h.writeCachedTranslation(sess.id, cacheIdx, "", out)
 	}
+	// 3. Japanese (translated).
+	for i, t := range subs {
+		if matches(t, "ja") {
+			return i, true
+		}
+	}
+	// 4. First supported, any language (translated).
+	for i, t := range subs {
+		if t.Supported {
+			return i, true
+		}
+	}
+	return -1, false
 }
 
-// prewarmEmbeddedBatch runs ONE ffmpeg invocation with multiple
-// outputs to extract every supplied subtitle track in a single pass
-// over the source file.
+// languageMatches compares an ffprobe language tag (often ISO-639-2
+// like "fre") against a BCP-47 user code (typically 2-letter "fr").
+// Both directions tolerated; lowercase, normalised.
+func languageMatches(probe, wantCode string) bool {
+	probe = strings.ToLower(probe)
+	wantCode = strings.ToLower(wantCode)
+	if probe == "" || wantCode == "" {
+		return false
+	}
+	if probe == wantCode {
+		return true
+	}
+	// Map 2-letter to 3-letter and vice versa via translateLangName's
+	// "English name" round-trip — if both reduce to the same name,
+	// they're the same language.
+	if translateLangName(probe) == translateLangName(wantCode) {
+		return true
+	}
+	return false
+}
+
+// startSubPrep is the entry point for the "prepare a single sub before
+// playback" flow. Idempotent: re-calling on the same session+lang
+// returns the existing status instead of restarting.
 //
-// Layout: `ffmpeg -i <src> -map 0:s:0 -c:s webvtt -f webvtt out0.tmp
-//                          -map 0:s:1 -c:s webvtt -f webvtt out1.tmp ...`
-// Each output's args (everything between two outputs) apply only to
-// that output. ffmpeg demuxes the source ONCE.
-func (h *Handler) prewarmEmbeddedBatch(sess *hlsSession, cacheIdxs, streamIdxs []int) {
-	if len(cacheIdxs) == 0 || len(cacheIdxs) != len(streamIdxs) {
-		return
+// Spawns a background goroutine that updates session.prep as it
+// progresses. Frontend polls via HandleSubPrepStatus.
+func (h *Handler) startSubPrep(sess *hlsSession, prefLang string) SubPrepStatus {
+	sess.prepMu.Lock()
+	current := sess.prep
+	// If a prep is already in flight or done for THIS language, return
+	// its current status. "lang=off" is also a fast-path no-op.
+	if prefLang == "" || prefLang == "off" {
+		sess.prep = SubPrepStatus{State: "ready", Progress: 100, ChosenSubIdx: -1, TargetLang: prefLang}
+		out := sess.prep
+		sess.prepMu.Unlock()
+		return out
 	}
-	cacheDir := filepath.Dir(h.translateSubtitleCachePath(sess.id, 0, ""))
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-		log.Printf("hls prewarm: mkdir cache dir: %v", err)
-		return
+	if current.State == "ready" && current.TargetLang == prefLang {
+		sess.prepMu.Unlock()
+		return current
+	}
+	if (current.State == "extracting" || current.State == "translating") && current.TargetLang == prefLang {
+		sess.prepMu.Unlock()
+		return current
 	}
 
-	args := []string{
-		"-hide_banner",
-		"-loglevel", "warning",
-		"-i", sess.url,
+	chosenIdx, willTranslate := pickSubtitleForLang(sess.subtitles, prefLang)
+	if chosenIdx < 0 {
+		// No suitable source — mark ready (with no track) so the
+		// frontend doesn't hang waiting.
+		sess.prep = SubPrepStatus{State: "ready", Progress: 100, ChosenSubIdx: -1, TargetLang: prefLang}
+		out := sess.prep
+		sess.prepMu.Unlock()
+		return out
 	}
-	tmpPaths := make([]string, 0, len(cacheIdxs))
-	finalPaths := make([]string, 0, len(cacheIdxs))
-	for i, ci := range cacheIdxs {
-		final := h.translateSubtitleCachePath(sess.id, ci, "")
-		tmp := final + ".tmp"
-		finalPaths = append(finalPaths, final)
-		tmpPaths = append(tmpPaths, tmp)
-		args = append(args,
-			"-map", fmt.Sprintf("0:s:%d", streamIdxs[i]),
-			"-c:s", "webvtt",
-			"-f", "webvtt",
-			"-y", // overwrite tmp from a previous crash
-			tmp,
+	chosen := sess.subtitles[chosenIdx]
+	sess.prep = SubPrepStatus{
+		State:         "picking",
+		Progress:      5,
+		ChosenSubIdx:  chosenIdx,
+		ChosenLang:    chosen.Language,
+		TargetLang:    prefLang,
+		WillTranslate: willTranslate,
+	}
+	out := sess.prep
+	sess.prepMu.Unlock()
+
+	go h.runSubPrep(sess, chosenIdx, prefLang, willTranslate)
+	return out
+}
+
+// runSubPrep drives the prep state machine: picking → extracting →
+// (optionally) translating → ready.
+func (h *Handler) runSubPrep(sess *hlsSession, chosenIdx int, targetLang string, willTranslate bool) {
+	setState := func(state string, progress int, errMsg string) {
+		sess.prepMu.Lock()
+		sess.prep.State = state
+		sess.prep.Progress = progress
+		if errMsg != "" {
+			sess.prep.Error = errMsg
+		}
+		sess.prepMu.Unlock()
+	}
+
+	track := sess.subtitles[chosenIdx]
+
+	// Step 1: Extract raw VTT (unless already cached).
+	rawCacheIdx := chosenIdx
+	if track.Source == "external" {
+		rawCacheIdx = track.Index + 10_000
+	}
+
+	var raw []byte
+	if cached := h.readCachedTranslation(sess.id, rawCacheIdx, ""); cached != nil {
+		raw = cached
+		setState("extracting", 30, "")
+	} else {
+		setState("extracting", 10, "")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		var (
+			out []byte
+			err error
 		)
+		if track.Source == "external" {
+			ext := sess.externalSubs[track.Index]
+			out, err = h.extractExternalSubtitleVTT(ctx, ext.URL)
+		} else {
+			out, err = h.extractSubtitleVTT(ctx, sess.url, track.Index)
+		}
+		cancel()
+		if err != nil || len(out) == 0 {
+			log.Printf("hls prep: extract failed: %v", err)
+			setState("failed", 0, fmt.Sprintf("extraction failed: %v", err))
+			return
+		}
+		h.writeCachedTranslation(sess.id, rawCacheIdx, "", out)
+		raw = out
+		setState("extracting", 50, "")
 	}
 
-	log.Printf("hls prewarm: batch extracting %d embedded subs for session %s",
-		len(cacheIdxs), sess.id)
-	start := time.Now()
-
-	// 10 min covers a feature-length anime over a slow CDN. ffmpeg
-	// only reads the source once but still has to find the last
-	// subtitle event for each track, which means reading near the
-	// end of the file.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	dur := time.Since(start)
-
-	if err != nil {
-		log.Printf("hls prewarm: ffmpeg failed after %s: %v | %s",
-			dur, err, strings.TrimSpace(stderr.String()))
-		// Clean up the .tmp files; the on-demand path will retry.
-		for _, p := range tmpPaths {
-			_ = os.Remove(p)
-		}
+	// Step 2: Translation (only when needed).
+	if !willTranslate {
+		setState("ready", 100, "")
+		log.Printf("hls prep: session %s ready (native %s)", sess.id, track.Language)
 		return
 	}
 
-	// Promote .tmp → final atomically per file.
-	ok := 0
-	for i, tmp := range tmpPaths {
-		info, statErr := os.Stat(tmp)
-		if statErr != nil || info.Size() == 0 {
-			_ = os.Remove(tmp)
-			continue
-		}
-		if err := os.Rename(tmp, finalPaths[i]); err == nil {
-			ok++
-		}
+	// Already translated and cached?
+	if cached := h.readCachedTranslation(sess.id, rawCacheIdx, targetLang); cached != nil {
+		setState("ready", 100, "")
+		log.Printf("hls prep: session %s ready (cached translation %s→%s)",
+			sess.id, track.Language, targetLang)
+		return
 	}
-	log.Printf("hls prewarm: batch done in %s, %d/%d subs cached",
-		dur, ok, len(cacheIdxs))
+
+	if !h.App.Anthropic.HasKey() {
+		// No Claude — fall back to the raw track (user sees source-lang
+		// subtitles, better than nothing).
+		setState("ready", 100, "no anthropic key — serving native subs")
+		log.Printf("hls prep: session %s ready (no claude key, serving %s)",
+			sess.id, track.Language)
+		return
+	}
+
+	setState("translating", 55, "")
+	trCtx, cancelTr := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancelTr()
+	progressCb := func(done, total int) {
+		// 55-95 % range belongs to translation.
+		if total == 0 {
+			return
+		}
+		p := 55 + (done*40)/total
+		if p > 95 {
+			p = 95
+		}
+		setState("translating", p, "")
+	}
+	translated, err := translateVTTWithProgress(trCtx, h.App.Anthropic, raw, targetLang, progressCb)
+	if err != nil || len(translated) == 0 {
+		log.Printf("hls prep: translation failed: %v", err)
+		// Fall back to native — better than blocking playback forever.
+		setState("ready", 100, fmt.Sprintf("translation failed: %v — serving native", err))
+		return
+	}
+	h.writeCachedTranslation(sess.id, rawCacheIdx, targetLang, translated)
+	setState("ready", 100, "")
+	log.Printf("hls prep: session %s ready (claude %s→%s)",
+		sess.id, track.Language, targetLang)
+}
+
+// HandleSubPrepStart — POST /api/v1/stream/hls/:sessionId/prep
+// Body: {"lang": "fr"}
+// Returns the current SubPrepStatus (which may have just been kicked
+// off, or already in flight, or already ready).
+func (h *Handler) HandleSubPrepStart(c echo.Context) error {
+	sessionID := c.Param("sessionId")
+	hlsLock.Lock()
+	sess, ok := hlsSessions[sessionID]
+	if ok {
+		sess.lastUsed = time.Now()
+	}
+	hlsLock.Unlock()
+	if !ok {
+		return c.JSON(http.StatusNotFound, map[string]any{"error": "session expired"})
+	}
+	var body struct {
+		Lang string `json:"lang"`
+	}
+	_ = c.Bind(&body)
+	status := h.startSubPrep(sess, body.Lang)
+	return RespondOK(c, status)
+}
+
+// HandleSubPrepStatus — GET /api/v1/stream/hls/:sessionId/prep
+// Returns the current state of the prep machinery. Polled by the
+// watch page every ~1 s to drive the progress bar.
+func (h *Handler) HandleSubPrepStatus(c echo.Context) error {
+	sessionID := c.Param("sessionId")
+	hlsLock.Lock()
+	sess, ok := hlsSessions[sessionID]
+	if ok {
+		sess.lastUsed = time.Now()
+	}
+	hlsLock.Unlock()
+	if !ok {
+		return c.JSON(http.StatusNotFound, map[string]any{"error": "session expired"})
+	}
+	sess.prepMu.Lock()
+	status := sess.prep
+	sess.prepMu.Unlock()
+	return RespondOK(c, status)
 }
 
 // extractExternalSubtitleVTT converts a sidecar subtitle file (HTTP

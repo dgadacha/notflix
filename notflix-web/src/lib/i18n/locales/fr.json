@@ -56,7 +56,15 @@
   "watch": {
     "start": "Lancer la lecture",
     "resume_at": "Reprendre à",
-    "click_hint": "Les navigateurs bloquent l'autoplay dans un nouvel onglet — un clic et c'est parti."
+    "click_hint": "Les navigateurs bloquent l'autoplay dans un nouvel onglet — un clic et c'est parti.",
+    "sub_prep_starting": "Préparation des sous-titres...",
+    "sub_prep_picking": "Choix de la meilleure source de sous-titres...",
+    "sub_prep_extracting": "Extraction des sous-titres depuis la vidéo...",
+    "sub_prep_translating": "Traduction des sous-titres via Claude...",
+    "sub_prep_ready": "Sous-titres prêts, lancement…",
+    "sub_prep_failed": "Préparation échouée — lecture sans sous-titres.",
+    "sub_prep_translate_note": "Aucun sous-titre dans la langue choisie — Claude traduit depuis {{lang}}. La traduction est mise en cache, donc le prochain lancement sera instantané.",
+    "sub_prep_skip": "Lancer sans attendre"
   },
   "profiles": {
     "who_is_watching": "Qui regarde ?",

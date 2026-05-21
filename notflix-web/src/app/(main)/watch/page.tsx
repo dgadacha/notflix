@@ -20,7 +20,17 @@
  */
 import { useNetflixDetailModal } from "@/app/(main)/_features/netflix/netflix-detail-modal"
 import { NetflixWatchHistorySaver } from "@/app/(main)/_features/netflix/netflix-watch-history-saver"
-import { Release, releaseTorBoxPayload, SubtitleTrack, useSearchMovie, useSearchTV, useTorBoxPlay } from "@/lib/notflix-api"
+import {
+    getSubPrepStatus,
+    Release,
+    releaseTorBoxPayload,
+    startSubPrep,
+    SubPrepStatus,
+    SubtitleTrack,
+    useSearchMovie,
+    useSearchTV,
+    useTorBoxPlay,
+} from "@/lib/notflix-api"
 import Hls from "hls.js"
 import {
     AudioPref,
@@ -44,7 +54,7 @@ import { useTranslation } from "react-i18next"
 import { BiArrowBack, BiPlay, BiRefresh, BiSolidCheckCircle } from "react-icons/bi"
 import { FiLoader } from "react-icons/fi"
 
-type Phase = "searching" | "picking" | "preparing" | "playing" | "error"
+type Phase = "searching" | "picking" | "preparing" | "preparing_subs" | "playing" | "error"
 
 export default function WatchPage() {
     const { t } = useTranslation()
@@ -100,6 +110,7 @@ export default function WatchPage() {
     const [streamDurationSec, setStreamDurationSec] = React.useState<number>(0)
     const [streamSubtitles, setStreamSubtitles] = React.useState<SubtitleTrack[]>([])
     const [streamSessionId, setStreamSessionId] = React.useState<string>("")
+    const [subPrep, setSubPrep] = React.useState<SubPrepStatus | null>(null)
     const [errorMsg, setErrorMsg] = React.useState<string | null>(null)
     // Lets the user opt out of the auto-pick: once they click "Changer de
     // source" we stop trying to launch the top result behind their back.
@@ -123,6 +134,7 @@ export default function WatchPage() {
         setStreamDurationSec(0)
         setStreamSubtitles([])
         setStreamSessionId("")
+        setSubPrep(null)
         setErrorMsg(null)
         // Honour the settings preference on the reset too — manual mode
         // means "always stop at the picker", not "stop the first time".
@@ -255,7 +267,14 @@ export default function WatchPage() {
                 )
                 setStreamSubtitles(result.subtitles ?? [])
                 setStreamSessionId(result.sessionId ?? "")
-                setPhase("playing")
+                // If subtitles are disabled in prefs, or we have no
+                // session id (probe failed), skip the prep step and
+                // play immediately.
+                if (subLangPref === "off" || !result.sessionId || (result.subtitles ?? []).length === 0) {
+                    setPhase("playing")
+                } else {
+                    setPhase("preparing_subs")
+                }
                 setFallbackAttempt(0)
             } catch (err) {
                 console.warn("[Notflix] release failed, trying next:", release.title, err)
@@ -321,6 +340,61 @@ export default function WatchPage() {
         void launchRelease(filteredReleases[0])
     }, [phase, resumeRelease, search.isFetching, search.isError, filteredReleases, autoPickDisabled, launchRelease, t])
 
+    // Subtitle prep loop — fires when phase enters "preparing_subs".
+    // Kicks off the backend's extract+translate pipeline, polls the
+    // status endpoint every second, and transitions to "playing" once
+    // the backend reports `ready` (or `failed`, in which case we still
+    // proceed — the player tolerates missing subs).
+    React.useEffect(() => {
+        if (phase !== "preparing_subs") return
+        if (!streamSessionId) return
+        let cancelled = false
+
+        const tick = async () => {
+            try {
+                const status = await getSubPrepStatus(streamSessionId)
+                if (cancelled) return
+                setSubPrep(status)
+                if (status.state === "ready" || status.state === "failed") {
+                    setPhase("playing")
+                    return
+                }
+            } catch (err) {
+                console.warn("[Notflix] sub prep status fetch failed:", err)
+                // Stop blocking on a flaky status endpoint — start
+                // playback, the on-demand sub extraction path is still
+                // available as a fallback.
+                if (!cancelled) setPhase("playing")
+                return
+            }
+            if (!cancelled) {
+                window.setTimeout(tick, 1000)
+            }
+        }
+
+        // Kick off prep, then start polling.
+        ;(async () => {
+            try {
+                const initial = await startSubPrep(streamSessionId, subLangPref)
+                if (cancelled) return
+                setSubPrep(initial)
+                if (initial.state === "ready" || initial.state === "failed") {
+                    setPhase("playing")
+                    return
+                }
+            } catch (err) {
+                console.warn("[Notflix] sub prep start failed:", err)
+                if (!cancelled) setPhase("playing")
+                return
+            }
+            void tick()
+        })()
+
+        return () => {
+            cancelled = true
+        }
+    }, [phase, streamSessionId, subLangPref])
+
     const handleChangeSource = React.useCallback(() => {
         setAutoPickDisabled(true)
         setStreamUrl(null)
@@ -343,6 +417,7 @@ export default function WatchPage() {
         setStreamDurationSec(0)
         setStreamSubtitles([])
         setStreamSessionId("")
+        setSubPrep(null)
         // Re-apply the preference: in manual mode "Réessayer" still lands
         // back on the picker, not on an auto-launch.
         setAutoPickDisabled(sourcePickMode === "manual")
@@ -504,6 +579,13 @@ export default function WatchPage() {
                     />
                 )}
 
+                {phase === "preparing_subs" && (
+                    <SubPrepPanel
+                        status={subPrep}
+                        onSkip={() => setPhase("playing")}
+                    />
+                )}
+
                 {phase === "error" && (
                     <ErrorPanel
                         message={errorMsg ?? t("watch.unknown_error", "Une erreur est survenue.")}
@@ -576,6 +658,78 @@ function PreparingPanel({
             >
                 {t("watch.change_source", "Changer de source")}
             </Button>
+        </div>
+    )
+}
+
+/** Progress overlay shown while ffmpeg extracts + Claude translates the
+ *  user's preferred subtitle, before the video starts. Mirrors the
+ *  PreparingPanel layout but with a determinate progress bar driven by
+ *  the polled SubPrepStatus. */
+function SubPrepPanel({
+    status,
+    onSkip,
+}: {
+    status: SubPrepStatus | null
+    onSkip: () => void
+}) {
+    const { t } = useTranslation()
+    const label = React.useMemo(() => {
+        if (!status) return t("watch.sub_prep_starting", "Préparation des sous-titres...")
+        switch (status.state) {
+            case "picking":
+                return t("watch.sub_prep_picking", "Choix de la meilleure source de sous-titres...")
+            case "extracting":
+                return t("watch.sub_prep_extracting", "Extraction des sous-titres depuis la vidéo...")
+            case "translating":
+                return t(
+                    "watch.sub_prep_translating",
+                    "Traduction des sous-titres via Claude...",
+                )
+            case "ready":
+                return t("watch.sub_prep_ready", "Sous-titres prêts, lancement…")
+            case "failed":
+                return t(
+                    "watch.sub_prep_failed",
+                    "Préparation échouée — lecture sans sous-titres.",
+                )
+            default:
+                return t("watch.sub_prep_starting", "Préparation des sous-titres...")
+        }
+    }, [status, t])
+
+    const progress = Math.max(5, Math.min(100, status?.progress ?? 0))
+
+    return (
+        <div className="flex flex-col items-center gap-5 text-white max-w-2xl w-full">
+            <FiLoader className="size-10 animate-spin text-brand-500" />
+            <p className="text-base lg:text-lg font-semibold text-center">{label}</p>
+
+            {/* Determinate progress bar. */}
+            <div className="w-full max-w-md h-1.5 bg-white/10 rounded-full overflow-hidden">
+                <div
+                    className="h-full bg-brand-500 transition-[width] duration-500 ease-out"
+                    style={{ width: `${progress}%` }}
+                />
+            </div>
+
+            {status?.willTranslate && (
+                <p className="text-xs text-[--muted] text-center max-w-md leading-relaxed">
+                    {t(
+                        "watch.sub_prep_translate_note",
+                        "Aucun sous-titre dans la langue choisie — Claude traduit depuis {{lang}}. La traduction est mise en cache, donc le prochain lancement sera instantané.",
+                        { lang: status.chosenLang || "?" },
+                    )}
+                </p>
+            )}
+
+            <button
+                type="button"
+                onClick={onSkip}
+                className="text-xs text-[--muted] hover:text-white underline underline-offset-2"
+            >
+                {t("watch.sub_prep_skip", "Lancer sans attendre")}
+            </button>
         </div>
     )
 }

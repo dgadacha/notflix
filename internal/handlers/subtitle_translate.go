@@ -73,11 +73,18 @@ func (h *Handler) translateSubtitleCachePath(sessionID string, idx int, targetLa
 	return filepath.Join(h.App.Config.Data.Dir, "cache", "subtitles", name)
 }
 
-// translateVTT takes a WebVTT byte stream, splits it into cues,
-// translates the text-only lines through Claude, and reassembles the
-// VTT. Timing cues + WEBVTT header are preserved verbatim — only the
-// human-readable lines are touched.
+// translateVTT is a thin shim over translateVTTWithProgress that
+// discards the per-batch progress callback. Used by callers that
+// don't surface progress (e.g. the on-demand serveHLSSubtitle path).
 func translateVTT(ctx context.Context, client *anthropic.Client, vtt []byte, targetLang string) ([]byte, error) {
+	return translateVTTWithProgress(ctx, client, vtt, targetLang, nil)
+}
+
+// translateVTTWithProgress is the full version — exposes a per-batch
+// progress callback so the watch-page polling endpoint can render a
+// percentage. `cb(done, total)` is called after every Claude round-trip
+// (success or fall-back). Caller is free to pass nil to skip progress.
+func translateVTTWithProgress(ctx context.Context, client *anthropic.Client, vtt []byte, targetLang string, cb func(done, total int)) ([]byte, error) {
 	lines := strings.Split(string(vtt), "\n")
 	// Identify which lines are TEXT (dialogue) vs structure. A line is
 	// text iff it's not a header, not a timing line (contains " --> "),
@@ -119,6 +126,8 @@ func translateVTT(ctx context.Context, client *anthropic.Client, vtt []byte, tar
 	out := make([]string, len(lines))
 	copy(out, lines)
 
+	totalBatches := (len(texts) + translateBatchSize - 1) / translateBatchSize
+	doneBatches := 0
 	for start := 0; start < len(texts); start += translateBatchSize {
 		end := start + translateBatchSize
 		if end > len(texts) {
@@ -147,16 +156,28 @@ func translateVTT(ctx context.Context, client *anthropic.Client, vtt []byte, tar
 		})
 		if err != nil {
 			log.Printf("subtitle translate: batch %d-%d failed: %v", start, end, err)
+			doneBatches++
+			if cb != nil {
+				cb(doneBatches, totalBatches)
+			}
 			continue // fall back to original
 		}
 
 		translated := parseTranslatedBatch(resp, len(batch))
 		if translated == nil {
 			log.Printf("subtitle translate: batch %d-%d: response shape unexpected", start, end)
+			doneBatches++
+			if cb != nil {
+				cb(doneBatches, totalBatches)
+			}
 			continue
 		}
 		for i, t := range translated {
 			out[batch[i].idx] = t
+		}
+		doneBatches++
+		if cb != nil {
+			cb(doneBatches, totalBatches)
 		}
 	}
 

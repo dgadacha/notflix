@@ -84,6 +84,11 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	s := v1.Group("/stream")
 	s.GET("/transmux", h.HandleStreamTransmux)
 	s.POST("/hls/start", h.HandleStreamHLSStart)
+	// Subtitle prep — POST kicks off the extraction/translation
+	// of the user's preferred subtitle for an HLS session. GET
+	// returns the live status the watch page polls every ~1 s.
+	s.POST("/hls/:sessionId/prep", h.HandleSubPrepStart)
+	s.GET("/hls/:sessionId/prep", h.HandleSubPrepStatus)
 	s.GET("/hls/:sessionId/*", h.HandleStreamHLSFile)
 
 	// Profiles

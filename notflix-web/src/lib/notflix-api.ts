@@ -46,6 +46,25 @@ export function useTorBoxStatus() {
     })
 }
 
+/** Status of the per-session subtitle preparation pipeline. The watch
+ *  page polls /api/v1/stream/hls/:sessionId/prep to drive a progress
+ *  bar before transitioning to actual playback. */
+export type SubPrepStatus = {
+    /** "idle" / "picking" / "extracting" / "translating" / "ready" / "failed" */
+    state: "idle" | "picking" | "extracting" | "translating" | "ready" | "failed"
+    /** 0-100. Translation phase reports linear batch progress; extraction
+     *  is bumped to fixed checkpoints since ffmpeg doesn't surface progress
+     *  for subtitle remuxing. */
+    progress: number
+    /** Index into the session.subtitles list of the source we picked. -1
+     *  when no usable source was found. */
+    chosenSubIdx: number
+    chosenLang: string
+    willTranslate: boolean
+    targetLang: string
+    error?: string
+}
+
 /** One subtitle source the player can mount as a <track> element. */
 export type SubtitleTrack = {
     /** "embedded" → /sub_<idx>.vtt route, "external" → /ext_<idx>.vtt. */
@@ -100,6 +119,27 @@ export function useTorBoxPlay() {
     return useMutation<TorBoxPlayResult, Error, TorBoxPlayBody>({
         mutationFn: (body) => jpost("/torbox/play", body),
     })
+}
+
+/** Fire-and-forget POST that asks the backend to prepare a subtitle for
+ *  the given language. Returns the initial status — frontend then polls
+ *  the GET counterpart until state=ready / failed. */
+export async function startSubPrep(sessionId: string, lang: string): Promise<SubPrepStatus> {
+    const r = await fetch(`/api/v1/stream/hls/${sessionId}/prep`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lang }),
+    })
+    if (!r.ok) throw new Error(`prep start ${r.status}`)
+    const j = await r.json()
+    return j.data as SubPrepStatus
+}
+
+export async function getSubPrepStatus(sessionId: string): Promise<SubPrepStatus> {
+    const r = await fetch(`/api/v1/stream/hls/${sessionId}/prep`)
+    if (!r.ok) throw new Error(`prep status ${r.status}`)
+    const j = await r.json()
+    return j.data as SubPrepStatus
 }
 
 /**
