@@ -70,24 +70,74 @@ export function releaseMatchesAudio(title: string, pref: AudioPref): boolean {
 }
 
 /**
- * Audio codecs that Chrome can't decode (Safari can — Apple has the
- * Dolby licence — but Notflix's typical user is on Chrome). Releases
- * tagged with one of these play the video silently and the volume
- * control is greyed out. The release picker filters them out unless
- * nothing else is available.
+ * Audio codecs the browser may or may not decode. Browser support depends
+ * on the OS-provided decoders:
+ *
+ *   - Safari (macOS / iOS): Apple has the Dolby licence → AC-3 + E-AC-3
+ *     + TrueHD all work.
+ *   - Chrome on macOS (≥ 116): often inherits the Apple decoders,
+ *     E-AC-3 works.
+ *   - Chrome on Linux / Windows: no Dolby decoders → silent playback.
+ *   - DTS: not licensed in any major browser, never works.
+ *
+ * Rather than a hard blacklist, we ask the browser via canPlayType()
+ * which codecs it admits to supporting. Releases that mention an audio
+ * tag the browser CAN handle stay in the picker; the rest are filtered.
+ *
+ * If a release tag isn't in the test list (older AC-3, plain "AAC", …)
+ * we treat it as compatible — those are the universally-supported codecs.
  */
-const INCOMPATIBLE_AUDIO_TOKENS = [
-    "ddp",      // Dolby Digital Plus (DDP2.0, DDP5.1)
-    "dd+",      // Alternative spelling
-    "eac3",     // Enhanced AC-3
-    "e-ac3",
-    "e-ac-3",
-    "dts",      // DTS Core / DTS-HD / DTS-X
-    "truehd",   // Dolby TrueHD
-    "atmos",    // Dolby Atmos (usually muxed on top of TrueHD or EAC3)
+type CodecToken = "ac3" | "ddp" | "dd+" | "eac3" | "e-ac3" | "e-ac-3" | "dts" | "truehd" | "atmos"
+
+const CODEC_PROBES: { token: CodecToken; mimes: string[] }[] = [
+    { token: "ac3", mimes: ['audio/mp4; codecs="ac-3"', 'audio/ac3'] },
+    { token: "ddp", mimes: ['audio/mp4; codecs="ec-3"'] },
+    { token: "dd+", mimes: ['audio/mp4; codecs="ec-3"'] },
+    { token: "eac3", mimes: ['audio/mp4; codecs="ec-3"'] },
+    { token: "e-ac3", mimes: ['audio/mp4; codecs="ec-3"'] },
+    { token: "e-ac-3", mimes: ['audio/mp4; codecs="ec-3"'] },
+    { token: "dts", mimes: ['audio/vnd.dts', 'audio/vnd.dts.hd'] },
+    { token: "truehd", mimes: ['audio/vnd.dolby.mlp'] },
+    // Atmos in MKV is usually muxed on top of TrueHD (lossless) or E-AC-3
+    // (lossy fallback). If either of those work, atmos plays — the
+    // browser will fall back to the embedded core track.
+    { token: "atmos", mimes: ['audio/vnd.dolby.mlp', 'audio/mp4; codecs="ec-3"'] },
 ]
 
+let _supportedCodecsCache: Set<CodecToken> | undefined
+
+function detectSupportedAudioCodecs(): Set<CodecToken> {
+    if (_supportedCodecsCache) return _supportedCodecsCache
+    const supported = new Set<CodecToken>()
+    if (typeof document === "undefined") {
+        _supportedCodecsCache = supported
+        return supported
+    }
+    const v = document.createElement("video")
+    for (const { token, mimes } of CODEC_PROBES) {
+        // canPlayType returns "probably", "maybe" or "". Only "probably"
+        // is a real yes — "maybe" is the browser hedging on container
+        // compatibility, often a lie for the audio side.
+        if (mimes.some(m => v.canPlayType(m) === "probably")) {
+            supported.add(token)
+        }
+    }
+    _supportedCodecsCache = supported
+    return supported
+}
+
+/**
+ * True iff the release name signals an audio codec THIS browser can't
+ * decode. Releases that mention a codec the browser does support — or
+ * no exotic codec at all (assumed AAC/AC-3 default) — pass through.
+ */
 export function releaseHasIncompatibleAudio(title: string): boolean {
     const t = title.toLowerCase()
-    return INCOMPATIBLE_AUDIO_TOKENS.some(tok => t.includes(tok))
+    const supported = detectSupportedAudioCodecs()
+    for (const { token } of CODEC_PROBES) {
+        if (t.includes(token) && !supported.has(token)) {
+            return true
+        }
+    }
+    return false
 }
