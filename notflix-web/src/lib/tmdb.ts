@@ -45,6 +45,27 @@ export type TMDBSeason = {
     poster_path?: string | null
 }
 
+export type TMDBEpisode = {
+    id: number
+    episode_number: number
+    season_number: number
+    name: string
+    overview?: string
+    runtime?: number | null
+    air_date?: string | null
+    still_path?: string | null
+    vote_average?: number
+}
+
+export type TMDBSeasonDetail = {
+    id: number
+    season_number: number
+    name: string
+    overview?: string
+    air_date?: string | null
+    episodes: TMDBEpisode[]
+}
+
 export type TMDBPaged<T = TMDBMedia> = {
     page: number
     total_pages: number
@@ -111,6 +132,19 @@ export function useTMDBDetail(type: "movie" | "tv", id: number | string | null) 
         queryKey: ["tmdb", type, String(id)],
         queryFn: () => tmdbFetch(`/${type}/${id}`, { append_to_response: "credits,videos,external_ids" }),
         enabled: !!id,
+    })
+}
+
+/**
+ * One season's full episode list. Used by the detail modal's TV series
+ * picker — TMDB's /tv/{id} response gives season metadata (count, air
+ * date, poster) but not the per-episode rows.
+ */
+export function useTMDBSeason(tvId: number | string | null, seasonNumber: number | null) {
+    return useQuery<TMDBSeasonDetail>({
+        queryKey: ["tmdb", "tv", String(tvId), "season", seasonNumber],
+        queryFn: () => tmdbFetch(`/tv/${tvId}/season/${seasonNumber}`),
+        enabled: !!tvId && seasonNumber != null && seasonNumber >= 0,
     })
 }
 

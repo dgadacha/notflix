@@ -19,7 +19,16 @@ import {
     useAudioPref,
     useQualityPref,
 } from "@/lib/preferences"
-import { mediaTypeOf, titleOf, tmdbImage, useTMDBDetail, yearOf } from "@/lib/tmdb"
+import {
+    mediaTypeOf,
+    TMDBEpisode,
+    TMDBSeason,
+    titleOf,
+    tmdbImage,
+    useTMDBDetail,
+    useTMDBSeason,
+    yearOf,
+} from "@/lib/tmdb"
 import { atom, useAtom, useSetAtom } from "jotai"
 import React from "react"
 import { useTranslation } from "react-i18next"
@@ -81,6 +90,34 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
     const [quality, setQuality] = useQualityPref()
     const [audio, setAudio] = useAudioPref()
 
+    // TV series: pick a season + episode before launching. Default = first
+    // non-special season (season_number > 0), episode 1.
+    const seasons = React.useMemo(() => {
+        if (target.type !== "tv") return [] as NonNullable<typeof data>["seasons"]
+        return (data?.seasons ?? []).filter(s => s.season_number > 0)
+    }, [target.type, data?.seasons])
+    const [selectedSeason, setSelectedSeason] = React.useState<number | null>(null)
+    const [selectedEpisode, setSelectedEpisode] = React.useState<number>(1)
+
+    // Initialise season once the TMDB payload arrives.
+    React.useEffect(() => {
+        if (target.type !== "tv") return
+        if (selectedSeason != null) return
+        if (seasons.length === 0) return
+        setSelectedSeason(seasons[0].season_number)
+    }, [target.type, seasons, selectedSeason])
+
+    const { data: seasonDetail } = useTMDBSeason(
+        target.type === "tv" ? target.id : null,
+        selectedSeason,
+    )
+
+    // Reset episode to 1 whenever the user switches season.
+    const onChangeSeason = (n: number) => {
+        setSelectedSeason(n)
+        setSelectedEpisode(1)
+    }
+
     if (isLoading || !data) return <BodySkeleton />
 
     const type = mediaTypeOf(data, target.type)
@@ -92,12 +129,17 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
     const score = data.vote_average
 
     // Navigate in the same tab + close the modal. Pass the user's quality /
-    // audio prefs down as query params — /watch filters the Prowlarr release
-    // list with them before the auto-pick runs.
+    // audio prefs AND (for TV) the selected season/episode down as query
+    // params — /watch filters the Prowlarr release list with them before
+    // the auto-pick runs.
     const onPlay = () => {
         const params = new URLSearchParams({ id: String(data.id), type })
         if (quality !== "auto") params.set("quality", quality)
         if (audio !== "auto") params.set("audio", audio)
+        if (type === "tv" && selectedSeason != null) {
+            params.set("season", String(selectedSeason))
+            params.set("episode", String(selectedEpisode))
+        }
         closeDetail()
         router.push(`/watch?${params.toString()}`)
     }
@@ -123,11 +165,35 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
                         <Button
                             size="md"
                             onClick={onPlay}
-                            className="bg-white !text-black hover:!bg-white/90 font-bold rounded-md px-6 lg:px-8 lg:!h-12 lg:!text-base"
+                            disabled={type === "tv" && selectedSeason == null}
+                            className="bg-white !text-black hover:!bg-white/90 font-bold rounded-md px-6 lg:px-8 lg:!h-12 lg:!text-base disabled:opacity-50"
                             leftIcon={<BiPlay className="text-xl sm:text-2xl" />}
                         >
-                            {t("modal.play", "Lecture")}
+                            {type === "tv" && selectedSeason != null
+                                ? `${t("modal.play", "Lecture")} · S${selectedSeason}E${selectedEpisode}`
+                                : t("modal.play", "Lecture")}
                         </Button>
+
+                        {/* TV: season + episode pickers. Movies skip this row. */}
+                        {type === "tv" && seasons.length > 0 && (
+                            <>
+                                <PrefSelect
+                                    label={t("modal.season", "Saison")}
+                                    value={String(selectedSeason ?? seasons[0].season_number)}
+                                    options={seasons.map(s => ({
+                                        value: String(s.season_number),
+                                        label: s.name || `Saison ${s.season_number}`,
+                                    }))}
+                                    onChange={(v) => onChangeSeason(parseInt(v, 10))}
+                                />
+                                <PrefSelect
+                                    label={t("modal.episode", "Épisode")}
+                                    value={String(selectedEpisode)}
+                                    options={episodeOptions(seasonDetail?.episodes, seasons, selectedSeason)}
+                                    onChange={(v) => setSelectedEpisode(parseInt(v, 10))}
+                                />
+                            </>
+                        )}
 
                         {/* Quality + audio prefs — persisted in localStorage so
                             the choice survives between films. /watch reads
@@ -184,6 +250,35 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
             </div>
         </div>
     )
+}
+
+/**
+ * Build the <option> list for the episode dropdown.
+ *
+ * Prefers the live `useTMDBSeason` data when available (real episode
+ * titles like "Épisode 3 — Le dernier souffle"). Falls back to a numeric
+ * 1..N range using the season's episode_count from /tv/{id} so the picker
+ * never blocks waiting on the network.
+ */
+function episodeOptions(
+    episodes: TMDBEpisode[] | undefined,
+    seasons: TMDBSeason[],
+    selectedSeasonNumber: number | null,
+): { value: string; label: string }[] {
+    if (episodes && episodes.length > 0) {
+        return episodes.map(ep => ({
+            value: String(ep.episode_number),
+            label: ep.name
+                ? `${ep.episode_number}. ${ep.name}`
+                : `Épisode ${ep.episode_number}`,
+        }))
+    }
+    const season = seasons.find(s => s.season_number === selectedSeasonNumber)
+    const count = season?.episode_count ?? 0
+    return Array.from({ length: count }, (_, i) => ({
+        value: String(i + 1),
+        label: `Épisode ${i + 1}`,
+    }))
 }
 
 /**
