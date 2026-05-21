@@ -2,12 +2,21 @@
  * Netflix-style multi-profile support — server-backed.
  *
  * Persistence layer: SQLite, exposed via `/api/v1/profiles` (see Go side
- * in `internal/database/db/notflix_profile.go` + `internal/handlers/notflix_profile.go`).
- * Profiles + watch history therefore survive browser changes, devices,
- * incognito, cache wipes — anything that's not "the server's PVC vanished".
+ * in `internal/database/db/profile.go` + `internal/handlers/profiles.go`).
+ * Profiles + watch history + per-profile list therefore survive browser
+ * changes, devices, incognito, cache wipes — anything that's not "the
+ * server's PVC vanished".
  *
- * The frontend only stores ONE thing locally: the currently-active profile id
- * (a UI preference — which profile is selected for THIS browser session).
+ * The frontend only stores ONE thing locally: the currently-active profile
+ * uid (a UI preference — which profile is selected for THIS browser
+ * session).
+ *
+ * Schema mirrors `internal/database/models.go` exactly:
+ *   - watch history is keyed by (profile, tmdbId, mediaType, season, episode)
+ *   - list entries are keyed by (profile, tmdbId, mediaType)
+ *
+ * Movies use season=0, episode=0; TV episodes carry the real numbers so
+ * "Reprendre la lecture" can resume the right episode.
  */
 import { useServerMutation, useServerQuery } from "@/api/client/requests"
 import { useQueryClient } from "@tanstack/react-query"
@@ -32,21 +41,29 @@ export type Profile = {
 export type ProfileWatchEntry = {
     id: number
     profileUid: string
-    mediaId: number
-    episodeNumber: number
+    tmdbId: number
+    mediaType: "movie" | "tv"
+    season: number      // 0 for movies
+    episode: number     // 0 for movies
     currentTime: number
     duration: number
+    title: string
+    posterPath: string
+    backdropUrl: string
     createdAt: string
     updatedAt: string
 }
 
-/** Per-profile membership in the user's lists. Status mirrors AniList's
- *  AL_MediaListStatus values. */
+export type ProfileListStatus = "WATCHING" | "PLANNING" | "COMPLETED" | "DROPPED"
+
 export type ProfileListEntry = {
     id: number
     profileUid: string
-    mediaId: number
-    status: "CURRENT" | "PLANNING" | "COMPLETED" | "PAUSED" | "DROPPED" | "REPEATING"
+    tmdbId: number
+    mediaType: "movie" | "tv"
+    status: ProfileListStatus
+    title: string
+    posterPath: string
     createdAt: string
     updatedAt: string
 }
@@ -64,7 +81,7 @@ export const PROFILE_COLORS = [
 ] as const
 
 // -----------------------------------------------------------------------------
-// Endpoint constants (kept here so this whole feature is grep-able)
+// Endpoint constants
 // -----------------------------------------------------------------------------
 
 const EP_LIST = "/api/v1/profiles"
@@ -86,7 +103,7 @@ const STORAGE_ACTIVE = "notflix-active-profile"
 
 export const activeProfileUidAtom = atomWithStorage<string | null>(STORAGE_ACTIVE, null)
 
-// Backwards-compat alias — the original atom name is still imported in some places.
+// Backwards-compat alias.
 export const activeProfileIdAtom = activeProfileUidAtom
 
 export function useActiveProfileId(): string | null {
@@ -106,11 +123,6 @@ export function useProfiles() {
     return q.data ?? []
 }
 
-/**
- * Same as useProfiles but also exposes the loading flag — used by the gate
- * so it doesn't redirect to /profiles before the list has finished loading
- * (otherwise activeId might be valid but profiles=[] triggers a wrong bounce).
- */
 export function useProfilesQuery() {
     const q = useServerQuery<Profile[]>({
         endpoint: EP_LIST,
@@ -143,7 +155,7 @@ export function useActiveProfileHistory(): ProfileWatchEntry[] {
 }
 
 // -----------------------------------------------------------------------------
-// Mutations (returned as a single hook for convenience)
+// Profile CRUD
 // -----------------------------------------------------------------------------
 
 export function useProfileActions() {
@@ -162,23 +174,6 @@ export function useProfileActions() {
         onSuccess: () => invalidate(),
     })
 
-    const updateMut = useServerMutation<Profile, { uid: string; name?: string; avatar?: string; color?: string }>({
-        // Endpoint is dynamic — useServerMutation requires a stable string, so
-        // we override at call time by mutating an outer ref. Simpler: build the
-        // request manually via a small wrapper.
-        endpoint: EP_PATCH("__placeholder__"),
-        method: "PATCH",
-        mutationKey: ["profiles", "update"],
-        onSuccess: () => invalidate(),
-    })
-
-    const deleteMut = useServerMutation<boolean, void>({
-        endpoint: EP_DELETE("__placeholder__"),
-        method: "DELETE",
-        mutationKey: ["profiles", "delete"],
-        onSuccess: () => invalidate(),
-    })
-
     const add = React.useCallback(
         async (data: { name: string; avatar: string; color: string }): Promise<Profile | null> => {
             const uid = cryptoUid()
@@ -188,9 +183,6 @@ export function useProfileActions() {
         [createMut],
     )
 
-    // The mutation's `endpoint` is fixed at hook-creation time, so we can't use
-    // useServerMutation directly for parameterised PATCH/DELETE. Fall back to
-    // a plain fetch for those — cheap, and we still invalidate the query cache.
     const update = React.useCallback(
         async (uid: string, patch: Partial<Pick<Profile, "name" | "avatar" | "color">>): Promise<void> => {
             const r = await fetch(EP_PATCH(uid), {
@@ -211,6 +203,7 @@ export function useProfileActions() {
             if (activeUid === uid) setActiveUid(null)
             invalidate()
             queryClient.invalidateQueries({ queryKey: ["profiles", uid, "history"] })
+            queryClient.invalidateQueries({ queryKey: ["profiles", uid, "list"] })
         },
         [activeUid, setActiveUid, invalidate, queryClient],
     )
@@ -223,7 +216,7 @@ export function useProfileActions() {
     return {
         profiles,
         activeUid,
-        // legacy alias kept for the existing UI code
+        // Legacy alias kept for the existing UI code.
         activeId: activeUid,
         add,
         update,
@@ -232,16 +225,34 @@ export function useProfileActions() {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Watch history upsert (called every 5s by NetflixWatchHistorySaver)
+// -----------------------------------------------------------------------------
+
 /**
- * Imperative upsert for the watch-history saver mounted on /watch.
- * Sends a PUT (idempotent on the composite (profileUid, mediaId) key).
- *
- * We bypass useServerMutation because (a) the endpoint is dynamic per profile
- * and (b) we don't want React-Query to display toasts on every 5-second tick.
+ * Body shape for `/api/v1/profiles/:uid/history` PUT/POST — matches the
+ * backend handler exactly.
+ */
+export type WatchHistoryUpsertBody = {
+    tmdbId: number
+    mediaType: "movie" | "tv"
+    season: number    // 0 for movies
+    episode: number   // 0 for movies
+    currentTime: number
+    duration: number
+    title: string
+    posterPath: string
+    backdropUrl: string
+}
+
+/**
+ * Fire-and-forget upsert. Failures are swallowed — the next 5s tick
+ * will retry, and we don't want network blips to surface as toasts
+ * during playback.
  */
 export async function pushProfileHistoryEntry(
     profileUid: string,
-    entry: { mediaId: number; episodeNumber: number; currentTime: number; duration: number },
+    entry: WatchHistoryUpsertBody,
 ): Promise<void> {
     if (!profileUid) return
     try {
@@ -251,7 +262,7 @@ export async function pushProfileHistoryEntry(
             body: JSON.stringify(entry),
         })
     } catch {
-        // Network blip — drop on the floor; the next tick will retry.
+        // Network blip — the next tick will retry.
     }
 }
 
@@ -260,7 +271,7 @@ export function useProfileHistoryUpsert() {
     const uid = useActiveProfileId()
     const queryClient = useQueryClient()
     return React.useCallback(
-        async (entry: { mediaId: number; episodeNumber: number; currentTime: number; duration: number }) => {
+        async (entry: WatchHistoryUpsertBody) => {
             if (!uid) return
             await pushProfileHistoryEntry(uid, entry)
             queryClient.invalidateQueries({ queryKey: [...QK_HISTORY(uid)] })
@@ -270,23 +281,46 @@ export function useProfileHistoryUpsert() {
 }
 
 // -----------------------------------------------------------------------------
-// History delete actions
+// Watch history delete actions
 // -----------------------------------------------------------------------------
 
 /**
- * Three flavours of history deletion:
- *   - deleteSeries(mediaId)             every episode of one anime
- *   - deleteEpisode(mediaId, ep)        a single episode row
- *   - clearAll()                        wipe the whole profile's history
- *
- * All scoped to the active profile and invalidate the cached list so the
- * History page + Continue Watching row update without a manual refresh.
+ * Two flavours of history removal:
+ *   - deleteByMedia(tmdbId, mediaType)   removes all rows for that title
+ *                                        (every season/episode of a series)
+ *   - clearAll()                         wipes the whole profile's history
  */
+export function useProfileHistoryActions() {
+    const uid = useActiveProfileId()
+    const queryClient = useQueryClient()
+
+    const invalidate = React.useCallback(() => {
+        if (!uid) return
+        queryClient.invalidateQueries({ queryKey: [...QK_HISTORY(uid)] })
+    }, [uid, queryClient])
+
+    const deleteByMedia = React.useCallback(
+        async (tmdbId: number, mediaType: "movie" | "tv") => {
+            if (!uid) return
+            await fetch(`${EP_HISTORY(uid)}/${mediaType}/${tmdbId}`, { method: "DELETE" })
+            invalidate()
+        },
+        [uid, invalidate],
+    )
+
+    const clearAll = React.useCallback(async () => {
+        if (!uid) return
+        await fetch(EP_HISTORY(uid), { method: "DELETE" })
+        invalidate()
+    }, [uid, invalidate])
+
+    return { deleteByMedia, clearAll }
+}
+
 // -----------------------------------------------------------------------------
-// Per-profile list (the "Mes listes" view, isolated per profile)
+// Per-profile list ("Mes listes")
 // -----------------------------------------------------------------------------
 
-/** Live view of the active profile's list. [] when no profile is active. */
 export function useActiveProfileList(): ProfileListEntry[] {
     const uid = useActiveProfileId()
     const q = useServerQuery<ProfileListEntry[]>({
@@ -298,13 +332,21 @@ export function useActiveProfileList(): ProfileListEntry[] {
     return q.data ?? []
 }
 
-/** Map mediaId → status for the active profile. O(1) lookup from the modal /
- *  cards without re-iterating the array on every render. */
-export function useActiveProfileListStatusMap(): Map<number, ProfileListEntry["status"]> {
+/**
+ * Key used by the modal / cards to ask "is this title in my list, and at
+ * what status?" Composite key because TMDB IDs collide between movies
+ * and TV (a movie with id 1399 is unrelated to a TV show with id 1399).
+ */
+export function listEntryKey(mediaType: "movie" | "tv", tmdbId: number): string {
+    return `${mediaType}:${tmdbId}`
+}
+
+/** Map ("movie:123" | "tv:456") → status for O(1) lookup. */
+export function useActiveProfileListStatusMap(): Map<string, ProfileListStatus> {
     const list = useActiveProfileList()
     return React.useMemo(() => {
-        const m = new Map<number, ProfileListEntry["status"]>()
-        for (const e of list) m.set(e.mediaId, e.status)
+        const m = new Map<string, ProfileListStatus>()
+        for (const e of list) m.set(listEntryKey(e.mediaType, e.tmdbId), e.status)
         return m
     }, [list])
 }
@@ -319,12 +361,18 @@ export function useProfileListActions() {
     }, [uid, queryClient])
 
     const upsert = React.useCallback(
-        async (mediaId: number, status: ProfileListEntry["status"]): Promise<void> => {
+        async (entry: {
+            tmdbId: number
+            mediaType: "movie" | "tv"
+            status: ProfileListStatus
+            title: string
+            posterPath: string
+        }): Promise<void> => {
             if (!uid) return
             await fetch(EP_PROFILE_LIST(uid), {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ mediaId, status }),
+                body: JSON.stringify(entry),
             })
             invalidate()
         },
@@ -332,51 +380,17 @@ export function useProfileListActions() {
     )
 
     const remove = React.useCallback(
-        async (mediaId: number): Promise<void> => {
+        async (tmdbId: number, mediaType: "movie" | "tv"): Promise<void> => {
             if (!uid) return
-            await fetch(`${EP_PROFILE_LIST(uid)}/${mediaId}`, { method: "DELETE" })
+            await fetch(`${EP_PROFILE_LIST(uid)}/${mediaType}/${tmdbId}`, {
+                method: "DELETE",
+            })
             invalidate()
         },
         [uid, invalidate],
     )
 
     return { upsert, remove }
-}
-
-export function useProfileHistoryActions() {
-    const uid = useActiveProfileId()
-    const queryClient = useQueryClient()
-
-    const invalidate = React.useCallback(() => {
-        if (!uid) return
-        queryClient.invalidateQueries({ queryKey: [...QK_HISTORY(uid)] })
-    }, [uid, queryClient])
-
-    const deleteSeries = React.useCallback(
-        async (mediaId: number) => {
-            if (!uid) return
-            await fetch(`${EP_HISTORY(uid)}/${mediaId}`, { method: "DELETE" })
-            invalidate()
-        },
-        [uid, invalidate],
-    )
-
-    const deleteEpisode = React.useCallback(
-        async (mediaId: number, episodeNumber: number) => {
-            if (!uid) return
-            await fetch(`${EP_HISTORY(uid)}/${mediaId}/episode/${episodeNumber}`, { method: "DELETE" })
-            invalidate()
-        },
-        [uid, invalidate],
-    )
-
-    const clearAll = React.useCallback(async () => {
-        if (!uid) return
-        await fetch(EP_HISTORY(uid), { method: "DELETE" })
-        invalidate()
-    }, [uid, invalidate])
-
-    return { deleteSeries, deleteEpisode, clearAll }
 }
 
 // -----------------------------------------------------------------------------

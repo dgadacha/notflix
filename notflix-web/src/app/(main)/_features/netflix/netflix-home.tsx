@@ -1,3 +1,4 @@
+import { NetflixContinueWatching } from "@/app/(main)/_features/netflix/netflix-continue-watching"
 import { NetflixHero } from "@/app/(main)/_features/netflix/netflix-hero"
 import { NetflixRow } from "@/app/(main)/_features/netflix/netflix-row"
 import { useDiscover, useTrending } from "@/lib/tmdb"
@@ -21,6 +22,11 @@ export function NetflixHome() {
             </div>
 
             <div className="relative z-[2] mt-4 space-y-10 pb-20">
+                {/* Rendered above trending so a returning user lands on
+                    their resume picks. Empty-state friendly — the
+                    component returns null when there's no in-progress
+                    history. */}
+                <NetflixContinueWatching />
                 <TrendingMoviesRow />
                 <PopularMoviesRow />
                 <TopRatedMoviesRow />

@@ -18,6 +18,7 @@
  *               kicks in so the player keeps going if the user tabs away.
  *   error       Surfaced + retry / change-source.
  */
+import { NetflixWatchHistorySaver } from "@/app/(main)/_features/netflix/netflix-watch-history-saver"
 import { Release, releaseTorBoxPayload, useSearchMovie, useSearchTV, useTorBoxPlay } from "@/lib/notflix-api"
 import Hls from "hls.js"
 import {
@@ -53,6 +54,12 @@ export default function WatchPage() {
     const mediaId = idParam ? parseInt(idParam, 10) : NaN
     const season = seasonParam ? parseInt(seasonParam, 10) : undefined
     const episode = episodeParam ? parseInt(episodeParam, 10) : undefined
+
+    // Optional resume position: /watch?id=…&t=4567 seeks the <video>
+    // to that many seconds on first canplay. Used by the home's
+    // "Reprendre la lecture" rail and could be exposed elsewhere later.
+    const resumeSecParam = searchParams.get("t")
+    const resumeSec = resumeSecParam ? parseInt(resumeSecParam, 10) : 0
 
     // Playback prefs come from the modal's selectors via the URL.
     const qualityPref = (searchParams.get("quality") as QualityPref | null) ?? "auto"
@@ -297,15 +304,29 @@ export default function WatchPage() {
     // The player phase replaces the entire chrome with a fullscreen <video>.
     if (phase === "playing" && streamUrl) {
         return (
-            <Player
-                src={streamUrl}
-                title={displayTitle}
-                releaseTitle={pickedRelease?.title ?? ""}
-                audioCodec={streamAudioCodec}
-                durationSec={streamDurationSec}
-                onBack={handleClose}
-                onChangeSource={handleChangeSource}
-            />
+            <>
+                {/* Per-profile history mirror — fires every 5s + on
+                    pagehide. No-op without an active profile. */}
+                <NetflixWatchHistorySaver
+                    tmdbId={mediaId}
+                    mediaType={typeParam}
+                    season={season}
+                    episode={episode}
+                    title={displayTitle}
+                    posterPath={detail?.poster_path ?? ""}
+                    backdropUrl={detail?.backdrop_path ?? ""}
+                />
+                <Player
+                    src={streamUrl}
+                    title={displayTitle}
+                    releaseTitle={pickedRelease?.title ?? ""}
+                    audioCodec={streamAudioCodec}
+                    durationSec={streamDurationSec}
+                    resumeSec={resumeSec}
+                    onBack={handleClose}
+                    onChangeSource={handleChangeSource}
+                />
+            </>
         )
     }
 
@@ -628,6 +649,7 @@ function Player({
     releaseTitle,
     audioCodec,
     durationSec,
+    resumeSec,
     onBack,
     onChangeSource,
 }: {
@@ -636,11 +658,33 @@ function Player({
     releaseTitle: string
     audioCodec: string
     durationSec: number
+    resumeSec: number
     onBack: () => void
     onChangeSource: () => void
 }) {
     const { t } = useTranslation()
     const videoRef = React.useRef<HTMLVideoElement>(null)
+
+    // Resume position from the URL. We consume it once on the first
+    // loadedmetadata event so the player jumps there. Stored in a ref
+    // so we don't refire on every render.
+    const resumeRef = React.useRef(resumeSec)
+    React.useEffect(() => {
+        resumeRef.current = resumeSec
+    }, [resumeSec])
+    React.useEffect(() => {
+        const video = videoRef.current
+        if (!video) return
+        const onLoaded = () => {
+            const target = resumeRef.current
+            if (target && target > 0 && Number.isFinite(video.duration) && target < video.duration) {
+                video.currentTime = target
+                resumeRef.current = 0 // consume once
+            }
+        }
+        video.addEventListener("loadedmetadata", onLoaded)
+        return () => video.removeEventListener("loadedmetadata", onLoaded)
+    }, [src])
 
     // Decide the streaming path:
     //
