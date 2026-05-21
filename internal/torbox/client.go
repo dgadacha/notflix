@@ -282,13 +282,19 @@ func (c *Client) ListTorrents(ctx context.Context) ([]Torrent, error) {
 // -----------------------------------------------------------------------------
 
 // RequestDownloadURL returns a direct streamable URL for a specific file in
-// a torrent. If fileID is 0, returns a zip of the whole torrent (rarely
-// useful — pick a specific file for /watch playback).
+// a torrent. Pass fileID >= 0 for a single-file URL. Pass -1 to get a zip
+// of the whole torrent (rarely useful — the browser can't play a zip, so
+// /watch should always pick a real file).
+//
+// Sentinel was changed from `0` to `-1` because TorBox file IDs start at
+// 0 in some torrents — confusing "no file picked" with "the first file"
+// is exactly how the player ended up loading store-XXX/zip/... and
+// failing.
 func (c *Client) RequestDownloadURL(ctx context.Context, torrentID, fileID int) (string, error) {
 	q := url.Values{}
 	q.Set("token", c.apiKey)
 	q.Set("torrent_id", strconv.Itoa(torrentID))
-	if fileID > 0 {
+	if fileID >= 0 {
 		q.Set("file_id", strconv.Itoa(fileID))
 	} else {
 		q.Set("zip_link", "true")

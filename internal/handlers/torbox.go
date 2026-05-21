@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -216,10 +217,32 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 		})
 	}
 
-	// 3) Pick the file to stream (largest video unless caller overrode).
-	fileID := body.FileID
-	if fileID == 0 {
+	// 3) Pick the file to stream — the largest video file in the torrent.
+	//    The caller can override (body.FileID > 0) to pick a specific file.
+	//
+	//    -1 is the sentinel for "no video file found": we bail explicitly
+	//    instead of silently asking TorBox for a zip URL the browser can't
+	//    play. Better an error than a corrupt-looking player.
+	fileID := -1
+	if body.FileID > 0 {
+		fileID = body.FileID
+	} else if len(ready.Files) > 0 {
 		fileID = pickBestVideoFile(ready.Files)
+	}
+	if fileID < 0 {
+		// Surface what TorBox actually listed so the user knows whether
+		// the torrent itself is the problem (extras-only release, .iso, …).
+		names := make([]string, 0, len(ready.Files))
+		for _, f := range ready.Files {
+			names = append(names, f.Name)
+		}
+		log.Printf("torbox: no playable video file in torrent %d (%s); files=%v",
+			created.TorrentID, ready.Name, names)
+		return c.JSON(http.StatusUnprocessableEntity, map[string]any{
+			"error":     "no playable video file in this torrent",
+			"torrentId": created.TorrentID,
+			"files":     names,
+		})
 	}
 
 	// 4) Get the streamable URL.
@@ -257,17 +280,21 @@ func (h *Handler) HandleTorBoxDelete(c echo.Context) error {
 	return RespondOK(c, true)
 }
 
-// pickBestVideoFile returns the id of the largest video file in the torrent.
+// pickBestVideoFile returns the id of the largest video file in the torrent,
+// or -1 if no file in the torrent has a recognised video extension.
+// Returning a real-but-sentinel-looking 0 was the bug that made the
+// previous version request a zip download URL the browser couldn't play.
+//
 // Most torrents have one big movie file + small .nfo/.srt/.txt sidecars;
 // "largest video" is a reliable proxy for "the actual movie".
 func pickBestVideoFile(files []torbox.TorrentFile) int {
-	var bestID int
-	var bestSize int64
+	bestID := -1
+	var bestSize int64 = -1 // -1 so a single zero-size video still wins over nothing
 	for _, f := range files {
 		if !isVideoFile(f.Name) {
 			continue
 		}
-		if f.Size > bestSize {
+		if bestID == -1 || f.Size > bestSize {
 			bestSize = f.Size
 			bestID = f.ID
 		}
