@@ -80,6 +80,15 @@ export default defineConfig({
             "Cross-Origin-Embedder-Policy": "credentialless",
             "Cross-Origin-Opener-Policy": "same-origin",
         },
+        // Forward /api/* to the Go backend so relative fetch('/api/v1/...')
+        // calls (TMDB proxy, TorBox, Prowlarr) reach the right port instead
+        // of getting the dev server's SPA index.html fallback.
+        proxy: {
+            "/api": {
+                target: "http://127.0.0.1:43212",
+                changeOrigin: true,
+            },
+        },
     },
     output: {
         cleanDistPath: true,
