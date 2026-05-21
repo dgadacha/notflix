@@ -471,6 +471,44 @@ export default function WatchPage() {
         setPhase("picking")
     }, [])
 
+    // Fatal playback error → mark the current release as broken and
+    // auto-try the next ranked one. Triggered by <video onError> when
+    // the browser can't decode the source (typical case: XviD AVI release
+    // that ffprobe-failed and direct-played anyway).
+    //
+    // Throttled with a ref so a video that errors mid-playback doesn't
+    // loop the fallback forever. One fall-through per (release, mount).
+    const fatalErrorHandledForRef = React.useRef<string>("")
+    const handleFatalPlaybackError = React.useCallback(() => {
+        if (!pickedRelease) return
+        const key = releaseKey(pickedRelease)
+        if (fatalErrorHandledForRef.current === key) return
+        fatalErrorHandledForRef.current = key
+
+        console.warn(
+            "[Notflix] playback failed for release, auto-trying next:",
+            pickedRelease.title,
+        )
+
+        const newSkip = new Set(skipKeys)
+        newSkip.add(key)
+        setSkipKeys(newSkip)
+
+        if (newSkip.size >= 3) {
+            setErrorMsg(t("watch.no_compatible_source", "Aucune source compatible avec ton navigateur."))
+            setPhase("error")
+            return
+        }
+
+        const next = filteredReleases.find(r => !newSkip.has(releaseKey(r)))
+        if (!next) {
+            setErrorMsg(t("watch.no_release", "Plus aucune source à essayer."))
+            setPhase("error")
+            return
+        }
+        void launchRelease(next, newSkip)
+    }, [pickedRelease, releaseKey, skipKeys, filteredReleases, launchRelease, t])
+
     const handleManualPick = React.useCallback(
         (release: Release) => {
             void launchRelease(release)
@@ -560,6 +598,7 @@ export default function WatchPage() {
                     resumeSec={resumeSec}
                     onBack={handleClose}
                     onChangeSource={handleChangeSource}
+                    onFatalError={handleFatalPlaybackError}
                 />
             </>
         )
@@ -1009,6 +1048,7 @@ function Player({
     resumeSec,
     onBack,
     onChangeSource,
+    onFatalError,
 }: {
     src: string
     title: string
@@ -1022,6 +1062,7 @@ function Player({
     resumeSec: number
     onBack: () => void
     onChangeSource: () => void
+    onFatalError: () => void
 }) {
     const { t } = useTranslation()
     const videoRef = React.useRef<HTMLVideoElement>(null)
@@ -1293,8 +1334,18 @@ function Player({
                 controls
                 playsInline
                 className="w-full h-full object-contain"
-                onError={() => {
-                    console.error("[Notflix] video error")
+                onError={(e) => {
+                    // Browser MediaError codes:
+                    //   1 = ABORTED, 2 = NETWORK, 3 = DECODE, 4 = SRC_NOT_SUPPORTED.
+                    // Code 3 + 4 are unrecoverable — typically XviD/DivX
+                    // releases that ffprobe failed on too. Auto-fallback
+                    // to the next ranked release rather than leaving the
+                    // user staring at a frozen player.
+                    const err = (e.currentTarget as HTMLVideoElement).error
+                    console.error("[Notflix] video error", err?.code, err?.message)
+                    if (err && (err.code === 3 || err.code === 4)) {
+                        onFatalError()
+                    }
                 }}
             >
                 {sessionId && resolveSubtitleTracks(subtitles, subLangPref).map(track => {

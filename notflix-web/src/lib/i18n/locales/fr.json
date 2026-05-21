@@ -67,7 +67,8 @@
     "sub_prep_translate_note": "Aucun sous-titre dans la langue choisie — Claude traduit depuis {{lang}}. La traduction est mise en cache, donc le prochain lancement sera instantané.",
     "sub_prep_skip": "Lancer sans attendre",
     "sub_prep_corner": "Sous-titres en préparation",
-    "sub_prep_corner_ready": "Sous-titres activés"
+    "sub_prep_corner_ready": "Sous-titres activés",
+    "no_compatible_source": "Aucune source compatible avec ton navigateur (XviD / DivX non supportés)."
   },
   "profiles": {
     "who_is_watching": "Qui regarde ?",

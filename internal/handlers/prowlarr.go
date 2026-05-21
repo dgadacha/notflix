@@ -783,5 +783,31 @@ func qualityScore(title string) float64 {
 	if strings.Contains(t, "truehd") || strings.Contains(t, "atmos") {
 		s -= 120 // Dolby TrueHD / Atmos — even Safari struggles, definitely not Chrome
 	}
+
+	// Video codec compatibility — `<video>` natively decodes H.264 + VP8/9 +
+	// AV1 (Chrome 90+). XviD / DivX / MPEG-4 ASP releases sit inside AVI
+	// containers that the browser can't even MUX, let alone DECODE. We've
+	// seen Spider-Man French.BDRip.XviD-EXTREME show up as "Recommandé"
+	// because it was cached and well-seeded, then the player just errored
+	// out silently. Hard penalty so they never auto-pick when an H.264
+	// alternative exists.
+	if strings.Contains(t, "xvid") || strings.Contains(t, "divx") {
+		s -= 500
+	}
+	// Plain ".avi" in the title (without xvid/divx tags) usually still
+	// means a legacy codec. Slightly softer penalty in case it's actually
+	// H.264-in-AVI (rare but valid).
+	if strings.Contains(t, ".avi") || strings.HasSuffix(t, " avi") {
+		s -= 200
+	}
+	// MPEG-2 / MPEG-1 — DVD-era video, browser can't decode.
+	if strings.Contains(t, "mpeg-2") || strings.Contains(t, "mpeg2") {
+		s -= 300
+	}
+	// Bump for the codecs Chrome decodes natively.
+	if strings.Contains(t, "h.264") || strings.Contains(t, "h264") || strings.Contains(t, "x264") || strings.Contains(t, "avc") {
+		s += 5
+	}
+
 	return s
 }

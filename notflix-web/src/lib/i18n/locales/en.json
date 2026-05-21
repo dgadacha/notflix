@@ -67,7 +67,8 @@
     "sub_prep_translate_note": "No subtitle in the chosen language — Claude is translating from {{lang}}. The translation is cached so the next launch will be instant.",
     "sub_prep_skip": "Play without waiting",
     "sub_prep_corner": "Subtitles loading",
-    "sub_prep_corner_ready": "Subtitles enabled"
+    "sub_prep_corner_ready": "Subtitles enabled",
+    "no_compatible_source": "No browser-compatible source (XviD / DivX not supported)."
   },
   "profiles": {
     "who_is_watching": "Who's watching?",
