@@ -54,8 +54,20 @@ export type TorBoxPlayResult = {
     cached: boolean
 }
 
+/**
+ * Resolve a Prowlarr release to a TorBox stream URL. The backend accepts
+ * either a magnet URI (when the indexer exposes one) or a Prowlarr download
+ * URL (when it doesn't — the backend fetches the .torrent server-side then
+ * uploads its bytes to TorBox, since TorBox can't reach a private Prowlarr).
+ */
+export type TorBoxPlayBody = {
+    magnet?: string
+    downloadUrl?: string
+    fileId?: number
+}
+
 export function useTorBoxPlay() {
-    return useMutation<TorBoxPlayResult, Error, { magnet: string; fileId?: number }>({
+    return useMutation<TorBoxPlayResult, Error, TorBoxPlayBody>({
         mutationFn: (body) => jpost("/torbox/play", body),
     })
 }

@@ -88,18 +88,25 @@ export default function WatchPage() {
 
     const handlePick = React.useCallback(
         async (release: Release) => {
-            if (!release.magnetUrl && !release.infoHash) {
-                setErrorMsg(t("watch.no_magnet", "Cette source n'expose pas de lien magnet."))
+            if (!release.magnetUrl && !release.infoHash && !release.downloadUrl) {
+                setErrorMsg(t("watch.no_source", "Cette source n'est pas utilisable (ni magnet, ni .torrent)."))
                 setPhase("error")
                 return
             }
             setPickedRelease(release)
             setPhase("preparing")
             try {
-                const magnet =
-                    release.magnetUrl ||
-                    `magnet:?xt=urn:btih:${release.infoHash}&dn=${encodeURIComponent(release.title)}`
-                const result = await play.mutateAsync({ magnet })
+                // Prefer magnet (direct, no server-side fetch). Fall back to
+                // an infohash-built magnet (.torrent on TorBox dedup), then
+                // to the Prowlarr downloadUrl (backend grabs the bytes).
+                const payload = release.magnetUrl
+                    ? { magnet: release.magnetUrl }
+                    : release.infoHash
+                        ? {
+                            magnet: `magnet:?xt=urn:btih:${release.infoHash}&dn=${encodeURIComponent(release.title)}`,
+                        }
+                        : { downloadUrl: release.downloadUrl }
+                const result = await play.mutateAsync(payload)
                 setStreamUrl(result.streamUrl)
                 setPhase("playing")
             } catch (err) {

@@ -1,7 +1,11 @@
 package handlers
 
 import (
+	"context"
+	"io"
 	"net/http"
+	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -10,6 +14,91 @@ import (
 
 	"github.com/labstack/echo/v4"
 )
+
+// fetchTorrentFromURL downloads a .torrent payload from a Prowlarr-proxied
+// indexer URL. Prowlarr either streams the .torrent bytes directly OR
+// returns a 30x redirect with Location: magnet:?…  We need to detect that
+// redirect case because Go's default http.Client won't follow a non-http
+// scheme — but our handler can pass the magnet back instead.
+//
+// Returns (content, filename, error). When the resolved value is a magnet,
+// content holds the magnet URI itself (the caller branches on the prefix).
+func fetchTorrentFromURL(ctx context.Context, downloadURL string) ([]byte, string, error) {
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		// Intercept redirects to non-http schemes (magnet:) since Go won't
+		// follow them on its own.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if strings.HasPrefix(req.URL.Scheme, "magnet") {
+				return http.ErrUseLastResponse
+			}
+			if len(via) >= 10 {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer res.Body.Close()
+
+	// Handle the magnet-redirect case: 30x with Location: magnet:?…
+	if res.StatusCode >= 300 && res.StatusCode < 400 {
+		loc := res.Header.Get("Location")
+		if strings.HasPrefix(loc, "magnet:") {
+			return []byte(loc), "", nil
+		}
+		return nil, "", echo.NewHTTPError(http.StatusBadGateway,
+			"unexpected redirect from indexer: "+loc)
+	}
+
+	if res.StatusCode >= 400 {
+		return nil, "", echo.NewHTTPError(res.StatusCode, "indexer returned "+res.Status)
+	}
+
+	content, err := io.ReadAll(io.LimitReader(res.Body, 25<<20)) // 25 MB cap
+	if err != nil {
+		return nil, "", err
+	}
+
+	filename := guessTorrentFilename(downloadURL, res.Header.Get("Content-Disposition"))
+	return content, filename, nil
+}
+
+// guessTorrentFilename pulls a sensible name for the upload from either the
+// Content-Disposition header or the URL path. TorBox uses it as the torrent
+// display name in the user's account.
+func guessTorrentFilename(downloadURL, contentDisposition string) string {
+	// "attachment; filename=foo.torrent"
+	if contentDisposition != "" {
+		if idx := strings.Index(contentDisposition, "filename="); idx >= 0 {
+			name := strings.Trim(contentDisposition[idx+len("filename="):], `"`)
+			if name != "" {
+				return name
+			}
+		}
+	}
+	u, err := url.Parse(downloadURL)
+	if err == nil {
+		// Prowlarr puts the release name in the `file` query param.
+		if f := u.Query().Get("file"); f != "" {
+			if !strings.HasSuffix(strings.ToLower(f), ".torrent") {
+				f += ".torrent"
+			}
+			return f
+		}
+		if base := path.Base(u.Path); base != "" && base != "/" {
+			return base
+		}
+	}
+	return "release.torrent"
+}
 
 // TorBox handlers — thin wrappers around internal/torbox/client.
 //
@@ -50,27 +139,57 @@ func (h *Handler) HandleTorBoxCheckCached(c echo.Context) error {
 	return RespondOK(c, cached)
 }
 
-// HandleTorBoxPlay — POST {"magnet":"magnet:?…","fileId":N (optional)}
+// HandleTorBoxPlay — POST {"magnet":"…"} OR {"downloadUrl":"…"} [+fileId]
 //
 // Resolves to a streamable URL. Returns immediately when cached. Polls up
 // to 3 min when not — the frontend should show a download-progress UI in
 // that window.
+//
+// Two source modes:
+//   - magnet     direct magnet URI (works for indexers like 1337x/YTS that
+//                expose it natively)
+//   - downloadUrl  Prowlarr proxy URL (most other indexers — Torrent9 etc).
+//                  The backend fetches the .torrent server-side then forwards
+//                  the bytes to TorBox. Server-side fetch is required because
+//                  Prowlarr is on a private network TorBox can't reach.
 func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 	var body struct {
-		Magnet string `json:"magnet"`
-		FileID int    `json:"fileId,omitempty"`
+		Magnet      string `json:"magnet"`
+		DownloadURL string `json:"downloadUrl"`
+		FileID      int    `json:"fileId,omitempty"`
 	}
 	if err := c.Bind(&body); err != nil {
 		return RespondErr(c, err)
 	}
-	if body.Magnet == "" {
-		return c.JSON(http.StatusBadRequest, map[string]any{"error": "magnet required"})
+	if body.Magnet == "" && body.DownloadURL == "" {
+		return c.JSON(http.StatusBadRequest, map[string]any{"error": "magnet or downloadUrl required"})
 	}
 
 	ctx := c.Request().Context()
 
-	// 1) Add the magnet (instant if cached, queued otherwise).
-	created, err := h.App.TorBox.AddMagnet(ctx, body.Magnet)
+	// 1) Add the torrent (instant if cached, queued otherwise). Try magnet
+	//    first, fall back to downloadUrl (fetch .torrent → upload bytes).
+	var created *torbox.CreateResult
+	var err error
+	if body.Magnet != "" {
+		created, err = h.App.TorBox.AddMagnet(ctx, body.Magnet)
+	} else {
+		var content []byte
+		var filename string
+		content, filename, err = fetchTorrentFromURL(ctx, body.DownloadURL)
+		if err != nil {
+			return c.JSON(http.StatusBadGateway, map[string]any{
+				"error": "failed to fetch .torrent from indexer: " + err.Error(),
+			})
+		}
+		// If the fetch resolved to a magnet (Prowlarr 302 redirect), use the
+		// magnet path instead; otherwise upload the binary .torrent.
+		if strings.HasPrefix(string(content), "magnet:?") {
+			created, err = h.App.TorBox.AddMagnet(ctx, string(content))
+		} else {
+			created, err = h.App.TorBox.AddTorrentFile(ctx, filename, content)
+		}
+	}
 	if err != nil {
 		return RespondErr(c, err)
 	}

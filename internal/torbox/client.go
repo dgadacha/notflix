@@ -198,6 +198,35 @@ func (c *Client) AddMagnet(ctx context.Context, magnet string) (*CreateResult, e
 	return &res, nil
 }
 
+// AddTorrentFile uploads a .torrent file via the same /torrents/createtorrent
+// endpoint, using the multipart `file` field instead of `magnet`. Used when
+// Prowlarr returns indexer URLs that don't expose a magnet directly — we
+// fetch the .torrent server-side then forward the bytes here.
+func (c *Client) AddTorrentFile(ctx context.Context, filename string, content []byte) (*CreateResult, error) {
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	fw, err := w.CreateFormFile("file", filename)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := fw.Write(content); err != nil {
+		return nil, err
+	}
+	_ = w.WriteField("seed", "3")
+	_ = w.WriteField("allow_zip", "true")
+	w.Close()
+
+	data, err := c.do(ctx, http.MethodPost, "/torrents/createtorrent", &body, w.FormDataContentType())
+	if err != nil {
+		return nil, err
+	}
+	var res CreateResult
+	if err := json.Unmarshal(data, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
 // -----------------------------------------------------------------------------
 // /api/torrents/mylist — poll for state / list files
 // -----------------------------------------------------------------------------
