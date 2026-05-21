@@ -12,6 +12,7 @@ import { Button, IconButton } from "@/components/ui/button"
 import { cn } from "@/components/ui/core/styling"
 import { Modal } from "@/components/ui/modal"
 import { Skeleton } from "@/components/ui/skeleton"
+import { useRouter } from "@/lib/navigation"
 import { mediaTypeOf, titleOf, tmdbImage, useTMDBDetail, yearOf } from "@/lib/tmdb"
 import { atom, useAtom, useSetAtom } from "jotai"
 import React from "react"
@@ -68,6 +69,8 @@ export function NetflixDetailModal() {
 
 function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
     const { t } = useTranslation()
+    const router = useRouter()
+    const { closeDetail } = useNetflixDetailModal()
     const { data, isLoading } = useTMDBDetail(target.type, target.id)
 
     if (isLoading || !data) return <BodySkeleton />
@@ -79,7 +82,15 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
     const overview = data.overview || ""
     const genres = data.genres?.map(g => g.name) ?? []
     const score = data.vote_average
-    const watchHref = `/watch?id=${data.id}&type=${type}`
+
+    // Navigate in the same tab + close the modal. The original behaviour
+    // (target="_blank") came from Kuro, where opening an episode in a new
+    // tab let the user keep browsing while the player took over. For Notflix
+    // the player IS the new view — no need for a second tab.
+    const onPlay = () => {
+        closeDetail()
+        router.push(`/watch?id=${data.id}&type=${type}`)
+    }
 
     return (
         <div className="max-h-[90vh] sm:max-h-[85vh] overflow-y-auto">
@@ -99,15 +110,14 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
                         {title}
                     </h1>
                     <div className="flex items-center gap-3 flex-wrap">
-                        <a href={watchHref} target="_blank" rel="noopener noreferrer" className="inline-flex">
-                            <Button
-                                size="md"
-                                className="bg-white !text-black hover:!bg-white/90 font-bold rounded-md px-6 lg:px-8 lg:!h-12 lg:!text-base"
-                                leftIcon={<BiPlay className="text-xl sm:text-2xl" />}
-                            >
-                                {t("modal.play", "Lecture")}
-                            </Button>
-                        </a>
+                        <Button
+                            size="md"
+                            onClick={onPlay}
+                            className="bg-white !text-black hover:!bg-white/90 font-bold rounded-md px-6 lg:px-8 lg:!h-12 lg:!text-base"
+                            leftIcon={<BiPlay className="text-xl sm:text-2xl" />}
+                        >
+                            {t("modal.play", "Lecture")}
+                        </Button>
                         <Button
                             size="md"
                             intent="gray-subtle"

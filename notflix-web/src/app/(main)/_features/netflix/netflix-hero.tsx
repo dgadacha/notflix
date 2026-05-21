@@ -4,6 +4,7 @@ import { useSlideshow } from "@/app/(main)/_features/netflix/use-slideshow"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/components/ui/core/styling"
 import { Skeleton } from "@/components/ui/skeleton"
+import { useRouter } from "@/lib/navigation"
 import { mediaTypeOf, TMDBMedia, tmdbImage, titleOf, useTrending } from "@/lib/tmdb"
 import React from "react"
 import { useTranslation } from "react-i18next"
@@ -19,6 +20,7 @@ import { BiInfoCircle, BiPlay } from "react-icons/bi"
  */
 export function NetflixHero() {
     const { t } = useTranslation()
+    const router = useRouter()
     const { openDetail } = useNetflixDetailModal()
     const { data, isLoading } = useTrending("movie", "week")
 
@@ -83,7 +85,7 @@ export function NetflixHero() {
                             size="md"
                             className="bg-white !text-black hover:!bg-white/90 font-bold rounded-md px-4 sm:px-6 lg:px-8 lg:!h-12 lg:!text-base"
                             leftIcon={<BiPlay className="text-xl sm:text-2xl" />}
-                            onClick={() => openDetail(featured.id, type)}
+                            onClick={() => router.push(`/watch?id=${featured.id}&type=${type}`)}
                         >
                             {t("home.hero.play", "Lecture")}
                         </Button>

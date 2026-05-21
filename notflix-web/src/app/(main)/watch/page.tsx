@@ -1,34 +1,39 @@
 /**
  * Notflix watch page — TMDB → Prowlarr → TorBox → native <video>.
  *
- * Five UI states, walked in order:
+ * UX is one-click: arriving here the page immediately searches Prowlarr,
+ * auto-picks the top release (backend already ranked by cached → score →
+ * seeders) and hands it to TorBox. The picker still exists as an
+ * escape hatch — a "Changer de source" button surfaces it from the
+ * preparing/playing phases.
  *
- *   splash      Banner + "Lancer la lecture" button. The click is the
- *               browser user-gesture that lets audio autoplay in the next phase.
+ * Phases:
+ *
  *   searching   Hitting /api/v1/prowlarr/search/{movie|tv}; spinner.
- *   picking     The release list, ranked by the backend (cached → score →
- *               seeders). User picks one (or the top auto-selects).
- *   preparing   POST /api/v1/torbox/play → magnet resolves to a stream URL.
- *               Can take up to 3 min on a non-cached torrent; shows a
- *               progress message so the user knows we didn't freeze.
+ *   picking     Manual release selection (entered only via "Changer
+ *               de source" or when auto-pick failed).
+ *   preparing   POST /api/v1/torbox/play. Can take up to 3 min on a
+ *               non-cached torrent — the UI copy says so.
  *   playing     Native <video> mounted on the resolved URL. PiP-on-blur
  *               kicks in so the player keeps going if the user tabs away.
+ *   error       Surfaced + retry / change-source.
  */
-import { Release, useSearchMovie, useSearchTV, useTorBoxPlay } from "@/lib/notflix-api"
+import { Release, TorBoxPlayBody, useSearchMovie, useSearchTV, useTorBoxPlay } from "@/lib/notflix-api"
 import { titleOf, tmdbImage, useTMDBDetail, yearOf } from "@/lib/tmdb"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/components/ui/core/styling"
 import { Skeleton } from "@/components/ui/skeleton"
-import { useSearchParams } from "@/lib/navigation"
+import { useRouter, useSearchParams } from "@/lib/navigation"
 import React from "react"
 import { useTranslation } from "react-i18next"
-import { BiArrowBack, BiCheckCircle, BiPlay, BiSolidCheckCircle } from "react-icons/bi"
+import { BiArrowBack, BiPlay, BiRefresh, BiSolidCheckCircle } from "react-icons/bi"
 import { FiLoader } from "react-icons/fi"
 
-type Phase = "splash" | "searching" | "picking" | "preparing" | "playing" | "error"
+type Phase = "searching" | "picking" | "preparing" | "playing" | "error"
 
 export default function WatchPage() {
     const { t } = useTranslation()
+    const router = useRouter()
     const searchParams = useSearchParams()
     const idParam = searchParams.get("id")
     const typeParam = (searchParams.get("type") as "movie" | "tv" | null) ?? "movie"
@@ -44,49 +49,29 @@ export default function WatchPage() {
         Number.isNaN(mediaId) ? null : mediaId,
     )
 
-    const [phase, setPhase] = React.useState<Phase>("splash")
+    const [phase, setPhase] = React.useState<Phase>("searching")
     const [pickedRelease, setPickedRelease] = React.useState<Release | null>(null)
     const [streamUrl, setStreamUrl] = React.useState<string | null>(null)
     const [errorMsg, setErrorMsg] = React.useState<string | null>(null)
+    // Lets the user opt out of the auto-pick: once they click "Changer de
+    // source" we stop trying to launch the top result behind their back.
+    const [autoPickDisabled, setAutoPickDisabled] = React.useState(false)
 
-    // Backend search — only fires when the user clicks "Lancer la lecture",
-    // not on page load. Saves a Prowlarr roundtrip if the user bounces away.
+    // Prowlarr searches as soon as we know the title. No splash step — the
+    // user's click on "Lecture" upstream IS the user gesture; we just keep
+    // moving.
     const title = detail ? titleOf(detail) : ""
     const year = detail ? Number(yearOf(detail)) : undefined
-    const movieSearch = useSearchMovie(
-        phase === "searching" || phase === "picking" ? title : "",
-        year,
-    )
-    const tvSearch = useSearchTV(
-        phase === "searching" || phase === "picking" ? title : "",
-        season,
-        episode,
-    )
+    const movieSearch = useSearchMovie(typeParam === "movie" ? title : "", year)
+    const tvSearch = useSearchTV(typeParam === "tv" ? title : "", season, episode)
     const search = typeParam === "tv" ? tvSearch : movieSearch
-
-    React.useEffect(() => {
-        if (phase !== "searching") return
-        if (search.isFetching) return
-        if (search.data && search.data.length > 0) {
-            setPhase("picking")
-        } else if (search.data && search.data.length === 0) {
-            setErrorMsg(t("watch.no_release", "Aucune source trouvée pour ce titre."))
-            setPhase("error")
-        } else if (search.isError) {
-            setErrorMsg(t("watch.search_failed", "La recherche Prowlarr a échoué."))
-            setPhase("error")
-        }
-    }, [phase, search.isFetching, search.data, search.isError])
 
     const play = useTorBoxPlay()
 
-    const handleStart = React.useCallback(() => {
-        if (!title) return
-        setErrorMsg(null)
-        setPhase("searching")
-    }, [title])
-
-    const handlePick = React.useCallback(
+    // The actual launch — used both by the auto-pick effect and the manual
+    // ReleasePicker. Kept as a stable callback so the auto-pick effect
+    // doesn't re-fire spuriously.
+    const launchRelease = React.useCallback(
         async (release: Release) => {
             if (!release.magnetUrl && !release.infoHash && !release.downloadUrl) {
                 setErrorMsg(t("watch.no_source", "Cette source n'est pas utilisable (ni magnet, ni .torrent)."))
@@ -94,12 +79,10 @@ export default function WatchPage() {
                 return
             }
             setPickedRelease(release)
+            setStreamUrl(null)
             setPhase("preparing")
             try {
-                // Prefer magnet (direct, no server-side fetch). Fall back to
-                // an infohash-built magnet (.torrent on TorBox dedup), then
-                // to the Prowlarr downloadUrl (backend grabs the bytes).
-                const payload = release.magnetUrl
+                const payload: TorBoxPlayBody = release.magnetUrl
                     ? { magnet: release.magnetUrl }
                     : release.infoHash
                         ? {
@@ -121,18 +104,61 @@ export default function WatchPage() {
         [play, t],
     )
 
+    // Auto-pick: fire the top release as soon as the search resolves,
+    // unless the user has explicitly opted into manual picking.
+    React.useEffect(() => {
+        if (phase !== "searching") return
+        if (search.isFetching) return
+        if (search.isError) {
+            setErrorMsg(t("watch.search_failed", "La recherche Prowlarr a échoué."))
+            setPhase("error")
+            return
+        }
+        const results = search.data ?? []
+        if (results.length === 0) {
+            setErrorMsg(t("watch.no_release", "Aucune source trouvée pour ce titre."))
+            setPhase("error")
+            return
+        }
+        if (autoPickDisabled) {
+            setPhase("picking")
+            return
+        }
+        void launchRelease(results[0])
+    }, [phase, search.isFetching, search.isError, search.data, autoPickDisabled, launchRelease, t])
+
+    const handleChangeSource = React.useCallback(() => {
+        setAutoPickDisabled(true)
+        setStreamUrl(null)
+        setErrorMsg(null)
+        setPhase("picking")
+    }, [])
+
+    const handleManualPick = React.useCallback(
+        (release: Release) => {
+            void launchRelease(release)
+        },
+        [launchRelease],
+    )
+
     const handleRetry = React.useCallback(() => {
         setErrorMsg(null)
         setPickedRelease(null)
         setStreamUrl(null)
-        setPhase("splash")
+        setAutoPickDisabled(false)
+        setPhase("searching")
     }, [])
 
-    const handleBackToPicker = React.useCallback(() => {
-        setStreamUrl(null)
-        setPickedRelease(null)
-        setPhase("picking")
-    }, [])
+    const handleClose = React.useCallback(() => {
+        // Go back to the previous page (typically the home or the lists
+        // grid). If there's no history entry (player opened in a fresh tab)
+        // fall back to /.
+        if (window.history.length > 1) {
+            router.back()
+        } else {
+            router.push("/")
+        }
+    }, [router])
 
     if (Number.isNaN(mediaId)) {
         return (
@@ -153,7 +179,8 @@ export default function WatchPage() {
                 src={streamUrl}
                 title={displayTitle}
                 releaseTitle={pickedRelease?.title ?? ""}
-                onBack={handleBackToPicker}
+                onBack={handleClose}
+                onChangeSource={handleChangeSource}
             />
         )
     }
@@ -168,6 +195,17 @@ export default function WatchPage() {
                 />
             )}
             <div className="absolute inset-0 bg-gradient-to-t from-black via-black/80 to-black/40" />
+
+            {/* Close button — top-left so it doesn't fight with the bottom
+                tab on mobile. */}
+            <button
+                type="button"
+                onClick={handleClose}
+                aria-label={t("watch.close", "Fermer")}
+                className="absolute top-4 left-4 z-[2] p-2 rounded-full text-white bg-black/40 hover:bg-black/70"
+            >
+                <BiArrowBack className="size-6" />
+            </button>
 
             <div className="relative z-[1] min-h-screen flex flex-col items-center justify-center px-4 sm:px-6 py-12 text-center gap-6">
                 <p className="uppercase tracking-widest text-xs lg:text-sm text-brand-400 font-semibold">
@@ -186,13 +224,6 @@ export default function WatchPage() {
                     </h1>
                 )}
 
-                {phase === "splash" && (
-                    <SplashPanel
-                        onStart={handleStart}
-                        disabled={detailLoading || !title}
-                    />
-                )}
-
                 {phase === "searching" && (
                     <LoadingPanel
                         label={t("watch.searching", "Recherche des sources...")}
@@ -206,7 +237,7 @@ export default function WatchPage() {
                 {phase === "picking" && (
                     <ReleasePicker
                         releases={search.data ?? []}
-                        onPick={handlePick}
+                        onPick={handleManualPick}
                     />
                 )}
 
@@ -224,6 +255,7 @@ export default function WatchPage() {
                                     "TorBox télécharge la source — cela peut prendre 1-3 min...",
                                 )
                         }
+                        onChangeSource={handleChangeSource}
                     />
                 )}
 
@@ -231,6 +263,9 @@ export default function WatchPage() {
                     <ErrorPanel
                         message={errorMsg ?? t("watch.unknown_error", "Une erreur est survenue.")}
                         onRetry={handleRetry}
+                        onChangeSource={
+                            (search.data?.length ?? 0) > 0 ? handleChangeSource : undefined
+                        }
                     />
                 )}
             </div>
@@ -241,30 +276,6 @@ export default function WatchPage() {
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
-
-function SplashPanel({ onStart, disabled }: { onStart: () => void; disabled?: boolean }) {
-    const { t } = useTranslation()
-    return (
-        <>
-            <Button
-                onClick={onStart}
-                disabled={disabled}
-                size="xl"
-                leftIcon={<BiPlay className="text-3xl" />}
-                className="bg-white !text-black hover:!bg-white/90 font-bold px-10 rounded-md mt-4 disabled:opacity-50"
-                autoFocus
-            >
-                {t("watch.start", "Lancer la lecture")}
-            </Button>
-            <p className="text-xs text-[--muted] max-w-md mt-2">
-                {t(
-                    "watch.click_hint",
-                    "Notflix va rechercher la meilleure source disponible puis la lancer via TorBox.",
-                )}
-            </p>
-        </>
-    )
-}
 
 function LoadingPanel({ label, sublabel }: { label: string; sublabel?: string }) {
     return (
@@ -278,7 +289,16 @@ function LoadingPanel({ label, sublabel }: { label: string; sublabel?: string })
     )
 }
 
-function PreparingPanel({ release, label }: { release: Release; label: string }) {
+function PreparingPanel({
+    release,
+    label,
+    onChangeSource,
+}: {
+    release: Release
+    label: string
+    onChangeSource: () => void
+}) {
+    const { t } = useTranslation()
     return (
         <div className="flex flex-col items-center gap-4 text-white max-w-2xl">
             <FiLoader className="size-10 animate-spin text-brand-500" />
@@ -286,36 +306,68 @@ function PreparingPanel({ release, label }: { release: Release; label: string })
             <div className="flex items-center gap-2 flex-wrap justify-center text-xs">
                 <QualityBadge quality={release.quality} />
                 {release.cached && <CachedBadge />}
+                {hasFrenchAudio(release.title) && <LangBadge label="FR" />}
                 <span className="text-[--muted]">{release.indexer}</span>
             </div>
             <p className="text-xs text-[--muted] line-clamp-2 max-w-md">
                 {release.title}
             </p>
-        </div>
-    )
-}
-
-function ErrorPanel({ message, onRetry }: { message: string; onRetry: () => void }) {
-    const { t } = useTranslation()
-    return (
-        <div className="flex flex-col items-center gap-4 text-white max-w-md">
-            <p className="text-base lg:text-lg font-semibold text-red-300">{message}</p>
             <Button
-                onClick={onRetry}
-                size="md"
+                onClick={onChangeSource}
+                size="sm"
                 intent="white-subtle"
-                className="rounded-md"
+                leftIcon={<BiRefresh className="size-4" />}
+                className="rounded-md mt-2"
             >
-                {t("watch.retry", "Réessayer")}
+                {t("watch.change_source", "Changer de source")}
             </Button>
         </div>
     )
 }
 
+function ErrorPanel({
+    message,
+    onRetry,
+    onChangeSource,
+}: {
+    message: string
+    onRetry: () => void
+    onChangeSource?: () => void
+}) {
+    const { t } = useTranslation()
+    return (
+        <div className="flex flex-col items-center gap-4 text-white max-w-md">
+            <p className="text-base lg:text-lg font-semibold text-red-300">{message}</p>
+            <div className="flex items-center gap-2 flex-wrap justify-center">
+                <Button
+                    onClick={onRetry}
+                    size="md"
+                    intent="white-subtle"
+                    className="rounded-md"
+                >
+                    {t("watch.retry", "Réessayer")}
+                </Button>
+                {onChangeSource && (
+                    <Button
+                        onClick={onChangeSource}
+                        size="md"
+                        intent="gray-subtle"
+                        leftIcon={<BiRefresh className="size-4" />}
+                        className="rounded-md"
+                    >
+                        {t("watch.change_source", "Changer de source")}
+                    </Button>
+                )}
+            </div>
+        </div>
+    )
+}
+
 /**
- * Release picker — shows the top 8 results in a compact list. Backend already
- * sorted by (cached, score, seeders), so the first row is the recommended
- * choice. The user can scroll to see lower-quality fallbacks.
+ * Release picker — shows the top 12 results in a compact list. Backend
+ * already sorted by (cached, score, seeders), so the first row is the
+ * recommended choice (and what auto-picked, if the user is here it's
+ * because they wanted to override).
  */
 function ReleasePicker({
     releases,
@@ -325,7 +377,6 @@ function ReleasePicker({
     onPick: (release: Release) => void
 }) {
     const { t } = useTranslation()
-    // Limit to top 12 — beyond that the list is just noise for a casual viewer.
     const top = releases.slice(0, 12)
 
     return (
@@ -433,11 +484,13 @@ function Player({
     title,
     releaseTitle,
     onBack,
+    onChangeSource,
 }: {
     src: string
     title: string
     releaseTitle: string
     onBack: () => void
+    onChangeSource: () => void
 }) {
     const { t } = useTranslation()
     const videoRef = React.useRef<HTMLVideoElement>(null)
@@ -463,8 +516,8 @@ function Player({
 
     return (
         <div className="fixed inset-0 z-[100] bg-black flex flex-col">
-            {/* Top bar — title + back button. Auto-fade could come later. */}
-            <div className="absolute top-0 inset-x-0 z-10 p-4 flex items-center gap-3 bg-gradient-to-b from-black/80 to-transparent">
+            {/* Top bar — back button, title, change-source escape hatch. */}
+            <div className="absolute top-0 inset-x-0 z-10 p-3 sm:p-4 flex items-center gap-2 sm:gap-3 bg-gradient-to-b from-black/80 to-transparent">
                 <button
                     type="button"
                     onClick={onBack}
@@ -477,6 +530,14 @@ function Player({
                     <p className="text-white font-semibold truncate">{title}</p>
                     <p className="text-[--muted] text-xs truncate">{releaseTitle}</p>
                 </div>
+                <button
+                    type="button"
+                    onClick={onChangeSource}
+                    className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-white text-sm bg-white/10 hover:bg-white/20"
+                >
+                    <BiRefresh className="size-4" />
+                    {t("watch.change_source", "Changer de source")}
+                </button>
             </div>
 
             <video
@@ -487,8 +548,6 @@ function Player({
                 playsInline
                 className="w-full h-full object-contain"
                 onError={() => {
-                    // Surface the error so the parent can re-show the picker.
-                    // (Kept minimal — a fancier flow would pop a toast.)
                     console.error("[Notflix] video error on", src)
                 }}
             />

@@ -27,11 +27,13 @@ export const NetflixCard = React.memo(function NetflixCard({ media, priority, va
 
     return (
         <a
-            href={`/title/${type}/${media.id}`}
+            href={`/watch?id=${media.id}&type=${type}`}
             aria-label={title}
             onClick={(e) => {
-                // Plain left-click → modal. Cmd/Ctrl-click, middle-click, etc.
-                // → fall through to native nav so "open in new tab" still works.
+                // Plain left-click → modal (lets the user read the synopsis
+                // before committing to the player). Cmd/Ctrl-click, middle-
+                // click etc. fall through to the href so power users can
+                // open the player straight in a new tab.
                 if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
                 e.preventDefault()
                 openDetail(media.id, type)
