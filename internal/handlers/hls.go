@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -103,9 +104,10 @@ type SubPrepStatus struct {
 	//   ready        — cache file written, frontend can start playback
 	//   failed       — see Error for the reason
 	State string `json:"state"`
-	// 0-100. For "extracting" it climbs slowly toward 30; for
-	// "translating" it walks linearly with batch completion.
-	Progress int `json:"progress"`
+	// 0-100 with two decimals of precision. During extraction it's the
+	// real ffmpeg-reported position (out_time_ms / source duration);
+	// during translation it's batch progress mapped into 50-95%.
+	Progress float64 `json:"progress"`
 	// Index into session.subtitles of the source we picked. -1 when
 	// no suitable source was available.
 	ChosenSubIdx int `json:"chosenSubIdx"`
@@ -478,7 +480,7 @@ func (h *Handler) startSubPrep(sess *hlsSession, prefLang string) SubPrepStatus 
 // runSubPrep drives the prep state machine: picking → extracting →
 // (optionally) translating → ready.
 func (h *Handler) runSubPrep(sess *hlsSession, chosenIdx int, targetLang string, willTranslate bool) {
-	setState := func(state string, progress int, errMsg string) {
+	setState := func(state string, progress float64, errMsg string) {
 		sess.prepMu.Lock()
 		sess.prep.State = state
 		sess.prep.Progress = progress
@@ -496,22 +498,39 @@ func (h *Handler) runSubPrep(sess *hlsSession, chosenIdx int, targetLang string,
 		rawCacheIdx = track.Index + 10_000
 	}
 
+	// Extraction occupies 0-50% of the bar. Translation (when needed)
+	// fills 50-95%; the final state=ready sets 100.
+	const extractMax = 50.0
+	const translateMin = 50.0
+	const translateMax = 95.0
+
 	var raw []byte
 	if cached := h.readCachedTranslation(sess.id, rawCacheIdx, ""); cached != nil {
 		raw = cached
-		setState("extracting", 30, "")
+		setState("extracting", extractMax, "")
 	} else {
-		setState("extracting", 10, "")
+		setState("extracting", 1, "")
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		var (
 			out []byte
 			err error
 		)
+		// Live-update ffmpeg's reported position so the bar moves
+		// linearly with the source media.
+		onExtractProgress := func(pct float64) {
+			// ffmpeg reports out_time as a percentage of the source
+			// duration. Map [0,100] → [0, extractMax].
+			scaled := pct * extractMax / 100
+			if scaled > extractMax {
+				scaled = extractMax
+			}
+			setState("extracting", scaled, "")
+		}
 		if track.Source == "external" {
 			ext := sess.externalSubs[track.Index]
 			out, err = h.extractExternalSubtitleVTT(ctx, ext.URL)
 		} else {
-			out, err = h.extractSubtitleVTT(ctx, sess.url, track.Index)
+			out, err = h.extractEmbeddedSubtitleWithProgress(ctx, sess.url, track.Index, sess.duration, onExtractProgress)
 		}
 		cancel()
 		if err != nil || len(out) == 0 {
@@ -521,7 +540,7 @@ func (h *Handler) runSubPrep(sess *hlsSession, chosenIdx int, targetLang string,
 		}
 		h.writeCachedTranslation(sess.id, rawCacheIdx, "", out)
 		raw = out
-		setState("extracting", 50, "")
+		setState("extracting", extractMax, "")
 	}
 
 	// Step 2: Translation (only when needed).
@@ -540,32 +559,28 @@ func (h *Handler) runSubPrep(sess *hlsSession, chosenIdx int, targetLang string,
 	}
 
 	if !h.App.Anthropic.HasKey() {
-		// No Claude — fall back to the raw track (user sees source-lang
-		// subtitles, better than nothing).
 		setState("ready", 100, "no anthropic key — serving native subs")
 		log.Printf("hls prep: session %s ready (no claude key, serving %s)",
 			sess.id, track.Language)
 		return
 	}
 
-	setState("translating", 55, "")
+	setState("translating", translateMin, "")
 	trCtx, cancelTr := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancelTr()
 	progressCb := func(done, total int) {
-		// 55-95 % range belongs to translation.
 		if total == 0 {
 			return
 		}
-		p := 55 + (done*40)/total
-		if p > 95 {
-			p = 95
+		p := translateMin + float64(done)*(translateMax-translateMin)/float64(total)
+		if p > translateMax {
+			p = translateMax
 		}
 		setState("translating", p, "")
 	}
 	translated, err := translateVTTWithProgress(trCtx, h.App.Anthropic, raw, targetLang, progressCb)
 	if err != nil || len(translated) == 0 {
 		log.Printf("hls prep: translation failed: %v", err)
-		// Fall back to native — better than blocking playback forever.
 		setState("ready", 100, fmt.Sprintf("translation failed: %v — serving native", err))
 		return
 	}
@@ -573,6 +588,110 @@ func (h *Handler) runSubPrep(sess *hlsSession, chosenIdx int, targetLang string,
 	setState("ready", 100, "")
 	log.Printf("hls prep: session %s ready (claude %s→%s)",
 		sess.id, track.Language, targetLang)
+}
+
+// extractEmbeddedSubtitleWithProgress runs ffmpeg with `-progress pipe:2`
+// so progress can be reported in real time. ffmpeg writes K=V lines to
+// stderr like:
+//
+//   out_time_us=12345678
+//   out_time_ms=12345678
+//   out_time=00:00:12.345
+//   progress=continue        // or "end" on the final block
+//
+// For subtitle output, out_time_ms tracks the timestamp of the latest
+// cue emitted, so progress = (out_time / duration_seconds) is a real
+// readout of where ffmpeg is inside the source file.
+//
+// duration is the source media duration in seconds (from ffprobe); when
+// 0 we still report 0-100 in some indeterminate way — the caller can
+// still see "ffmpeg is running" via the state field.
+func (h *Handler) extractEmbeddedSubtitleWithProgress(
+	parent context.Context,
+	sourceURL string,
+	streamIdx int,
+	duration float64,
+	progressCb func(pct float64),
+) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-hide_banner",
+		"-loglevel", "error",
+		// -progress writes K=V progress info to fd 2 (stderr). With
+		// -loglevel error nothing else writes there, so the scanner
+		// only sees progress lines.
+		"-progress", "pipe:2",
+		"-vn",
+		"-an",
+		"-i", sourceURL,
+		"-map", fmt.Sprintf("0:s:%d", streamIdx),
+		"-c:s", "webvtt",
+		"-f", "webvtt",
+		"pipe:1",
+	)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	// Parse progress lines from stderr in a background goroutine.
+	// Errors during scan are non-fatal — we just stop reporting
+	// progress and rely on the final cmd.Wait() result.
+	go parseFFmpegProgress(stderr, duration, progressCb)
+
+	out, readErr := io.ReadAll(stdout)
+	waitErr := cmd.Wait()
+	if waitErr != nil {
+		return nil, fmt.Errorf("%v", waitErr)
+	}
+	if readErr != nil {
+		return nil, readErr
+	}
+	return out, nil
+}
+
+func parseFFmpegProgress(r io.Reader, duration float64, cb func(pct float64)) {
+	if cb == nil {
+		_, _ = io.Copy(io.Discard, r)
+		return
+	}
+	buf := bufio.NewScanner(r)
+	for buf.Scan() {
+		line := buf.Text()
+		if !strings.HasPrefix(line, "out_time_ms=") {
+			continue
+		}
+		msStr := strings.TrimPrefix(line, "out_time_ms=")
+		ms, err := strconv.ParseFloat(strings.TrimSpace(msStr), 64)
+		if err != nil {
+			continue
+		}
+		// ffmpeg's out_time_ms is actually microseconds (the field name
+		// is misleading — see ffmpeg source / docs). Convert to seconds.
+		sec := ms / 1_000_000
+		if duration <= 0 {
+			continue
+		}
+		pct := sec / duration * 100
+		if pct < 0 {
+			pct = 0
+		}
+		if pct > 100 {
+			pct = 100
+		}
+		cb(pct)
+	}
 }
 
 // HandleSubPrepStart — POST /api/v1/stream/hls/:sessionId/prep

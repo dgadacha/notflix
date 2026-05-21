@@ -368,7 +368,10 @@ export default function WatchPage() {
                 return
             }
             if (!cancelled) {
-                window.setTimeout(tick, 1000)
+                // 500 ms — fast enough that the 2-decimal readout
+                // visibly ticks during ffmpeg extraction, slow enough
+                // that we're not hammering the backend.
+                window.setTimeout(tick, 500)
             }
         }
 
@@ -698,19 +701,31 @@ function SubPrepPanel({
         }
     }, [status, t])
 
-    const progress = Math.max(5, Math.min(100, status?.progress ?? 0))
+    const rawProgress = status?.progress ?? 0
+    const progress = Math.max(0, Math.min(100, rawProgress))
+    // Floor at 1% so the bar visibly nudges off zero as soon as we
+    // enter extracting, without lying about the actual numeric
+    // readout shown next to it.
+    const displayBar = Math.max(progress, progress > 0 ? 1 : 0)
 
     return (
         <div className="flex flex-col items-center gap-5 text-white max-w-2xl w-full">
             <FiLoader className="size-10 animate-spin text-brand-500" />
             <p className="text-base lg:text-lg font-semibold text-center">{label}</p>
 
-            {/* Determinate progress bar. */}
-            <div className="w-full max-w-md h-1.5 bg-white/10 rounded-full overflow-hidden">
-                <div
-                    className="h-full bg-brand-500 transition-[width] duration-500 ease-out"
-                    style={{ width: `${progress}%` }}
-                />
+            {/* Determinate progress bar + numeric readout to 2 decimals.
+                The text update is what tells the user "yes, something
+                is happening" when the bar is still very low. */}
+            <div className="w-full max-w-md space-y-2">
+                <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
+                    <div
+                        className="h-full bg-brand-500 transition-[width] duration-500 ease-out"
+                        style={{ width: `${displayBar}%` }}
+                    />
+                </div>
+                <p className="text-center text-xs tabular-nums text-white/80 font-mono">
+                    {progress.toFixed(2)} %
+                </p>
             </div>
 
             {status?.willTranslate && (
