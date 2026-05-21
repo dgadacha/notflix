@@ -81,27 +81,52 @@ func (h *Handler) HandleSearchTV(c echo.Context) error {
 	return RespondOK(c, h.annotateAndSort(c, results))
 }
 
-// filterByTitleRelevance drops Prowlarr results whose title doesn't share
-// enough significant words with the searched title. Prowlarr's Torznab
-// search is fuzzy and indexer-dependent — for "Super Mario Galaxy" we'd
-// see "Le Réveil de la Momie" (a popular cached release from the same
-// year) leak into the results, then float to #1 thanks to the cached
-// bonus. This filter runs BEFORE annotateAndSort so the bad matches are
-// out of the picture before the scoring even fires.
+// filterByTitleRelevance drops Prowlarr results whose title doesn't match
+// the searched title closely enough. Prowlarr's Torznab search is fuzzy
+// and indexer-dependent; without this filter we've seen "Le Réveil de la
+// Momie" leak into Super Mario results (same year, cached on TorBox),
+// and "Haibaras Teenage New Game ... The Gray Boys Plan ..." leak into
+// "The Boys" results (because the single significant word "boys" matched).
 //
-// Threshold: 60% of significant words must appear, except for 1-2-word
-// titles ("Tenet", "Joker") where we require 100% — short titles need
-// strict matching or anything containing the word "the" will pass.
+// Two strategies depending on how distinctive the title is:
+//
+//  - SHORT title (≤ 2 significant words after stripping stopwords like
+//    "the"/"le"/"of"): we require the full NORMALISED phrase (stopwords
+//    kept) to appear as a contiguous substring of the release title.
+//    "The Boys" → needle "the boys" — only matches releases that contain
+//    "the boys" literally, not "the gray boys" or "beach boys".
+//
+//  - LONG title (3+ significant words): 60% of those significant words
+//    must appear anywhere in the release title. This is robust to
+//    word-order variation ("Movie" vs "le film") and missing tokens.
+//
+// Empty needles → pass-through (don't filter on a title we can't reason
+// about).
 func filterByTitleRelevance(results []prowlarr.SearchResult, searched string) []prowlarr.SearchResult {
-	needles := significantWords(normalizeTitle(searched))
+	phrase := strings.TrimSpace(collapseSpaces(normalizeTitle(searched)))
+	if phrase == "" {
+		return results
+	}
+	needles := significantWords(phrase)
 	if len(needles) == 0 {
 		return results
 	}
-	threshold := 0.6
-	if len(needles) <= 2 {
-		threshold = 1.0
-	}
+
 	out := make([]prowlarr.SearchResult, 0, len(results))
+
+	if len(needles) <= 2 {
+		// Short title — phrase match required.
+		for _, r := range results {
+			hay := collapseSpaces(normalizeTitle(r.Title))
+			if strings.Contains(hay, phrase) {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+
+	// Long title — word-coverage match.
+	const threshold = 0.6
 	for _, r := range results {
 		hay := normalizeTitle(r.Title)
 		matched := 0
@@ -116,6 +141,27 @@ func filterByTitleRelevance(results []prowlarr.SearchResult, searched string) []
 		}
 	}
 	return out
+}
+
+// collapseSpaces turns runs of whitespace into single spaces. Needed so
+// the SHORT-title phrase match isn't tripped up by double spaces left
+// behind when normalizeTitle replaces punctuation with spaces.
+func collapseSpaces(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	prevSpace := false
+	for _, r := range s {
+		if r == ' ' {
+			if !prevSpace {
+				b.WriteByte(' ')
+			}
+			prevSpace = true
+		} else {
+			b.WriteRune(r)
+			prevSpace = false
+		}
+	}
+	return b.String()
 }
 
 // normalizeTitle lowercases, strips accents and collapses every
