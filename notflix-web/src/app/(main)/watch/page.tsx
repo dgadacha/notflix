@@ -18,7 +18,7 @@
  *               kicks in so the player keeps going if the user tabs away.
  *   error       Surfaced + retry / change-source.
  */
-import { Release, TorBoxPlayBody, useSearchMovie, useSearchTV, useTorBoxPlay } from "@/lib/notflix-api"
+import { Release, releaseTorBoxPayload, useSearchMovie, useSearchTV, useTorBoxPlay } from "@/lib/notflix-api"
 import {
     AudioPref,
     QualityPref,
@@ -80,6 +80,8 @@ export default function WatchPage() {
         setStreamUrl(null)
         setErrorMsg(null)
         setAutoPickDisabled(false)
+        setSkipKeys(new Set())
+        setFallbackAttempt(0)
     }, [mediaId, typeParam, season, episode])
 
     // Prowlarr searches as soon as we know the title. No splash step — the
@@ -123,40 +125,75 @@ export default function WatchPage() {
         return strict.length === 0
     }, [search.data, qualityPref, audioPref])
 
-    // The actual launch — used both by the auto-pick effect and the manual
-    // ReleasePicker. Kept as a stable callback so the auto-pick effect
-    // doesn't re-fire spuriously.
+    // releaseKey — stable identifier across renders for skip-tracking.
+    const releaseKey = React.useCallback(
+        (r: Release) => r.guid || r.infoHash || r.title,
+        [],
+    )
+
+    // Track which releases we've already tried in this session so the
+    // auto-fallback doesn't loop on the same one.
+    const [skipKeys, setSkipKeys] = React.useState<Set<string>>(new Set())
+    const [fallbackAttempt, setFallbackAttempt] = React.useState(0)
+
+    // The actual launch — tries the given release; on TorBox failure
+    // (BOZO_TORRENT, timeout, unusable payload, …) silently moves on to
+    // the next ranked release. Up to 3 tries total before surfacing the
+    // last error in the panel.
+    //
+    // `skip` threads through as a local Set so the closure doesn't race
+    // with React state across the recursive calls.
+    const MAX_TRIES = 3
     const launchRelease = React.useCallback(
-        async (release: Release) => {
-            if (!release.magnetUrl && !release.infoHash && !release.downloadUrl) {
-                setErrorMsg(t("watch.no_source", "Cette source n'est pas utilisable (ni magnet, ni .torrent)."))
-                setPhase("error")
+        async (release: Release, skip: Set<string> = new Set()): Promise<void> => {
+            const key = releaseKey(release)
+            skip.add(key)
+            setSkipKeys(new Set(skip))
+
+            const tryNext = async (lastError?: Error) => {
+                if (skip.size >= MAX_TRIES) {
+                    setErrorMsg(
+                        lastError?.message ??
+                            t("watch.torbox_failed", "TorBox n'a pas pu préparer le flux."),
+                    )
+                    setPhase("error")
+                    return
+                }
+                const next = filteredReleases.find(r => !skip.has(releaseKey(r)))
+                if (!next) {
+                    setErrorMsg(
+                        lastError?.message ??
+                            t("watch.no_release", "Plus aucune source à essayer."),
+                    )
+                    setPhase("error")
+                    return
+                }
+                setFallbackAttempt(skip.size)
+                await launchRelease(next, skip)
+            }
+
+            const payload = releaseTorBoxPayload(release)
+            if (!payload) {
+                console.warn("[Notflix] unusable release skipped:", release.title)
+                await tryNext()
                 return
             }
+
             setPickedRelease(release)
             setStreamUrl(null)
+            setErrorMsg(null)
             setPhase("preparing")
             try {
-                const payload: TorBoxPlayBody = release.magnetUrl
-                    ? { magnet: release.magnetUrl }
-                    : release.infoHash
-                        ? {
-                            magnet: `magnet:?xt=urn:btih:${release.infoHash}&dn=${encodeURIComponent(release.title)}`,
-                        }
-                        : { downloadUrl: release.downloadUrl }
                 const result = await play.mutateAsync(payload)
                 setStreamUrl(result.streamUrl)
                 setPhase("playing")
+                setFallbackAttempt(0)
             } catch (err) {
-                setErrorMsg(
-                    err instanceof Error
-                        ? err.message
-                        : t("watch.torbox_failed", "TorBox n'a pas pu préparer le flux."),
-                )
-                setPhase("error")
+                console.warn("[Notflix] release failed, trying next:", release.title, err)
+                await tryNext(err instanceof Error ? err : undefined)
             }
         },
-        [play, t],
+        [play, filteredReleases, releaseKey, t],
     )
 
     // Auto-pick: fire the top (pref-filtered) release as soon as the search
@@ -200,6 +237,8 @@ export default function WatchPage() {
         setPickedRelease(null)
         setStreamUrl(null)
         setAutoPickDisabled(false)
+        setSkipKeys(new Set())
+        setFallbackAttempt(0)
         setPhase("searching")
     }, [])
 
@@ -318,6 +357,7 @@ export default function WatchPage() {
                                     "TorBox télécharge la source — cela peut prendre 1-3 min...",
                                 )
                         }
+                        fallbackAttempt={fallbackAttempt}
                         onChangeSource={handleChangeSource}
                     />
                 )}
@@ -355,16 +395,26 @@ function LoadingPanel({ label, sublabel }: { label: string; sublabel?: string })
 function PreparingPanel({
     release,
     label,
+    fallbackAttempt,
     onChangeSource,
 }: {
     release: Release
     label: string
+    fallbackAttempt: number
     onChangeSource: () => void
 }) {
     const { t } = useTranslation()
     return (
         <div className="flex flex-col items-center gap-4 text-white max-w-2xl">
             <FiLoader className="size-10 animate-spin text-brand-500" />
+            {fallbackAttempt > 0 && (
+                <p className="text-xs text-amber-300/90 bg-amber-500/10 border border-amber-500/30 rounded-md px-3 py-1.5">
+                    {t(
+                        "watch.fallback_attempt",
+                        "Source précédente indisponible — essai d'une autre…",
+                    )}
+                </p>
+            )}
             <p className="text-base lg:text-lg font-semibold">{label}</p>
             <div className="flex items-center gap-2 flex-wrap justify-center text-xs">
                 <QualityBadge quality={release.quality} />

@@ -72,6 +72,38 @@ export function useTorBoxPlay() {
     })
 }
 
+/**
+ * Build the TorBox /play body for a Prowlarr release, picking the most
+ * trustworthy source field.
+ *
+ * Prowlarr is inconsistent across indexers: some return a true magnet:?…
+ * URI in `magnetUrl`, others stuff their own /download HTTP proxy URL in
+ * the same field (looks like a magnet to a naive caller but TorBox
+ * rejects it with BOZO_TORRENT). Order of preference:
+ *
+ *   1. magnetUrl, ONLY if it actually starts with "magnet:"
+ *   2. infoHash → synthesise a magnet (every BTIH cached release works)
+ *   3. downloadUrl OR magnetUrl-as-downloadUrl → backend fetches the
+ *      .torrent server-side
+ *
+ * Returns null if none of the three is usable — the caller should mark
+ * the release as bad and try the next one.
+ */
+export function releaseTorBoxPayload(r: Release): TorBoxPlayBody | null {
+    if (r.magnetUrl && r.magnetUrl.toLowerCase().startsWith("magnet:")) {
+        return { magnet: r.magnetUrl }
+    }
+    if (r.infoHash) {
+        const dn = encodeURIComponent(r.title || "")
+        return { magnet: `magnet:?xt=urn:btih:${r.infoHash}&dn=${dn}` }
+    }
+    // Some indexers shove a Prowlarr download URL into magnetUrl. Treat
+    // it as downloadUrl so the backend fetches the .torrent.
+    const dl = r.downloadUrl || (r.magnetUrl && !r.magnetUrl.toLowerCase().startsWith("magnet:") ? r.magnetUrl : "")
+    if (dl) return { downloadUrl: dl }
+    return null
+}
+
 // --------------------------------------------------------------------------
 // /api/v1/prowlarr/search/*
 // --------------------------------------------------------------------------
