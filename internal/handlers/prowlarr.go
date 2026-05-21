@@ -192,10 +192,31 @@ func qualityScore(title string) float64 {
 		s += 10
 	}
 	if strings.Contains(t, "multi") || strings.Contains(t, "french") || strings.Contains(t, "vff") {
-		s += 40  // bonus for French audio (this is Notflix's audience)
+		s += 40 // bonus for French audio (this is Notflix's audience)
 	}
 	if strings.Contains(t, "cam") || strings.Contains(t, "ts ") || strings.Contains(t, "telesync") {
 		s -= 100
+	}
+
+	// Audio codec compatibility — Chrome (the dominant Notflix client) can
+	// only decode AAC / MP3 / Opus / Vorbis natively. Files muxed with
+	// DDP / E-AC-3 / DTS / TrueHD play the video fine but render as muted
+	// (volume control greyed out), which feels broken. Nudge the scoring
+	// to prefer browser-friendly codecs *among comparably-ranked releases*
+	// — the cached-flag bonus (×10000) still dominates so we don't trade
+	// a 1080p cached release for an uncached AAC one.
+	if strings.Contains(t, "aac") {
+		s += 50 // universally decodable in the browser
+	}
+	if strings.Contains(t, "ddp") || strings.Contains(t, "dd+") ||
+		strings.Contains(t, "eac3") || strings.Contains(t, "e-ac3") || strings.Contains(t, "e-ac-3") {
+		s -= 100 // Dolby Digital Plus — Chrome can't decode, silent playback
+	}
+	if strings.Contains(t, "dts") {
+		s -= 100 // DTS — same story
+	}
+	if strings.Contains(t, "truehd") || strings.Contains(t, "atmos") {
+		s -= 120 // Dolby TrueHD / Atmos — even Safari struggles, definitely not Chrome
 	}
 	return s
 }
