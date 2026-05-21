@@ -65,7 +65,7 @@ Ce qui reste (roadmap courte) :
 - [ ] Page `Mes listes` (favoris, en cours, vu) câblée à la DB profile
 - [ ] Picker saison/épisode pour les séries TV
 - [ ] Rebrand visuel (logo `K` → `N`, title HTML « anime streaming »)
-- [ ] Déploiement k8s + Cloudflare Tunnel (manifests + Dockerfile déjà prêts côté Kuro, à porter)
+- [ ] Déploiement k8s + Cloudflare Tunnel (manifests + Dockerfile à finaliser)
 
 ## Pré-requis locaux
 
@@ -226,7 +226,7 @@ Les indexers français (Torrent9 entre autres) renvoient un `downloadUrl` Prowla
 | Clé | Défaut | Description |
 |---|---|---|
 | `NOTFLIX_SERVER_HOST` | `127.0.0.1` | Bind |
-| `NOTFLIX_SERVER_PORT` | `43212` | Port (cohabite avec Kuro sur 43211) |
+| `NOTFLIX_SERVER_PORT` | `43212` | Port HTTP |
 | `NOTFLIX_DATA_DIR` | `~/.notflix-data` | SQLite + cache |
 | `NOTFLIX_TMDB_API_KEY` | — | **Requis** pour le catalogue |
 | `NOTFLIX_TORBOX_API_KEY` | — | Requis pour la lecture |
@@ -235,7 +235,6 @@ Les indexers français (Torrent9 entre autres) renvoient un `downloadUrl` Prowla
 
 ## Crédits
 
-- Fork de [dgadacha/kuro](https://github.com/dgadacha/kuro), lui-même fork de [5rahim/seanime](https://github.com/5rahim/seanime). Énorme dette envers l'UI polished de Seanime et son ergonomie.
 - Catalogue : [The Movie Database (TMDB)](https://www.themoviedb.org/) — usage personnel non-commercial.
 - Debrid : [TorBox](https://torbox.app/).
 - Recherche : [Prowlarr](https://prowlarr.com/) + [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr).
