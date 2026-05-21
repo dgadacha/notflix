@@ -1,7 +1,7 @@
 /**
  * Netflix-style multi-profile support — server-backed.
  *
- * Persistence layer: SQLite, exposed via `/api/v1/notflix-profiles` (see Go side
+ * Persistence layer: SQLite, exposed via `/api/v1/profiles` (see Go side
  * in `internal/database/db/notflix_profile.go` + `internal/handlers/notflix_profile.go`).
  * Profiles + watch history therefore survive browser changes, devices,
  * incognito, cache wipes — anything that's not "the server's PVC vanished".
@@ -67,16 +67,16 @@ export const PROFILE_COLORS = [
 // Endpoint constants (kept here so this whole feature is grep-able)
 // -----------------------------------------------------------------------------
 
-const EP_LIST = "/api/v1/notflix-profiles"
-const EP_CREATE = "/api/v1/notflix-profiles"
-const EP_PATCH = (uid: string) => `/api/v1/notflix-profiles/${encodeURIComponent(uid)}`
-const EP_DELETE = (uid: string) => `/api/v1/notflix-profiles/${encodeURIComponent(uid)}`
-const EP_HISTORY = (uid: string) => `/api/v1/notflix-profiles/${encodeURIComponent(uid)}/history`
-const EP_PROFILE_LIST = (uid: string) => `/api/v1/notflix-profiles/${encodeURIComponent(uid)}/list`
+const EP_LIST = "/api/v1/profiles"
+const EP_CREATE = "/api/v1/profiles"
+const EP_PATCH = (uid: string) => `/api/v1/profiles/${encodeURIComponent(uid)}`
+const EP_DELETE = (uid: string) => `/api/v1/profiles/${encodeURIComponent(uid)}`
+const EP_HISTORY = (uid: string) => `/api/v1/profiles/${encodeURIComponent(uid)}/history`
+const EP_PROFILE_LIST = (uid: string) => `/api/v1/profiles/${encodeURIComponent(uid)}/list`
 
-const QK_PROFILES = ["notflix-profiles"] as const
-const QK_HISTORY = (uid: string) => ["notflix-profiles", uid, "history"] as const
-const QK_PROFILE_LIST = (uid: string) => ["notflix-profiles", uid, "list"] as const
+const QK_PROFILES = ["profiles"] as const
+const QK_HISTORY = (uid: string) => ["profiles", uid, "history"] as const
+const QK_PROFILE_LIST = (uid: string) => ["profiles", uid, "list"] as const
 
 // -----------------------------------------------------------------------------
 // Active-profile selection (purely client-side — which profile is "current")
@@ -136,7 +136,7 @@ export function useActiveProfileHistory(): ProfileWatchEntry[] {
     const q = useServerQuery<ProfileWatchEntry[]>({
         endpoint: uid ? EP_HISTORY(uid) : "",
         method: "GET",
-        queryKey: uid ? [...QK_HISTORY(uid)] : ["notflix-profiles", "history", "noop"],
+        queryKey: uid ? [...QK_HISTORY(uid)] : ["profiles", "history", "noop"],
         enabled: !!uid,
     })
     return q.data ?? []
@@ -158,7 +158,7 @@ export function useProfileActions() {
     const createMut = useServerMutation<Profile, { uid: string; name: string; avatar: string; color: string }>({
         endpoint: EP_CREATE,
         method: "POST",
-        mutationKey: ["notflix-profiles", "create"],
+        mutationKey: ["profiles", "create"],
         onSuccess: () => invalidate(),
     })
 
@@ -168,14 +168,14 @@ export function useProfileActions() {
         // request manually via a small wrapper.
         endpoint: EP_PATCH("__placeholder__"),
         method: "PATCH",
-        mutationKey: ["notflix-profiles", "update"],
+        mutationKey: ["profiles", "update"],
         onSuccess: () => invalidate(),
     })
 
     const deleteMut = useServerMutation<boolean, void>({
         endpoint: EP_DELETE("__placeholder__"),
         method: "DELETE",
-        mutationKey: ["notflix-profiles", "delete"],
+        mutationKey: ["profiles", "delete"],
         onSuccess: () => invalidate(),
     })
 
@@ -210,7 +210,7 @@ export function useProfileActions() {
             if (!r.ok) throw new Error(`Profile delete failed: ${r.status}`)
             if (activeUid === uid) setActiveUid(null)
             invalidate()
-            queryClient.invalidateQueries({ queryKey: ["notflix-profiles", uid, "history"] })
+            queryClient.invalidateQueries({ queryKey: ["profiles", uid, "history"] })
         },
         [activeUid, setActiveUid, invalidate, queryClient],
     )
@@ -292,7 +292,7 @@ export function useActiveProfileList(): ProfileListEntry[] {
     const q = useServerQuery<ProfileListEntry[]>({
         endpoint: uid ? EP_PROFILE_LIST(uid) : "",
         method: "GET",
-        queryKey: uid ? [...QK_PROFILE_LIST(uid)] : ["notflix-profiles", "list", "noop"],
+        queryKey: uid ? [...QK_PROFILE_LIST(uid)] : ["profiles", "list", "noop"],
         enabled: !!uid,
     })
     return q.data ?? []
