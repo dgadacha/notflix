@@ -1,12 +1,9 @@
 /**
  * Notflix detail modal — opens when a card is clicked from the home / lists
- * / search grid. Shows TMDB metadata (poster, overview, year, genres, rating)
- * and routes to /watch via a primary CTA.
+ * / search grid. Shows TMDB metadata, lets the user pick playback prefs,
+ * and (for TV series) the season + episode via a Netflix-style episode list.
  *
- * The full version (Prowlarr release picker preview, "more like this" rail)
- * will land in Phase 3e. This stub is the minimum viable surface so the
- * cards can open something and the hero's Play / More info buttons have a
- * target.
+ * Click target → /watch with the right query params.
  */
 import { Button, IconButton } from "@/components/ui/button"
 import { cn } from "@/components/ui/core/styling"
@@ -22,7 +19,6 @@ import {
 import {
     mediaTypeOf,
     TMDBEpisode,
-    TMDBSeason,
     titleOf,
     tmdbImage,
     useTMDBDetail,
@@ -32,7 +28,7 @@ import {
 import { atom, useAtom, useSetAtom } from "jotai"
 import React from "react"
 import { useTranslation } from "react-i18next"
-import { BiInfoCircle, BiPlay, BiX } from "react-icons/bi"
+import { BiPlay, BiX } from "react-icons/bi"
 
 type ModalTarget = { id: number; type: "movie" | "tv" } | null
 
@@ -55,8 +51,6 @@ export function NetflixDetailModal() {
         <Modal
             open={open}
             onOpenChange={(v) => { if (!v) setTarget(null) }}
-            // Bump above the fixed top bar (z-[60]); on mobile the navbar
-            // avatar otherwise sits where the close button belongs.
             overlayClass="!z-[70]"
             contentClass="!max-w-5xl !p-0 !rounded-xl overflow-hidden bg-[#0a0a0a] border-white/5"
             hideCloseButton
@@ -90,33 +84,22 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
     const [quality, setQuality] = useQualityPref()
     const [audio, setAudio] = useAudioPref()
 
-    // TV series: pick a season + episode before launching. Default = first
-    // non-special season (season_number > 0), episode 1.
+    // TV series: track which season we're showing in the episode list.
+    // Episode is no longer a separate piece of state — the user clicks an
+    // episode row to launch it. The big "Lecture" button still launches
+    // episode 1 of the current season as a sensible default.
     const seasons = React.useMemo(() => {
         if (target.type !== "tv") return [] as NonNullable<typeof data>["seasons"]
         return (data?.seasons ?? []).filter(s => s.season_number > 0)
     }, [target.type, data?.seasons])
     const [selectedSeason, setSelectedSeason] = React.useState<number | null>(null)
-    const [selectedEpisode, setSelectedEpisode] = React.useState<number>(1)
 
-    // Initialise season once the TMDB payload arrives.
     React.useEffect(() => {
         if (target.type !== "tv") return
         if (selectedSeason != null) return
         if (seasons.length === 0) return
         setSelectedSeason(seasons[0].season_number)
     }, [target.type, seasons, selectedSeason])
-
-    const { data: seasonDetail } = useTMDBSeason(
-        target.type === "tv" ? target.id : null,
-        selectedSeason,
-    )
-
-    // Reset episode to 1 whenever the user switches season.
-    const onChangeSeason = (n: number) => {
-        setSelectedSeason(n)
-        setSelectedEpisode(1)
-    }
 
     if (isLoading || !data) return <BodySkeleton />
 
@@ -128,26 +111,36 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
     const genres = data.genres?.map(g => g.name) ?? []
     const score = data.vote_average
 
-    // Navigate in the same tab + close the modal. Pass the user's quality /
-    // audio prefs AND (for TV) the selected season/episode down as query
-    // params — /watch filters the Prowlarr release list with them before
-    // the auto-pick runs.
-    const onPlay = () => {
+    // Build the /watch URL with current prefs + (for TV) the requested
+    // season/episode. Movies omit the season/episode params entirely.
+    const buildWatchUrl = (season?: number, episode?: number) => {
         const params = new URLSearchParams({ id: String(data.id), type })
         if (quality !== "auto") params.set("quality", quality)
         if (audio !== "auto") params.set("audio", audio)
-        if (type === "tv" && selectedSeason != null) {
-            params.set("season", String(selectedSeason))
-            params.set("episode", String(selectedEpisode))
+        if (type === "tv" && season != null && episode != null) {
+            params.set("season", String(season))
+            params.set("episode", String(episode))
         }
+        return `/watch?${params.toString()}`
+    }
+
+    const onPlayMain = () => {
         closeDetail()
-        router.push(`/watch?${params.toString()}`)
+        if (type === "tv" && selectedSeason != null) {
+            router.push(buildWatchUrl(selectedSeason, 1))
+        } else {
+            router.push(buildWatchUrl())
+        }
+    }
+
+    const onPlayEpisode = (season: number, episode: number) => {
+        closeDetail()
+        router.push(buildWatchUrl(season, episode))
     }
 
     return (
         <div className="max-h-[90vh] sm:max-h-[85vh] overflow-y-auto">
-            {/* Hero — taller on mobile to fit title + CTA without squeezing
-                into a 200px strip. */}
+            {/* Hero banner */}
             <div className="relative w-full aspect-[4/3] sm:aspect-[16/9] lg:aspect-[16/8] bg-black">
                 {banner && (
                     <img
@@ -164,36 +157,15 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
                     <div className="flex items-center gap-3 flex-wrap">
                         <Button
                             size="md"
-                            onClick={onPlay}
+                            onClick={onPlayMain}
                             disabled={type === "tv" && selectedSeason == null}
                             className="bg-white !text-black hover:!bg-white/90 font-bold rounded-md px-6 lg:px-8 lg:!h-12 lg:!text-base disabled:opacity-50"
                             leftIcon={<BiPlay className="text-xl sm:text-2xl" />}
                         >
                             {type === "tv" && selectedSeason != null
-                                ? `${t("modal.play", "Lecture")} · S${selectedSeason}E${selectedEpisode}`
+                                ? `${t("modal.play", "Lecture")} · S${selectedSeason}E1`
                                 : t("modal.play", "Lecture")}
                         </Button>
-
-                        {/* TV: season + episode pickers. Movies skip this row. */}
-                        {type === "tv" && seasons.length > 0 && (
-                            <>
-                                <PrefSelect
-                                    label={t("modal.season", "Saison")}
-                                    value={String(selectedSeason ?? seasons[0].season_number)}
-                                    options={seasons.map(s => ({
-                                        value: String(s.season_number),
-                                        label: s.name || `Saison ${s.season_number}`,
-                                    }))}
-                                    onChange={(v) => onChangeSeason(parseInt(v, 10))}
-                                />
-                                <PrefSelect
-                                    label={t("modal.episode", "Épisode")}
-                                    value={String(selectedEpisode)}
-                                    options={episodeOptions(seasonDetail?.episodes, seasons, selectedSeason)}
-                                    onChange={(v) => setSelectedEpisode(parseInt(v, 10))}
-                                />
-                            </>
-                        )}
 
                         {/* Quality + audio prefs — persisted in localStorage so
                             the choice survives between films. /watch reads
@@ -214,7 +186,7 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
                 </div>
             </div>
 
-            {/* Body */}
+            {/* Synopsis + meta */}
             <div className="p-4 sm:p-6 lg:p-10 space-y-6 lg:space-y-8">
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:gap-6">
                     <div className="lg:col-span-2 space-y-3">
@@ -248,44 +220,228 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
                     </div>
                 </div>
             </div>
+
+            {/* TV episode list — only for series with at least one season */}
+            {type === "tv" && seasons.length > 0 && selectedSeason != null && (
+                <EpisodeList
+                    tvId={data.id}
+                    seasons={seasons.map(s => ({
+                        season_number: s.season_number,
+                        name: s.name,
+                        episode_count: s.episode_count,
+                    }))}
+                    selectedSeason={selectedSeason}
+                    onChangeSeason={setSelectedSeason}
+                    onPickEpisode={onPlayEpisode}
+                />
+            )}
+        </div>
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Episode list (Netflix-style)
+// ---------------------------------------------------------------------------
+
+type SeasonSummary = { season_number: number; name: string; episode_count: number }
+
+function EpisodeList({
+    tvId,
+    seasons,
+    selectedSeason,
+    onChangeSeason,
+    onPickEpisode,
+}: {
+    tvId: number
+    seasons: SeasonSummary[]
+    selectedSeason: number
+    onChangeSeason: (n: number) => void
+    onPickEpisode: (season: number, episode: number) => void
+}) {
+    const { t } = useTranslation()
+    const { data: seasonDetail, isLoading, isFetching } = useTMDBSeason(tvId, selectedSeason)
+    const episodes = seasonDetail?.episodes ?? []
+    const currentSeasonName =
+        seasons.find(s => s.season_number === selectedSeason)?.name ?? `Saison ${selectedSeason}`
+
+    return (
+        <section className="px-4 sm:px-6 lg:px-10 pb-8 lg:pb-12 space-y-4">
+            <header className="flex items-center justify-between gap-3 flex-wrap">
+                <h2 className="text-xl lg:text-2xl font-bold text-white">
+                    {t("modal.episodes", "Épisodes")}
+                </h2>
+                {seasons.length > 1 ? (
+                    <SeasonSelect
+                        seasons={seasons}
+                        value={selectedSeason}
+                        onChange={onChangeSeason}
+                    />
+                ) : (
+                    <span className="text-sm text-[--muted]">{currentSeasonName}</span>
+                )}
+            </header>
+
+            {/* Episode rows. We render skeletons during the very first fetch
+                so the modal doesn't flash an empty section. */}
+            {(isLoading || (isFetching && episodes.length === 0)) ? (
+                <ul className="space-y-2">
+                    {Array.from({ length: 4 }).map((_, i) => (
+                        <EpisodeRowSkeleton key={i} />
+                    ))}
+                </ul>
+            ) : episodes.length === 0 ? (
+                <p className="text-center py-8 text-[--muted] text-sm">
+                    {t("modal.no_episodes", "Aucun épisode disponible pour cette saison.")}
+                </p>
+            ) : (
+                <ul className="-mx-1">
+                    {episodes.map(ep => (
+                        <li key={ep.id}>
+                            <EpisodeRow
+                                episode={ep}
+                                onClick={() => onPickEpisode(selectedSeason, ep.episode_number)}
+                            />
+                        </li>
+                    ))}
+                </ul>
+            )}
+        </section>
+    )
+}
+
+function EpisodeRow({ episode, onClick }: { episode: TMDBEpisode; onClick: () => void }) {
+    const thumb = tmdbImage("w300", episode.still_path)
+    // Mark episodes whose air_date is still in the future — they exist in
+    // TMDB's catalogue but Prowlarr won't have a release for them yet.
+    const airDate = episode.air_date ? new Date(episode.air_date) : null
+    const isUpcoming = !!airDate && airDate.getTime() > Date.now()
+
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            disabled={isUpcoming}
+            className={cn(
+                "group w-full text-left flex items-start gap-3 sm:gap-4 px-2 sm:px-3 py-3",
+                "border-b border-white/5 hover:bg-white/[0.04] transition-colors",
+                "focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-500 rounded-md",
+                isUpcoming && "opacity-50 cursor-not-allowed hover:bg-transparent",
+            )}
+        >
+            <span className="text-2xl sm:text-3xl font-bold text-[--muted] w-8 sm:w-10 text-center shrink-0 self-center">
+                {episode.episode_number}
+            </span>
+
+            <div className="relative aspect-video w-[110px] sm:w-[140px] lg:w-[180px] shrink-0 rounded-md overflow-hidden bg-black">
+                {thumb ? (
+                    <img
+                        src={thumb}
+                        alt=""
+                        loading="lazy"
+                        className="w-full h-full object-cover"
+                    />
+                ) : (
+                    <div className="w-full h-full bg-white/5" />
+                )}
+                {/* Play overlay on hover (desktop only — feels janky on touch) */}
+                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 flex items-center justify-center transition-colors">
+                    <BiPlay className="size-8 lg:size-10 text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+                </div>
+                {episode.runtime != null && episode.runtime > 0 && (
+                    <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/80 text-white text-[10px] font-semibold">
+                        {episode.runtime} min
+                    </span>
+                )}
+            </div>
+
+            <div className="flex-1 min-w-0 space-y-1">
+                <div className="flex items-baseline justify-between gap-2">
+                    <h3 className="text-white font-semibold text-sm sm:text-base line-clamp-1">
+                        {episode.name || `Épisode ${episode.episode_number}`}
+                    </h3>
+                    {isUpcoming && airDate && (
+                        <span className="text-[10px] uppercase tracking-wide text-brand-400 font-semibold shrink-0">
+                            {airDate.toLocaleDateString("fr-FR", {
+                                day: "2-digit",
+                                month: "short",
+                                year: "numeric",
+                            })}
+                        </span>
+                    )}
+                </div>
+                {episode.overview && (
+                    <p className="text-[--muted] text-xs sm:text-sm line-clamp-2 lg:line-clamp-3">
+                        {episode.overview}
+                    </p>
+                )}
+            </div>
+        </button>
+    )
+}
+
+function EpisodeRowSkeleton() {
+    return (
+        <div className="flex items-start gap-3 sm:gap-4 px-2 sm:px-3 py-3 border-b border-white/5">
+            <Skeleton className="w-8 h-6 shrink-0 mt-2" />
+            <Skeleton className="aspect-video w-[110px] sm:w-[140px] lg:w-[180px] shrink-0 rounded-md" />
+            <div className="flex-1 space-y-2 pt-1">
+                <Skeleton className="h-4 w-1/2" />
+                <Skeleton className="h-3 w-full" />
+                <Skeleton className="h-3 w-3/4" />
+            </div>
         </div>
     )
 }
 
 /**
- * Build the <option> list for the episode dropdown.
- *
- * Prefers the live `useTMDBSeason` data when available (real episode
- * titles like "Épisode 3 — Le dernier souffle"). Falls back to a numeric
- * 1..N range using the season's episode_count from /tv/{id} so the picker
- * never blocks waiting on the network.
+ * Season dropdown used at the top of the episode list. Styled to look like
+ * a Netflix "boxed" picker — pill with chevron, native <select> overlay.
  */
-function episodeOptions(
-    episodes: TMDBEpisode[] | undefined,
-    seasons: TMDBSeason[],
-    selectedSeasonNumber: number | null,
-): { value: string; label: string }[] {
-    if (episodes && episodes.length > 0) {
-        return episodes.map(ep => ({
-            value: String(ep.episode_number),
-            label: ep.name
-                ? `${ep.episode_number}. ${ep.name}`
-                : `Épisode ${ep.episode_number}`,
-        }))
-    }
-    const season = seasons.find(s => s.season_number === selectedSeasonNumber)
-    const count = season?.episode_count ?? 0
-    return Array.from({ length: count }, (_, i) => ({
-        value: String(i + 1),
-        label: `Épisode ${i + 1}`,
-    }))
+function SeasonSelect({
+    seasons,
+    value,
+    onChange,
+}: {
+    seasons: SeasonSummary[]
+    value: number
+    onChange: (n: number) => void
+}) {
+    const current = seasons.find(s => s.season_number === value)
+    return (
+        <label className="relative inline-flex">
+            <span
+                className={cn(
+                    "inline-flex items-center justify-between gap-3 min-w-[12rem]",
+                    "bg-white/5 hover:bg-white/10 border border-white/15 rounded-md",
+                    "px-3 py-2 text-white text-sm font-semibold",
+                    "transition-colors",
+                )}
+            >
+                {current?.name ?? `Saison ${value}`}
+                <svg className="size-4 opacity-70" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+                    <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.06l3.71-3.83a.75.75 0 111.08 1.04l-4.25 4.39a.75.75 0 01-1.08 0L5.21 8.27a.75.75 0 01.02-1.06z" clipRule="evenodd" />
+                </svg>
+            </span>
+            <select
+                value={value}
+                onChange={(e) => onChange(parseInt(e.target.value, 10))}
+                className="absolute inset-0 opacity-0 cursor-pointer"
+                aria-label="Saison"
+            >
+                {seasons.map(s => (
+                    <option key={s.season_number} value={s.season_number}>
+                        {s.name || `Saison ${s.season_number}`} ({s.episode_count})
+                    </option>
+                ))}
+            </select>
+        </label>
+    )
 }
 
-/**
- * Compact label-on-top dropdown styled to sit next to the white Lecture
- * button. We use a native <select> + overlay rather than a Radix component
- * to keep the modal a11y story simple and the bundle lean.
- */
+// ---------------------------------------------------------------------------
+// Generic compact pref picker (Quality / Audio in the hero CTA row)
+// ---------------------------------------------------------------------------
+
 function PrefSelect<T extends string>({
     label,
     value,
