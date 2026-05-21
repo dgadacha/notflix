@@ -27,7 +27,6 @@ import {
     releaseMatchesAudio,
     releaseMatchesQuality,
 } from "@/lib/preferences"
-import { HiOutlineSpeakerWave } from "react-icons/hi2"
 import { titleOf, tmdbImage, useTMDBDetail, yearOf } from "@/lib/tmdb"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/components/ui/core/styling"
@@ -621,19 +620,14 @@ function Player({
     const { t } = useTranslation()
     const videoRef = React.useRef<HTMLVideoElement>(null)
 
-    // Auto-enable the ffmpeg transmux when the picked release's name
-    // signals an audio codec this browser said it can't decode. The
-    // user can also flip it manually if they hit a silent file even
-    // when feature-detect said yes.
-    const [useTransmux, setUseTransmux] = React.useState<boolean>(
-        () => releaseHasIncompatibleAudio(releaseTitle),
-    )
-    React.useEffect(() => {
-        // Reset on release change (back-to-picker → new pick).
-        setUseTransmux(releaseHasIncompatibleAudio(releaseTitle))
-    }, [releaseTitle])
-
-    const videoSrc = useTransmux
+    // Silently route through the ffmpeg transmux when the picked
+    // release's audio codec is one this browser can't decode (DDP / DTS
+    // / TrueHD on Chrome Linux/Windows, etc). The check is feature-
+    // detected via canPlayType on a throwaway <video>; if the browser
+    // claims support, we use the direct TorBox URL — best quality, no
+    // server bandwidth doubling.
+    const needsTransmux = releaseHasIncompatibleAudio(releaseTitle)
+    const videoSrc = needsTransmux
         ? `/api/v1/stream/transmux?url=${encodeURIComponent(src)}`
         : src
 
@@ -672,35 +666,6 @@ function Player({
                     <p className="text-white font-semibold truncate">{title}</p>
                     <p className="text-[--muted] text-xs truncate">{releaseTitle}</p>
                 </div>
-
-                {/* Audio AAC transmux toggle — hidden on mobile to save
-                    space; the desktop tooltip explains the trade-off. */}
-                <button
-                    type="button"
-                    onClick={() => setUseTransmux(v => !v)}
-                    title={
-                        useTransmux
-                            ? t(
-                                "watch.transmux_on_tooltip",
-                                "Audio reconverti en AAC par le serveur. Désactiver pour la qualité d'origine.",
-                            )
-                            : t(
-                                "watch.transmux_off_tooltip",
-                                "Activer si pas de son — Notflix reconvertit l'audio en AAC compatible navigateur.",
-                            )
-                    }
-                    className={cn(
-                        "hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors",
-                        useTransmux
-                            ? "bg-brand-500/30 text-white border border-brand-500/60"
-                            : "bg-white/10 text-white hover:bg-white/20",
-                    )}
-                >
-                    <HiOutlineSpeakerWave className="size-4" />
-                    {useTransmux
-                        ? t("watch.transmux_on", "Audio AAC")
-                        : t("watch.transmux_off", "Audio")}
-                </button>
 
                 <button
                     type="button"

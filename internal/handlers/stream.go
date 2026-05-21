@@ -109,11 +109,24 @@ func (h *Handler) HandleStreamTransmux(c echo.Context) error {
 // isAllowedStreamHost — whitelist for the transmux source URL. Without
 // this the endpoint would happily proxy any arbitrary remote URL,
 // effectively turning the backend into an open ffmpeg-as-a-service.
+//
+// TorBox CDN hosts seen in the wild — all variants must be covered:
+//
+//	store-043.wnam.tb-cdn.io       (older "store" cluster)
+//	nexus-163.weur.tb-cdn.st       (newer "nexus" cluster, .st TLD)
+//	*.tb-cdn.com                   (defensive — observed in dashboards)
+//	torrents.torbox.app            (account-level direct hosting)
 func isAllowedStreamHost(host string) bool {
 	h := strings.ToLower(host)
-	// TorBox CDN hosts look like:
-	//   store-043.wnam.tb-cdn.io
-	//   store-NNN.eu.tb-cdn.io
-	//   torrents.torbox.app
-	return strings.HasSuffix(h, ".tb-cdn.io") || strings.HasSuffix(h, ".torbox.app")
+	for _, suffix := range []string{
+		".tb-cdn.io",
+		".tb-cdn.st",
+		".tb-cdn.com",
+		".torbox.app",
+	} {
+		if strings.HasSuffix(h, suffix) {
+			return true
+		}
+	}
+	return false
 }
