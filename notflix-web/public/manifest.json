@@ -1,7 +1,7 @@
 {
   "name": "Notflix",
   "short_name": "Notflix",
-  "description": "A Netflix-style anime streaming app.",
+  "description": "Application de streaming auto-hébergée pour films et séries.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#000000",

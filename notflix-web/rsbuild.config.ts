@@ -103,7 +103,7 @@ export default defineConfig({
     },
     html: {
         template: "./index.html",
-        title: "Seanime",
+        title: "Notflix",
     },
     performance: {
         chunkSplit: {
