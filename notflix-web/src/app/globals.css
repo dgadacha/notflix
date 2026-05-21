@@ -2,6 +2,31 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Shimmer loader — a single sliding-gradient stripe across a translucent
+ * background. Used by the Skeleton component to give a Netflix-feel
+ * placeholder while data loads. Replaces the duller `animate-pulse`
+ * (opacity fade) we used before. */
+@layer utilities {
+    @keyframes notflix-shimmer {
+        0%   { background-position: -200% 0; }
+        100% { background-position:  200% 0; }
+    }
+    .animate-shimmer {
+        background-color: rgba(255, 255, 255, 0.04);
+        background-image: linear-gradient(
+            90deg,
+            transparent 0%,
+            rgba(255, 255, 255, 0.08) 45%,
+            rgba(255, 255, 255, 0.12) 50%,
+            rgba(255, 255, 255, 0.08) 55%,
+            transparent 100%
+        );
+        background-size: 200% 100%;
+        background-repeat: no-repeat;
+        animation: notflix-shimmer 1.6s ease-in-out infinite;
+    }
+}
+
 @layer base {
     :root {
         --media-cue-backdrop: blur(0px);

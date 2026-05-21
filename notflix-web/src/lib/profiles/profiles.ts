@@ -163,6 +163,25 @@ export function useActiveProfileHistory(): ProfileWatchEntry[] {
     return q.data ?? []
 }
 
+/**
+ * Same as `useActiveProfileHistory` but returns the React Query envelope
+ * so callers can render a skeleton during the initial fetch instead of
+ * flashing "no items" while the network call is still in flight.
+ */
+export function useActiveProfileHistoryQuery() {
+    const uid = useActiveProfileId()
+    const q = useServerQuery<ProfileWatchEntry[]>({
+        endpoint: uid ? EP_HISTORY(uid) : "",
+        method: "GET",
+        queryKey: uid ? [...QK_HISTORY(uid)] : ["profiles", "history", "noop"],
+        enabled: !!uid,
+    })
+    return {
+        data: q.data ?? [],
+        isLoading: !!uid && q.isLoading,
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Profile CRUD
 // -----------------------------------------------------------------------------
@@ -405,6 +424,25 @@ export function useActiveProfileList(): ProfileListEntry[] {
         enabled: !!uid,
     })
     return q.data ?? []
+}
+
+/**
+ * Query-envelope variant of useActiveProfileList — surface isLoading so
+ * /lists can render a skeleton instead of an "empty" state during the
+ * first fetch.
+ */
+export function useActiveProfileListQuery() {
+    const uid = useActiveProfileId()
+    const q = useServerQuery<ProfileListEntry[]>({
+        endpoint: uid ? EP_PROFILE_LIST(uid) : "",
+        method: "GET",
+        queryKey: uid ? [...QK_PROFILE_LIST(uid)] : ["profiles", "list", "noop"],
+        enabled: !!uid,
+    })
+    return {
+        data: q.data ?? [],
+        isLoading: !!uid && q.isLoading,
+    }
 }
 
 /**

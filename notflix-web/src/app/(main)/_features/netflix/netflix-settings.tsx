@@ -17,6 +17,7 @@
  */
 import { LanguageSwitcher } from "@/components/shared/language-switcher"
 import { cn } from "@/components/ui/core/styling"
+import { Skeleton } from "@/components/ui/skeleton"
 import {
     ServerConfig,
     UpdateServerConfigBody,
@@ -525,7 +526,19 @@ function ServerConfigEditor() {
     const { data, isLoading, error } = useServerConfig()
 
     if (isLoading) {
-        return <p className="text-[--muted] text-sm">{t("common.loading", "Chargement…")}</p>
+        return (
+            <div className="space-y-3">
+                {Array.from({ length: 4 }).map((_, i) => (
+                    <div key={i} className="bg-black/30 border border-white/10 rounded-md p-3 lg:p-3.5 space-y-2">
+                        <div className="flex items-center justify-between gap-3">
+                            <Skeleton className="h-4 w-28" />
+                            <Skeleton className="h-6 w-16 rounded-md" />
+                        </div>
+                        <Skeleton className="h-3 w-3/4" />
+                    </div>
+                ))}
+            </div>
+        )
     }
     if (error || !data) {
         return (

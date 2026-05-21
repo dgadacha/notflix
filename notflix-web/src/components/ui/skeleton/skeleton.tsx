@@ -9,7 +9,10 @@ import { cn, defineStyleAnatomy } from "../core/styling"
 export const SkeletonAnatomy = defineStyleAnatomy({
     root: cva([
         "UI-Skeleton__root",
-        "animate-pulse rounded-[--radius-md] bg-[--subtle] w-full h-12",
+        // animate-shimmer = sliding gradient stripe over a translucent
+        // base. Defined in globals.css under @layer utilities. Drops the
+        // bg-[--subtle] base since the shimmer utility owns the color.
+        "animate-shimmer rounded-[--radius-md] w-full h-12",
     ]),
 })
 

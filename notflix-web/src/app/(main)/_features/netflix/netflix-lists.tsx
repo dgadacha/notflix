@@ -11,12 +11,13 @@
  */
 import { useNetflixDetailModal } from "@/app/(main)/_features/netflix/netflix-detail-modal"
 import { cn } from "@/components/ui/core/styling"
+import { Skeleton } from "@/components/ui/skeleton"
 import { useRouter } from "@/lib/navigation"
 import {
     ProfileWatchEntry,
-    useActiveProfileHistory,
+    useActiveProfileHistoryQuery,
     useActiveProfileId,
-    useActiveProfileList,
+    useActiveProfileListQuery,
     useProfileHistoryActions,
     useProfileListActions,
     ProfileListEntry,
@@ -104,9 +105,13 @@ function TabPill({
 
 function MyListGrid() {
     const { t } = useTranslation()
-    const list = useActiveProfileList()
+    const { data: list, isLoading } = useActiveProfileListQuery()
     const { remove } = useProfileListActions()
     const { openDetail } = useNetflixDetailModal()
+
+    if (isLoading) {
+        return <ListSkeletonGrid />
+    }
 
     if (list.length === 0) {
         return (
@@ -196,7 +201,7 @@ function ListCard({
 
 function HistoryGrid() {
     const { t } = useTranslation()
-    const history = useActiveProfileHistory()
+    const { data: history, isLoading } = useActiveProfileHistoryQuery()
     const router = useRouter()
     const { deleteByMedia } = useProfileHistoryActions()
     const { openDetail } = useNetflixDetailModal()
@@ -208,6 +213,10 @@ function HistoryGrid() {
             ),
         [history],
     )
+
+    if (isLoading) {
+        return <ListSkeletonGrid />
+    }
 
     if (sorted.length === 0) {
         return (
@@ -353,5 +362,16 @@ function ResultGrid({ children }: { children: React.ReactNode }) {
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-x-4 gap-y-6 py-2">
             {children}
         </div>
+    )
+}
+
+/** Shimmer placeholder used by both tabs while the network call resolves. */
+function ListSkeletonGrid() {
+    return (
+        <ResultGrid>
+            {Array.from({ length: 10 }).map((_, i) => (
+                <Skeleton key={i} className="w-full aspect-video rounded-md" />
+            ))}
+        </ResultGrid>
     )
 }

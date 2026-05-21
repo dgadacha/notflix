@@ -6,6 +6,7 @@
  */
 import { Button } from "@/components/ui/button"
 import { cn } from "@/components/ui/core/styling"
+import { Skeleton } from "@/components/ui/skeleton"
 import {
     CurrentUser,
     useCreateUser,
@@ -57,7 +58,20 @@ export function NetflixAdminUsers() {
                     {t("admin.users.existing", "Comptes existants")}
                 </h2>
                 {isLoading ? (
-                    <div className="text-[--muted] text-sm">{t("common.loading", "Chargement…")}</div>
+                    <ul className="space-y-2">
+                        {Array.from({ length: 3 }).map((_, i) => (
+                            <li
+                                key={i}
+                                className="bg-white/5 border border-white/10 rounded-lg p-3 lg:p-4 flex items-center gap-3"
+                            >
+                                <Skeleton className="size-9 lg:size-10 rounded-full !h-auto aspect-square" />
+                                <div className="flex-1 space-y-1.5">
+                                    <Skeleton className="h-4 w-40 max-w-full" />
+                                    <Skeleton className="h-3 w-24 max-w-full" />
+                                </div>
+                            </li>
+                        ))}
+                    </ul>
                 ) : users.length === 0 ? (
                     <div className="text-[--muted] text-sm">{t("admin.users.empty", "Aucun compte.")}</div>
                 ) : (
