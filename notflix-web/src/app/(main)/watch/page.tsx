@@ -26,6 +26,7 @@ import {
     releaseHasIncompatibleAudio,
     releaseMatchesAudio,
     releaseMatchesQuality,
+    releaseNeedsTransmux,
 } from "@/lib/preferences"
 import { titleOf, tmdbImage, useTMDBDetail, yearOf } from "@/lib/tmdb"
 import { Button } from "@/components/ui/button"
@@ -620,13 +621,15 @@ function Player({
     const { t } = useTranslation()
     const videoRef = React.useRef<HTMLVideoElement>(null)
 
-    // Silently route through the ffmpeg transmux when the picked
-    // release's audio codec is one this browser can't decode (DDP / DTS
-    // / TrueHD on Chrome Linux/Windows, etc). The check is feature-
-    // detected via canPlayType on a throwaway <video>; if the browser
-    // claims support, we use the direct TorBox URL — best quality, no
-    // server bandwidth doubling.
-    const needsTransmux = releaseHasIncompatibleAudio(releaseTitle)
+    // Silently route the stream through the ffmpeg transmux unless the
+    // release title explicitly advertises AAC. Release tags rarely
+    // mention the audio codec (a "720p WEBRip x264-SKGTV" can ship
+    // anything: AC3, EAC3, DTS, …), so feature-detection alone isn't
+    // enough — we'd false-negative and the player would render muted.
+    // Bandwidth cost: doubled while playing. Acceptable trade-off for
+    // V1; future work is a server-side ffprobe to skip transmux when
+    // the actual audio track is already browser-compatible.
+    const needsTransmux = releaseNeedsTransmux(releaseTitle)
     const videoSrc = needsTransmux
         ? `/api/v1/stream/transmux?url=${encodeURIComponent(src)}`
         : src

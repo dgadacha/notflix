@@ -129,7 +129,8 @@ function detectSupportedAudioCodecs(): Set<CodecToken> {
 /**
  * True iff the release name signals an audio codec THIS browser can't
  * decode. Releases that mention a codec the browser does support — or
- * no exotic codec at all (assumed AAC/AC-3 default) — pass through.
+ * no exotic codec at all — pass through. Used by the release-picker
+ * filter (which prefers to keep candidates broad rather than narrow).
  */
 export function releaseHasIncompatibleAudio(title: string): boolean {
     const t = title.toLowerCase()
@@ -140,4 +141,25 @@ export function releaseHasIncompatibleAudio(title: string): boolean {
         }
     }
     return false
+}
+
+/**
+ * Stricter check used by the PLAYER to decide whether to route the
+ * stream through the ffmpeg transmux. Defaults to "yes, transmux"
+ * because release names rarely advertise the audio codec accurately
+ * — a "720p WEBRip x264-SKGTV" can ship AC-3 / E-AC-3 / DTS audio
+ * with no hint in the title, and Chrome will play the video muted.
+ *
+ * Direct streaming (no transmux) is only chosen when the title
+ * explicitly says "AAC" — that one is universally browser-friendly.
+ *
+ * Trade-off: server bandwidth doubles for every non-AAC playback.
+ * Acceptable on a homelab; revisit when we serve over a metered
+ * pipe.
+ */
+export function releaseNeedsTransmux(title: string): boolean {
+    if (!title) return true
+    const t = title.toLowerCase()
+    // Match "AAC" as a standalone token or in tags like AAC2.0 / AAC5.1.
+    return !/\baac\b/.test(t) && !/aac[0-9]/.test(t)
 }
