@@ -168,3 +168,18 @@ export function useTMDBSearch(query: string) {
         enabled: query.trim().length >= 2,
     })
 }
+
+// --------------------------------------------------------------------------
+// Genres — used by the /categories browse page
+// --------------------------------------------------------------------------
+
+export type TMDBGenre = { id: number; name: string }
+
+export function useTMDBGenres(type: "movie" | "tv") {
+    return useQuery<{ genres: TMDBGenre[] }>({
+        queryKey: ["tmdb", "genres", type],
+        queryFn: () => tmdbFetch(`/genre/${type}/list`),
+        // Genre list changes once in a blue moon — keep it cached all day.
+        staleTime: 24 * 60 * 60 * 1000,
+    })
+}

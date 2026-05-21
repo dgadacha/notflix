@@ -32,6 +32,7 @@ export function NetflixTopBar() {
 
     const navItems: { name: string; href: string; isCurrent: boolean }[] = [
         { name: t("nav.home", "Accueil"), href: "/", isCurrent: pathname === "/" },
+        { name: t("nav.categories", "Catégories"), href: "/categories", isCurrent: pathname.startsWith("/categories") },
         { name: t("nav.lists", "Mes listes"), href: "/lists", isCurrent: pathname.startsWith("/lists") },
     ]
 

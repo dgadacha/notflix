@@ -19,7 +19,7 @@ import { useTranslation } from "react-i18next"
 import { BiUser } from "react-icons/bi"
 import { FiSearch } from "react-icons/fi"
 // `LuHome` was renamed to `LuHouse` in lucide v0.453+ (react-icons/lu mirror).
-import { LuHouse, LuListVideo, LuCompass } from "react-icons/lu"
+import { LuHouse, LuLayoutGrid, LuListVideo } from "react-icons/lu"
 
 export function NetflixBottomTab() {
     const { t } = useTranslation()
@@ -33,11 +33,11 @@ export function NetflixBottomTab() {
     if (pathname.startsWith("/offline")) return null
 
     const items = [
-        { href: "/",          label: t("nav.home"),     icon: LuHouse,     active: pathname === "/" },
-        { href: "/search",    label: t("nav.search"),   icon: FiSearch,    active: pathname.startsWith("/search") },
-        { href: "/lists",     label: t("nav.lists"),    icon: LuListVideo, active: pathname.startsWith("/lists") },
-        { href: "/discover",  label: t("nav.discover"), icon: LuCompass,   active: pathname.startsWith("/discover") },
-        { href: "/profiles",  label: t("nav.profile"),  icon: BiUser,      active: false /* not a top-level nav state */, isAvatar: true },
+        { href: "/",            label: t("nav.home", "Accueil"),         icon: LuHouse,      active: pathname === "/" },
+        { href: "/search",      label: t("nav.search", "Recherche"),     icon: FiSearch,     active: pathname.startsWith("/search") },
+        { href: "/categories",  label: t("nav.categories", "Catégories"), icon: LuLayoutGrid, active: pathname.startsWith("/categories") },
+        { href: "/lists",       label: t("nav.lists", "Mes listes"),     icon: LuListVideo,  active: pathname.startsWith("/lists") },
+        { href: "/profiles",    label: t("nav.profile", "Profil"),       icon: BiUser,       active: false, isAvatar: true },
     ] as const
 
     return (
