@@ -195,6 +195,24 @@ export function useTMDBSearch(query: string) {
     })
 }
 
+/**
+ * Paginated multi-search — used by the /search page so the user can
+ * keep scrolling past the first 20 hits.
+ */
+export function useInfiniteTMDBSearch(query: string) {
+    return useInfiniteQuery<TMDBPaged>({
+        queryKey: ["tmdb", "search-infinite", query],
+        queryFn: ({ pageParam = 1 }) => tmdbFetch("/search/multi", { query, page: pageParam as number }),
+        initialPageParam: 1,
+        getNextPageParam: (lastPage) => {
+            if (!lastPage) return undefined
+            if (lastPage.page >= lastPage.total_pages) return undefined
+            return lastPage.page + 1
+        },
+        enabled: query.trim().length >= 2,
+    })
+}
+
 // --------------------------------------------------------------------------
 // Genres — used by the /categories browse page
 // --------------------------------------------------------------------------

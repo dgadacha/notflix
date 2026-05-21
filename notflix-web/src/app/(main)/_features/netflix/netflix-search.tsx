@@ -7,10 +7,10 @@ import { NetflixCard } from "@/app/(main)/_features/netflix/netflix-card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { TextInput } from "@/components/ui/text-input"
 import { useDebounce } from "@/hooks/use-debounce"
-import { TMDBMedia, useTMDBSearch } from "@/lib/tmdb"
+import { TMDBMedia, useInfiniteTMDBSearch } from "@/lib/tmdb"
 import React from "react"
 import { useTranslation } from "react-i18next"
-import { FiSearch } from "react-icons/fi"
+import { FiLoader, FiSearch } from "react-icons/fi"
 
 export function NetflixSearch() {
     const { t } = useTranslation()
@@ -18,16 +18,46 @@ export function NetflixSearch() {
     const debounced = useDebounce(input.trim(), 350)
 
     const enabled = debounced.length >= 2
-    const { data, isFetching } = useTMDBSearch(enabled ? debounced : "")
+    const search = useInfiniteTMDBSearch(enabled ? debounced : "")
 
-    // Drop person results — only movie / tv have a useful card.
-    const media: TMDBMedia[] = React.useMemo(
-        () =>
-            (data?.results ?? []).filter(
-                (m) => m.media_type === "movie" || m.media_type === "tv",
-            ),
-        [data],
-    )
+    // Flatten paged results, drop person hits (they don't have a useful
+    // card), and dedupe across page boundaries (TMDB does repeat).
+    const media: TMDBMedia[] = React.useMemo(() => {
+        const out: TMDBMedia[] = []
+        const seen = new Set<string>()
+        for (const page of search.data?.pages ?? []) {
+            for (const m of page.results ?? []) {
+                if (m.media_type !== "movie" && m.media_type !== "tv") continue
+                const k = `${m.media_type}-${m.id}`
+                if (seen.has(k)) continue
+                seen.add(k)
+                out.push(m)
+            }
+        }
+        return out
+    }, [search.data])
+
+    // Same intersection-observer pattern as /categories — sentinel one
+    // screen above the bottom of the grid, fetches the next page when
+    // it enters view.
+    const sentinelRef = React.useRef<HTMLDivElement>(null)
+    React.useEffect(() => {
+        const el = sentinelRef.current
+        if (!el) return
+        if (!search.hasNextPage) return
+        const obs = new IntersectionObserver(
+            entries => {
+                if (entries[0].isIntersecting && !search.isFetchingNextPage) {
+                    void search.fetchNextPage()
+                }
+            },
+            { rootMargin: "400px" },
+        )
+        obs.observe(el)
+        return () => obs.disconnect()
+    }, [search.hasNextPage, search.isFetchingNextPage, search.fetchNextPage])
+
+    const showInitialSkeletons = enabled && search.isFetching && media.length === 0
 
     return (
         <div className="px-4 sm:px-6 lg:px-16 py-6 lg:py-8 space-y-8 lg:space-y-10">
@@ -52,7 +82,7 @@ export function NetflixSearch() {
                 </p>
             )}
 
-            {enabled && isFetching && media.length === 0 && (
+            {showInitialSkeletons && (
                 <ResultGrid>
                     {Array.from({ length: 12 }).map((_, i) => (
                         <Skeleton key={i} className="w-full aspect-video rounded-md" />
@@ -60,22 +90,35 @@ export function NetflixSearch() {
                 </ResultGrid>
             )}
 
-            {enabled && !isFetching && media.length === 0 && (
+            {enabled && !search.isFetching && media.length === 0 && (
                 <p className="text-center text-[--muted] py-12">
                     {t("search.no_results", "Aucun résultat.")}
                 </p>
             )}
 
             {media.length > 0 && (
-                <ResultGrid>
-                    {media.map(m => (
-                        <NetflixCard
-                            key={`${m.media_type}-${m.id}`}
-                            media={m}
-                            variant="grid"
-                        />
-                    ))}
-                </ResultGrid>
+                <>
+                    <ResultGrid>
+                        {media.map(m => (
+                            <NetflixCard
+                                key={`${m.media_type}-${m.id}`}
+                                media={m}
+                                variant="grid"
+                            />
+                        ))}
+                    </ResultGrid>
+
+                    {search.hasNextPage && (
+                        <div ref={sentinelRef} className="py-8 flex items-center justify-center gap-2 text-[--muted]">
+                            {search.isFetchingNextPage && (
+                                <>
+                                    <FiLoader className="size-5 animate-spin" />
+                                    <span className="text-sm">{t("search.loading_more", "Chargement…")}</span>
+                                </>
+                            )}
+                        </div>
+                    )}
+                </>
             )}
         </div>
     )
