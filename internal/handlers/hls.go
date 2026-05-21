@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
-	"os"
 	"os/exec"
-	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,34 +19,47 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-// HLS transmux session — one ffmpeg process per TorBox URL, writing
-// segments + a growing playlist into /tmp/notflix-hls/<sessionID>/.
-// The frontend hls.js loads the playlist + chunks; this is the only
-// way to give the user a working seek bar on transmuxed content,
-// because a one-way pipe (the old /transmux endpoint) can't honour
-// byte-range requests.
+// HLS transmux — on-demand segment transcoding.
+//
+// Why on-demand: a long-running ffmpeg writing segments linearly makes the
+// browser's progress bar grow as the encode advances ("ce serait mieux
+// d'avoir toute la durée du film d'un coup"). It also makes seek beyond
+// the live edge wait for ffmpeg to catch up linearly — fine for a 4-min
+// jump, terrible for "skip the intro" 45 min in.
+//
+// Plex / Jellyfin / Stash solve this with on-demand chunk transcoding:
+//   1. ffprobe the source once to know total duration → pre-build a VOD
+//      playlist with every segment numbered up front. The seek bar shows
+//      the full length immediately.
+//   2. When the browser requests segment_NNNNN.ts, spawn a small ffmpeg
+//      that seeks to N * segDur, transcodes the next segDur worth, and
+//      streams the bytes back. No temp files, no background process.
+//
+// Trade-off vs. linear-encode: each chunk pays ~0.5-1 s of ffmpeg
+// startup. The browser pre-buffers two or three segments so this only
+// stings on seek + restart. For sequential playback the next chunk
+// kicks off while the current one plays, so it's invisible.
+
+const hlsSegDurSec = 4.0
+
 type hlsSession struct {
-	id       string
-	dir      string
-	cancel   func()
-	lastUsed time.Time
+	id         string
+	url        string
+	duration   float64 // seconds, 0 if probe failed
+	audioCodec string
+	lastUsed   time.Time
 }
 
 var (
 	hlsSessions    = map[string]*hlsSession{}
 	hlsLock        sync.Mutex
-	hlsRootDir     = filepath.Join(os.TempDir(), "notflix-hls")
 	hlsCleanupOnce sync.Once
 )
 
 // HandleStreamHLSStart — POST /api/v1/stream/hls/start
 //
 // Body: {"url": "<torbox-cdn-url>"}
-// Returns: {"sessionId": "abcd1234", "playlistUrl": "/api/v1/stream/hls/abcd1234/index.m3u8"}
-//
-// Reuses an existing ffmpeg session if one already targets the same
-// URL — so reloading the player after a brief disconnect doesn't
-// kick off a second ffmpeg.
+// Returns: {"sessionId", "playlistUrl", "durationSec", "audioCodec"}
 func (h *Handler) HandleStreamHLSStart(c echo.Context) error {
 	var body struct {
 		URL string `json:"url"`
@@ -63,71 +78,37 @@ func (h *Handler) HandleStreamHLSStart(c echo.Context) error {
 		})
 	}
 
-	// Session ID is the first 8 bytes of sha256(url) — stable across
-	// requests for the same URL, short enough to fit in paths.
 	digest := sha256.Sum256([]byte(raw))
 	sessionID := hex.EncodeToString(digest[:8])
 
 	hlsLock.Lock()
 	sess, exists := hlsSessions[sessionID]
-	if !exists {
-		dir := filepath.Join(hlsRootDir, sessionID)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			hlsLock.Unlock()
-			return RespondErr(c, err)
-		}
-
-		// Detach the ffmpeg lifetime from this request: the user may
-		// close the play tab and come back — the segments + playlist
-		// should still be around. Cleanup is by idle-timeout below.
-		ctx, cancel := context.WithCancel(context.Background())
-		cmd := exec.CommandContext(ctx, "ffmpeg",
-			"-hide_banner",
-			"-loglevel", "warning",
-			"-i", raw,
-			"-c:v", "copy",     // remux video, no quality loss
-			"-c:a", "aac",      // re-encode audio to AAC
-			"-b:a", "192k",
-			"-ac", "2",         // stereo downmix
-			"-f", "hls",
-			"-hls_time", "4",
-			// "-hls_list_size", "0" keeps every segment in the playlist
-			// so the seek bar can jump anywhere we've already encoded.
-			"-hls_list_size", "0",
-			"-hls_flags", "independent_segments+temp_file",
-			"-hls_segment_filename", filepath.Join(dir, "segment_%05d.ts"),
-			filepath.Join(dir, "index.m3u8"),
-		)
-		if err := cmd.Start(); err != nil {
-			cancel()
-			hlsLock.Unlock()
-			return c.JSON(http.StatusBadGateway, map[string]any{
-				"error": "ffmpeg failed to start: " + err.Error(),
-			})
-		}
-
-		sess = &hlsSession{
-			id:       sessionID,
-			dir:      dir,
-			cancel:   cancel,
-			lastUsed: time.Now(),
-		}
-		hlsSessions[sessionID] = sess
-		log.Printf("hls: started session %s → %s", sessionID, raw)
-	}
-	sess.lastUsed = time.Now()
 	hlsLock.Unlock()
 
-	// Wait for ffmpeg to produce the first version of the playlist —
-	// at hls_time=4, that's ~4-5 s after start. Cap at 20 s so a
-	// stalled CDN doesn't hang the client forever.
-	m3u8Path := filepath.Join(sess.dir, "index.m3u8")
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if info, err := os.Stat(m3u8Path); err == nil && info.Size() > 0 {
-			break
+	if !exists {
+		// Probe duration + audio codec in one ffprobe call so we know
+		// the playlist length up front.
+		dur, codec := probeMediaInfo(c.Request().Context(), raw)
+		if dur == 0 {
+			return c.JSON(http.StatusBadGateway, map[string]any{
+				"error": "ffprobe failed to read duration",
+			})
 		}
-		time.Sleep(200 * time.Millisecond)
+		sess = &hlsSession{
+			id:         sessionID,
+			url:        raw,
+			duration:   dur,
+			audioCodec: codec,
+			lastUsed:   time.Now(),
+		}
+		hlsLock.Lock()
+		hlsSessions[sessionID] = sess
+		hlsLock.Unlock()
+		log.Printf("hls: opened session %s (dur=%.1fs codec=%s)", sessionID, dur, codec)
+	} else {
+		hlsLock.Lock()
+		sess.lastUsed = time.Now()
+		hlsLock.Unlock()
 	}
 
 	hlsCleanupOnce.Do(startHLSCleanup)
@@ -135,22 +116,24 @@ func (h *Handler) HandleStreamHLSStart(c echo.Context) error {
 	return RespondOK(c, map[string]any{
 		"sessionId":   sessionID,
 		"playlistUrl": "/api/v1/stream/hls/" + sessionID + "/index.m3u8",
+		"durationSec": sess.duration,
+		"audioCodec":  sess.audioCodec,
 	})
 }
 
 // HandleStreamHLSFile — GET /api/v1/stream/hls/:sessionId/*
 //
-// Serves either the m3u8 playlist or a .ts segment from the session
-// directory. The session's lastUsed clock is bumped on every request
-// so an actively-played stream stays alive past the cleanup timeout.
+// Two paths:
+//   - index.m3u8   → generate the playlist on the fly from session.duration
+//   - segment_NNNNN.ts → spawn an ffmpeg that seeks to N*segDur and
+//                        transcodes segDur seconds, pipes bytes back
 func (h *Handler) HandleStreamHLSFile(c echo.Context) error {
 	sessionID := c.Param("sessionId")
 	file := c.Param("*")
 	if sessionID == "" || file == "" {
 		return c.NoContent(http.StatusBadRequest)
 	}
-	// Block path traversal — file should be a plain segment name like
-	// "segment_00042.ts" or "index.m3u8". No slashes, no "..".
+	// Block path traversal.
 	if strings.ContainsAny(file, "/\\") || strings.Contains(file, "..") {
 		return c.NoContent(http.StatusBadRequest)
 	}
@@ -165,22 +148,161 @@ func (h *Handler) HandleStreamHLSFile(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, map[string]any{"error": "session expired"})
 	}
 
-	p := filepath.Join(sess.dir, file)
 	switch {
-	case strings.HasSuffix(file, ".m3u8"):
-		c.Response().Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-		c.Response().Header().Set("Cache-Control", "no-store")
-	case strings.HasSuffix(file, ".ts"):
-		c.Response().Header().Set("Content-Type", "video/mp2t")
-		// Segments are immutable once written, can cache aggressively.
-		c.Response().Header().Set("Cache-Control", "public, max-age=3600")
+	case file == "index.m3u8":
+		return h.serveHLSPlaylist(c, sess)
+	case strings.HasPrefix(file, "segment_") && strings.HasSuffix(file, ".ts"):
+		return h.serveHLSSegment(c, sess, file)
 	}
-	return c.File(p)
+	return c.NoContent(http.StatusNotFound)
 }
 
-// startHLSCleanup spawns a single goroutine that reaps HLS sessions
-// idle for more than 15 minutes — kills ffmpeg, removes the segment
-// directory, drops the map entry.
+// serveHLSPlaylist generates a VOD-typed m3u8 listing every segment from
+// 0 to ceil(duration / segDur). EXT-X-ENDLIST tells the player the file
+// is finite — that's what makes the progress bar show the full length
+// from the first frame.
+func (h *Handler) serveHLSPlaylist(c echo.Context, sess *hlsSession) error {
+	segCount := int(math.Ceil(sess.duration / hlsSegDurSec))
+	if segCount < 1 {
+		segCount = 1
+	}
+
+	var b strings.Builder
+	b.WriteString("#EXTM3U\n")
+	b.WriteString("#EXT-X-VERSION:3\n")
+	fmt.Fprintf(&b, "#EXT-X-TARGETDURATION:%d\n", int(math.Ceil(hlsSegDurSec)))
+	b.WriteString("#EXT-X-PLAYLIST-TYPE:VOD\n")
+	b.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
+
+	for i := 0; i < segCount; i++ {
+		segDur := hlsSegDurSec
+		if i == segCount-1 {
+			// Final segment is the remainder.
+			segDur = sess.duration - float64(i)*hlsSegDurSec
+			if segDur <= 0 || segDur > hlsSegDurSec {
+				segDur = hlsSegDurSec
+			}
+		}
+		fmt.Fprintf(&b, "#EXTINF:%.3f,\n", segDur)
+		fmt.Fprintf(&b, "segment_%05d.ts\n", i)
+	}
+	b.WriteString("#EXT-X-ENDLIST\n")
+
+	c.Response().Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	c.Response().Header().Set("Cache-Control", "no-store")
+	return c.String(http.StatusOK, b.String())
+}
+
+// serveHLSSegment spawns a per-request ffmpeg that seeks to the start of
+// the requested segment and transcodes just segDur worth. `-c:v copy`
+// keeps video quality intact; audio is re-encoded to AAC stereo.
+//
+// `-ss before -i` is the fast (input) seek — keyframe-accurate, can
+// drift by up to one GOP but cheap. For HLS that's fine, the next
+// segment overlaps anyway.
+func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string) error {
+	// Parse segment number out of "segment_NNNNN.ts".
+	numPart := strings.TrimSuffix(strings.TrimPrefix(file, "segment_"), ".ts")
+	n, err := strconv.Atoi(numPart)
+	if err != nil || n < 0 {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	startSec := float64(n) * hlsSegDurSec
+	if startSec >= sess.duration {
+		return c.NoContent(http.StatusNotFound)
+	}
+	segDur := hlsSegDurSec
+	if startSec+segDur > sess.duration {
+		segDur = sess.duration - startSec
+	}
+
+	ctx := c.Request().Context()
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-hide_banner",
+		"-loglevel", "warning",
+		"-ss", fmt.Sprintf("%.3f", startSec),
+		"-i", sess.url,
+		"-t", fmt.Sprintf("%.3f", segDur),
+		"-c:v", "copy",
+		"-c:a", "aac",
+		"-b:a", "192k",
+		"-ac", "2",
+		// Continuous timestamps across segments — important for the
+		// player to stitch chunks without gaps / clock jumps.
+		"-output_ts_offset", fmt.Sprintf("%.3f", startSec),
+		"-mpegts_copyts", "1",
+		"-f", "mpegts",
+		"pipe:1",
+	)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return RespondErr(c, err)
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return c.JSON(http.StatusBadGateway, map[string]any{
+			"error": "ffmpeg start: " + err.Error(),
+		})
+	}
+
+	c.Response().Header().Set("Content-Type", "video/mp2t")
+	c.Response().Header().Set("Cache-Control", "public, max-age=3600")
+	c.Response().WriteHeader(http.StatusOK)
+	_, _ = io.Copy(c.Response().Writer, stdout)
+	if werr := cmd.Wait(); werr != nil {
+		log.Printf("hls seg %d: ffmpeg %v | %s", n, werr, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// probeMediaInfo runs ffprobe once to extract both the duration and the
+// first audio stream codec. Returns (duration, "") on success, (0, "")
+// on failure.
+func probeMediaInfo(parent context.Context, url string) (float64, string) {
+	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffprobe",
+		"-v", "error",
+		"-show_entries", "format=duration:stream=codec_name,codec_type",
+		"-of", "default=noprint_wrappers=1",
+		url,
+	)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		log.Printf("ffprobe FAIL: %v | %s", err, strings.TrimSpace(stderr.String()))
+		return 0, ""
+	}
+	// Parse "codec_name=h264\ncodec_type=video\ncodec_name=aac\ncodec_type=audio\nduration=3599.456"
+	var dur float64
+	var audio string
+	var pendingName string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "duration="):
+			v, _ := strconv.ParseFloat(strings.TrimPrefix(line, "duration="), 64)
+			if v > 0 {
+				dur = v
+			}
+		case strings.HasPrefix(line, "codec_name="):
+			pendingName = strings.TrimPrefix(line, "codec_name=")
+		case line == "codec_type=audio":
+			if audio == "" {
+				audio = strings.ToLower(pendingName)
+			}
+		case strings.HasPrefix(line, "codec_type="):
+			pendingName = ""
+		}
+	}
+	log.Printf("ffprobe OK: duration=%.1fs audio=%q", dur, audio)
+	return dur, audio
+}
+
+// startHLSCleanup reaps sessions idle for more than 15 min. No temp
+// files to remove anymore — sessions are pure metadata.
 func startHLSCleanup() {
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
@@ -191,8 +313,6 @@ func startHLSCleanup() {
 			for id, sess := range hlsSessions {
 				if now.Sub(sess.lastUsed) > 15*time.Minute {
 					log.Printf("hls: reaping idle session %s", id)
-					sess.cancel()
-					_ = os.RemoveAll(sess.dir)
 					delete(hlsSessions, id)
 				}
 			}
