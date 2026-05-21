@@ -52,6 +52,10 @@ export type TorBoxPlayResult = {
     fileId: number
     torrentName: string
     cached: boolean
+    /** Lowercased ffprobe output for the first audio stream, e.g. "aac",
+     *  "ac3", "eac3", "dts", "truehd". Empty string when probe fails or
+     *  no audio stream was found. */
+    audioCodec?: string
 }
 
 /**

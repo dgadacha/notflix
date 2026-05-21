@@ -65,6 +65,7 @@ export default function WatchPage() {
     const [phase, setPhase] = React.useState<Phase>("searching")
     const [pickedRelease, setPickedRelease] = React.useState<Release | null>(null)
     const [streamUrl, setStreamUrl] = React.useState<string | null>(null)
+    const [streamAudioCodec, setStreamAudioCodec] = React.useState<string>("")
     const [errorMsg, setErrorMsg] = React.useState<string | null>(null)
     // Lets the user opt out of the auto-pick: once they click "Changer de
     // source" we stop trying to launch the top result behind their back.
@@ -80,6 +81,7 @@ export default function WatchPage() {
         setPhase("searching")
         setPickedRelease(null)
         setStreamUrl(null)
+        setStreamAudioCodec("")
         setErrorMsg(null)
         setAutoPickDisabled(false)
         setSkipKeys(new Set())
@@ -195,11 +197,13 @@ export default function WatchPage() {
 
             setPickedRelease(release)
             setStreamUrl(null)
+            setStreamAudioCodec("")
             setErrorMsg(null)
             setPhase("preparing")
             try {
                 const result = await play.mutateAsync(payload)
                 setStreamUrl(result.streamUrl)
+                setStreamAudioCodec(result.audioCodec ?? "")
                 setPhase("playing")
                 setFallbackAttempt(0)
             } catch (err) {
@@ -250,6 +254,7 @@ export default function WatchPage() {
         setErrorMsg(null)
         setPickedRelease(null)
         setStreamUrl(null)
+        setStreamAudioCodec("")
         setAutoPickDisabled(false)
         setSkipKeys(new Set())
         setFallbackAttempt(0)
@@ -286,6 +291,7 @@ export default function WatchPage() {
                 src={streamUrl}
                 title={displayTitle}
                 releaseTitle={pickedRelease?.title ?? ""}
+                audioCodec={streamAudioCodec}
                 onBack={handleClose}
                 onChangeSource={handleChangeSource}
             />
@@ -609,27 +615,33 @@ function Player({
     src,
     title,
     releaseTitle,
+    audioCodec,
     onBack,
     onChangeSource,
 }: {
     src: string
     title: string
     releaseTitle: string
+    audioCodec: string
     onBack: () => void
     onChangeSource: () => void
 }) {
     const { t } = useTranslation()
     const videoRef = React.useRef<HTMLVideoElement>(null)
 
-    // Silently route the stream through the ffmpeg transmux unless the
-    // release title explicitly advertises AAC. Release tags rarely
-    // mention the audio codec (a "720p WEBRip x264-SKGTV" can ship
-    // anything: AC3, EAC3, DTS, …), so feature-detection alone isn't
-    // enough — we'd false-negative and the player would render muted.
-    // Bandwidth cost: doubled while playing. Acceptable trade-off for
-    // V1; future work is a server-side ffprobe to skip transmux when
-    // the actual audio track is already browser-compatible.
-    const needsTransmux = releaseNeedsTransmux(releaseTitle)
+    // Decide whether to route through the ffmpeg transmux. Priority:
+    //
+    //   1. If the backend's ffprobe identified the actual audio codec,
+    //      trust it. "aac" + AAC variants (audio file may say "aac_he"
+    //      etc.) → direct stream → full seek. Anything else → transmux.
+    //
+    //   2. If probing failed (empty string), fall back to the release-
+    //      name heuristic: assume non-AAC unless the title says AAC.
+    //      This is the conservative path — we'd rather double-stream
+    //      than play muted.
+    const needsTransmux = audioCodec
+        ? !audioCodec.startsWith("aac")
+        : releaseNeedsTransmux(releaseTitle)
     const videoSrc = needsTransmux
         ? `/api/v1/stream/transmux?url=${encodeURIComponent(src)}`
         : src
