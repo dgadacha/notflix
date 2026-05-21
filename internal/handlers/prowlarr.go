@@ -3,6 +3,7 @@ package handlers
 import (
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -109,6 +110,9 @@ func (h *Handler) HandleSearchMovie(c echo.Context) error {
 			return RespondErr(c, err)
 		}
 		results = filterByTitleRelevance(fresh, title)
+		if year > 0 {
+			results = filterByReleaseYear(results, year, 2)
+		}
 		prowlarrCachePut(cacheKey, results)
 	}
 	return RespondOK(c, h.annotateAndSort(c, results))
@@ -199,6 +203,52 @@ func filterByTitleRelevance(results []prowlarr.SearchResult, searched string) []
 		}
 	}
 	return out
+}
+
+// filterByReleaseYear drops releases whose year, as advertised in the
+// title, differs from the searched year by more than `tolerance`.
+//
+// Title-relevance alone isn't enough to tell the difference between
+// "Spider-Man 2002" and "Spider-Man: Across the Spider-Verse 2023" —
+// both contain the literal "spider man" phrase. Year filtering catches
+// the ambiguity: 2002 ± 2 → keeps remasters/re-releases (2002, 2003,
+// 2004), drops the 2023 sequel.
+//
+// Releases without an explicit year in their title are KEPT — we can't
+// tell from the filename, so we'd rather have a false positive than
+// silently drop a perfectly fine release that just doesn't tag the
+// year in the standard way.
+func filterByReleaseYear(results []prowlarr.SearchResult, searchedYear, tolerance int) []prowlarr.SearchResult {
+	out := make([]prowlarr.SearchResult, 0, len(results))
+	for _, r := range results {
+		y := extractReleaseYear(r.Title)
+		if y == 0 {
+			out = append(out, r)
+			continue
+		}
+		diff := searchedYear - y
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff <= tolerance {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// extractReleaseYear pulls the first 4-digit year between 1970 and 2039
+// out of a release title. "Spider-Man.2002.1080p.BluRay-RARBG" → 2002.
+// Returns 0 when no year-shaped token is found.
+var releaseYearPattern = regexp.MustCompile(`\b(19[7-9]\d|20[0-3]\d)\b`)
+
+func extractReleaseYear(title string) int {
+	match := releaseYearPattern.FindString(title)
+	if match == "" {
+		return 0
+	}
+	n, _ := strconv.Atoi(match)
+	return n
 }
 
 // collapseSpaces turns runs of whitespace into single spaces. Needed so
