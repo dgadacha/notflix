@@ -506,10 +506,11 @@ function PrefSelect<T extends string>({
 }
 
 /**
- * "Ma liste" toggle — Netflix's + / ✓ pill. Renders nothing when
- * there's no active profile. Optimistic by design: useProfileListActions
- * mutates the React Query cache before the network call so the icon
- * flips instantly.
+ * "Ma liste" toggle — Netflix's + / ✓ pill. Always rendered (even
+ * without an active profile — clicking then routes to /profiles so the
+ * user can create / pick one). Optimistic by design:
+ * useProfileListActions mutates the React Query cache before the
+ * network call so the icon flips instantly.
  */
 function ListToggleButton({
     tmdbId,
@@ -523,15 +524,22 @@ function ListToggleButton({
     posterPath: string
 }) {
     const { t } = useTranslation()
+    const router = useRouter()
+    const { closeDetail } = useNetflixDetailModal()
     const profileUid = useActiveProfileId()
     const statusMap = useActiveProfileListStatusMap()
     const { upsert, remove } = useProfileListActions()
 
-    if (!profileUid) return null
-
-    const inList = statusMap.has(listEntryKey(mediaType, tmdbId))
+    const inList = !!profileUid && statusMap.has(listEntryKey(mediaType, tmdbId))
 
     const onClick = () => {
+        if (!profileUid) {
+            // No profile yet — punt the user over to /profiles. They
+            // can come back and click + once they've picked one.
+            closeDetail()
+            router.push("/profiles")
+            return
+        }
         if (inList) {
             void remove(tmdbId, mediaType)
         } else {
@@ -549,14 +557,26 @@ function ListToggleButton({
         <button
             type="button"
             onClick={onClick}
-            aria-label={inList ? t("modal.remove_from_list", "Retirer de ma liste") : t("modal.add_to_list", "Ajouter à ma liste")}
+            aria-label={
+                !profileUid
+                    ? t("modal.list_requires_profile", "Sélectionner un profil pour ajouter à la liste")
+                    : inList
+                        ? t("modal.remove_from_list", "Retirer de ma liste")
+                        : t("modal.add_to_list", "Ajouter à ma liste")
+            }
             className={cn(
-                "inline-flex items-center justify-center size-10 lg:size-12 rounded-full",
-                "bg-white/20 hover:bg-white/30 backdrop-blur-sm text-white",
+                "inline-flex items-center justify-center gap-2",
+                "h-10 lg:h-12 px-4 lg:px-5 rounded-md",
+                "bg-white/20 hover:bg-white/30 backdrop-blur-sm",
+                "text-white text-sm lg:text-base font-semibold",
                 "transition-colors",
+                inList && "bg-brand-500/30 border border-brand-500/60",
             )}
         >
-            {inList ? <BiCheck className="text-2xl" /> : <BiPlus className="text-2xl" />}
+            {inList ? <BiCheck className="text-xl sm:text-2xl" /> : <BiPlus className="text-xl sm:text-2xl" />}
+            <span className="hidden sm:inline">
+                {inList ? t("modal.in_list", "Dans ma liste") : t("modal.my_list", "Ma liste")}
+            </span>
         </button>
     )
 }
