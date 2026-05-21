@@ -46,15 +46,18 @@ export function useTorBoxStatus() {
     })
 }
 
-/** One embedded subtitle stream found in the source file. */
+/** One subtitle source the player can mount as a <track> element. */
 export type SubtitleTrack = {
-    /** 0-based position among subtitle streams (NOT global stream index). */
+    /** "embedded" → /sub_<idx>.vtt route, "external" → /ext_<idx>.vtt. */
+    source: "embedded" | "external"
+    /** 0-based, per-source. NOT the global stream index. */
     index: number
-    /** ffprobe codec_name, lowercased — "ass", "subrip", "pgssub", … */
+    /** ffprobe codec_name for embedded subs, file extension (srt/ass/…)
+     *  for external sidecar files. */
     codec: string
     /** ISO-639 tag, e.g. "fre" / "eng" / "jpn". May be empty. */
     language: string
-    /** Optional descriptive label set by the muxer (e.g. "Forced"). */
+    /** Optional descriptive label set by the muxer or the filename. */
     title: string
     /** True iff ffmpeg can convert to WebVTT (text-based subs).
      *  False for graphical formats like PGS/VobSub — we don't OCR yet. */

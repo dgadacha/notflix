@@ -251,22 +251,48 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 		return RespondErr(c, err)
 	}
 
-	// 5) Single ffprobe call covers everything we need for playback:
-	//    duration, audio codec, AND subtitle tracks. Subtitles are
-	//    surfaced regardless of audio path so that even a direct
-	//    (AAC) playback can mount <track> elements pointing at the
-	//    HLS endpoint's /sub_N.vtt route.
-	durationSec, audioCodec, subs := probeMediaFull(ctx, streamURL)
+	// 5) Single ffprobe call covers most of what we need for playback:
+	//    duration + audio codec + every embedded subtitle stream.
+	durationSec, audioCodec, _ := probeMediaFull(ctx, streamURL)
 
-	// Open an HLS session up-front. Cheap (just metadata + a map
-	// entry) and lets the frontend reference subtitles by sessionId
-	// without first having to round-trip through /stream/hls/start.
-	// If the session can't be opened (probe failure) we still serve
-	// the direct stream — subtitles won't be available, but playback
-	// itself works.
+	// 6) Many anime releases ship subtitles as sidecar files in the
+	//    same torrent (.ass / .srt / .vtt). Enumerate them and ask
+	//    TorBox for streamable URLs so the player can mount them as
+	//    additional <track> elements alongside the embedded ones.
+	var externals []externalSub
+	for _, f := range ready.Files {
+		if !isSubtitleFile(f.Name) {
+			continue
+		}
+		if f.ID == fileID {
+			continue // shouldn't happen, but guard against self-ref
+		}
+		subURL, err := h.App.TorBox.RequestDownloadURL(ctx, created.TorrentID, f.ID)
+		if err != nil {
+			log.Printf("torbox: skip external sub %q (RequestDownloadURL: %v)", f.Name, err)
+			continue
+		}
+		externals = append(externals, externalSub{
+			URL:      subURL,
+			Filename: f.Name,
+			Language: guessSubLanguageFromFilename(f.Name),
+		})
+	}
+	if len(externals) > 0 {
+		log.Printf("torbox: found %d sidecar subtitle files", len(externals))
+	}
+
+	// 7) Open the HLS session up-front. Cheap (just metadata + a map
+	//    entry) and lets the frontend reference subtitles by sessionId
+	//    without first having to round-trip through /stream/hls/start.
+	//    If the session can't be opened (probe failure) we still serve
+	//    the direct stream — subtitles won't be available, but playback
+	//    itself works.
 	var sessionID string
-	if sess, err := openHLSSession(ctx, streamURL, durationSec, audioCodec); err == nil {
+	var allSubs []SubtitleTrack
+	if sess, err := openHLSSession(ctx, streamURL, durationSec, audioCodec, externals); err == nil {
 		sessionID = sess.id
+		allSubs = sess.subtitles
 	}
 
 	return RespondOK(c, map[string]any{
@@ -277,9 +303,57 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 		"cached":      ready.Cached,
 		"audioCodec":  audioCodec,  // "aac" / "ac3" / "eac3" / "dts" / … / ""
 		"durationSec": durationSec, // 0 on probe failure
-		"subtitles":   subs,        // [{index, codec, language, title, supported}, …]
+		"subtitles":   allSubs,     // embedded + external, with Source field
 		"sessionId":   sessionID,   // for subtitle URL construction
 	})
+}
+
+func isSubtitleFile(name string) bool {
+	lower := strings.ToLower(name)
+	for _, ext := range []string{".srt", ".ass", ".ssa", ".vtt", ".sub", ".sbv"} {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// guessSubLanguageFromFilename pulls an ISO-639 language code out of
+// common sidecar naming conventions: "show.fr.srt", "show.fre.ass",
+// "show.S01E01.French.srt", "show [VOSTFR].ass".
+func guessSubLanguageFromFilename(name string) string {
+	lower := strings.ToLower(name)
+	// Trim the extension so word splits don't anchor on it.
+	if dot := strings.LastIndex(lower, "."); dot > 0 {
+		lower = lower[:dot]
+	}
+	candidates := map[string]string{
+		// 2-letter ISO-639-1
+		"fr": "fre", "en": "eng", "ja": "jpn", "es": "spa", "de": "ger",
+		"it": "ita", "pt": "por", "ru": "rus", "ar": "ara", "zh": "chi",
+		"ko": "kor", "nl": "nld",
+		// 3-letter ISO-639-2
+		"fre": "fre", "fra": "fre", "eng": "eng", "jpn": "jpn",
+		"spa": "spa", "ger": "ger", "deu": "ger", "ita": "ita",
+		"por": "por", "rus": "rus", "ara": "ara", "chi": "chi",
+		"zho": "chi", "kor": "kor", "nld": "nld", "dut": "nld",
+		// Human names
+		"french": "fre", "english": "eng", "japanese": "jpn",
+		"spanish": "spa", "german": "ger", "italian": "ita",
+		"portuguese": "por", "russian": "rus", "arabic": "ara",
+		"chinese": "chi", "korean": "kor", "dutch": "nld",
+		// Anime conventions
+		"vostfr": "fre", "vffr": "fre", "vff": "fre", "truefrench": "fre",
+	}
+	parts := strings.FieldsFunc(lower, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+	})
+	for _, p := range parts {
+		if iso, ok := candidates[p]; ok {
+			return iso
+		}
+	}
+	return ""
 }
 
 // HandleTorBoxList — for an admin "manage my queue" view.

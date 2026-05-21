@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,9 +43,10 @@ import (
 
 const hlsSegDurSec = 4.0
 
-// SubtitleTrack describes one embedded subtitle stream we found inside
-// the source file. The frontend builds a <track> element per entry;
-// the user toggles between them from the native player's CC menu.
+// SubtitleTrack describes one subtitle source we expose to the player.
+// Embedded streams live inside the video file (extracted via ffmpeg);
+// external tracks are separate .srt / .ass files shipped alongside
+// the video in the same torrent.
 //
 // Codec → support matrix:
 //   subrip / srt    → convertible to WebVTT          ✓
@@ -54,20 +56,34 @@ const hlsSegDurSec = 4.0
 //   pgssub / hdmv   → graphical, needs OCR            ✗
 //   dvdsub / vobsub → graphical, needs OCR            ✗
 type SubtitleTrack struct {
-	Index     int    `json:"index"`     // Subtitle stream index (0-based among subs)
-	Codec     string `json:"codec"`     // ffprobe codec_name
+	// "embedded" (extracted from the video file) or "external"
+	// (a separate file in the torrent). The frontend builds a
+	// different URL per source: sub_<idx>.vtt vs ext_<idx>.vtt.
+	Source    string `json:"source"`    // "embedded" | "external"
+	Index     int    `json:"index"`     // 0-based, per-source
+	Codec     string `json:"codec"`     // ffprobe codec_name (embedded) or file ext (external)
 	Language  string `json:"language"`  // ISO-639 tag, e.g. "fre" / "eng" / "jpn"
 	Title     string `json:"title"`     // Optional descriptive label
 	Supported bool   `json:"supported"` // false for graphical subs we can't convert
 }
 
+// externalSub — internal record for the per-session list of external
+// subtitle files. Not exported because the frontend only ever talks
+// to it through the SubtitleTrack-shaped JSON.
+type externalSub struct {
+	URL      string // TorBox direct URL
+	Filename string // For codec sniffing + label
+	Language string
+}
+
 type hlsSession struct {
-	id         string
-	url        string
-	duration   float64 // seconds, 0 if probe failed
-	audioCodec string
-	subtitles  []SubtitleTrack
-	lastUsed   time.Time
+	id           string
+	url          string
+	duration     float64 // seconds, 0 if probe failed
+	audioCodec   string
+	subtitles    []SubtitleTrack
+	externalSubs []externalSub // per-index URL/filename for ext_<idx>.vtt
+	lastUsed     time.Time
 }
 
 var (
@@ -106,7 +122,7 @@ func (h *Handler) HandleStreamHLSStart(c echo.Context) error {
 		})
 	}
 
-	sess, err := openHLSSession(c.Request().Context(), raw, body.DurationSec, body.AudioCodec)
+	sess, err := openHLSSession(c.Request().Context(), raw, body.DurationSec, body.AudioCodec, nil)
 	if err != nil {
 		return c.JSON(http.StatusBadGateway, map[string]any{"error": err.Error()})
 	}
@@ -128,7 +144,11 @@ func (h *Handler) HandleStreamHLSStart(c echo.Context) error {
 // hint{Duration,AudioCodec} are caller-provided ffprobe results — if
 // non-empty we use them and only ffprobe again to discover subtitles
 // (cheap because most tags are inline near the start of the file).
-func openHLSSession(parent context.Context, sourceURL string, hintDur float64, hintAudio string) (*hlsSession, error) {
+//
+// externals are pre-resolved subtitle files (typically .srt / .ass from
+// the same torrent). They appear in the session.subtitles list with
+// Source="external" so the frontend renders them too.
+func openHLSSession(parent context.Context, sourceURL string, hintDur float64, hintAudio string, externals []externalSub) (*hlsSession, error) {
 	digest := sha256.Sum256([]byte(sourceURL))
 	sessionID := hex.EncodeToString(digest[:8])
 
@@ -143,7 +163,7 @@ func openHLSSession(parent context.Context, sourceURL string, hintDur float64, h
 		return sess, nil
 	}
 
-	dur, audio, subs := probeMediaFull(parent, sourceURL)
+	dur, audio, embedded := probeMediaFull(parent, sourceURL)
 	if hintDur > 0 {
 		dur = hintDur
 	}
@@ -153,18 +173,42 @@ func openHLSSession(parent context.Context, sourceURL string, hintDur float64, h
 	if dur == 0 {
 		return nil, fmt.Errorf("ffprobe failed to read duration")
 	}
+
+	// Mark embedded subs with Source = "embedded" for the frontend.
+	for i := range embedded {
+		embedded[i].Source = "embedded"
+	}
+
+	// Build SubtitleTrack entries for the external files. Codec comes
+	// from the file extension; language is guessed by the caller from
+	// the filename.
+	allSubs := append([]SubtitleTrack(nil), embedded...)
+	for i, ext := range externals {
+		codec := strings.TrimPrefix(strings.ToLower(filepath.Ext(ext.Filename)), ".")
+		allSubs = append(allSubs, SubtitleTrack{
+			Source:    "external",
+			Index:     i,
+			Codec:     codec,
+			Language:  ext.Language,
+			Title:     ext.Filename,
+			Supported: isSubtitleConvertible(codec),
+		})
+	}
+
 	sess = &hlsSession{
-		id:         sessionID,
-		url:        sourceURL,
-		duration:   dur,
-		audioCodec: audio,
-		subtitles:  subs,
-		lastUsed:   time.Now(),
+		id:           sessionID,
+		url:          sourceURL,
+		duration:     dur,
+		audioCodec:   audio,
+		subtitles:    allSubs,
+		externalSubs: externals,
+		lastUsed:     time.Now(),
 	}
 	hlsLock.Lock()
 	hlsSessions[sessionID] = sess
 	hlsLock.Unlock()
-	log.Printf("hls: opened session %s (dur=%.1fs codec=%s subs=%d)", sessionID, dur, audio, len(subs))
+	log.Printf("hls: opened session %s (dur=%.1fs codec=%s subs=%d emb=%d ext=%d)",
+		sessionID, dur, audio, len(allSubs), len(embedded), len(externals))
 	hlsCleanupOnce.Do(startHLSCleanup)
 	return sess, nil
 }
@@ -203,8 +247,79 @@ func (h *Handler) HandleStreamHLSFile(c echo.Context) error {
 		return h.serveHLSSegment(c, sess, file)
 	case strings.HasPrefix(file, "sub_") && strings.HasSuffix(file, ".vtt"):
 		return h.serveHLSSubtitle(c, sess, file)
+	case strings.HasPrefix(file, "ext_") && strings.HasSuffix(file, ".vtt"):
+		return h.serveHLSExternalSubtitle(c, sess, file)
 	}
 	return c.NoContent(http.StatusNotFound)
+}
+
+// serveHLSExternalSubtitle pulls a sidecar .srt/.ass/.vtt file from
+// TorBox and converts it to WebVTT on the fly. Same on-disk cache as
+// the embedded path — keyed by (sessionId, "ext", idx, lang).
+func (h *Handler) serveHLSExternalSubtitle(c echo.Context, sess *hlsSession, file string) error {
+	numPart := strings.TrimSuffix(strings.TrimPrefix(file, "ext_"), ".vtt")
+	n, err := strconv.Atoi(numPart)
+	if err != nil || n < 0 || n >= len(sess.externalSubs) {
+		return c.NoContent(http.StatusNotFound)
+	}
+	ext := sess.externalSubs[n]
+
+	targetLang := strings.ToLower(strings.TrimSpace(c.QueryParam("translateTo")))
+	if targetLang != "" && (targetLang == strings.ToLower(ext.Language) ||
+		translateLangName(targetLang) == translateLangName(ext.Language)) {
+		targetLang = ""
+	}
+	cacheKey := fmt.Sprintf("ext-%d", n)
+	if targetLang != "" {
+		if cached := h.readCachedTranslation(sess.id, n+10_000, targetLang); cached != nil {
+			c.Response().Header().Set("Content-Type", "text/vtt; charset=utf-8")
+			c.Response().Header().Set("Cache-Control", "public, max-age=86400")
+			c.Response().Header().Set("X-Translation-Source", "cache")
+			c.Response().WriteHeader(http.StatusOK)
+			_, _ = c.Response().Writer.Write(cached)
+			return nil
+		}
+	}
+	_ = cacheKey
+
+	// Convert via ffmpeg — `-i <url>` works with HTTP sources directly.
+	// Smaller probesize since these are tiny files (a few KB to a few
+	// hundred KB).
+	ctx, cancel := context.WithTimeout(c.Request().Context(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-hide_banner",
+		"-loglevel", "warning",
+		"-i", ext.URL,
+		"-c:s", "webvtt",
+		"-f", "webvtt",
+		"pipe:1",
+	)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	raw, err := cmd.Output()
+	if err != nil {
+		log.Printf("hls ext sub %d: ffmpeg %v | %s", n, err, strings.TrimSpace(stderr.String()))
+		return c.JSON(http.StatusBadGateway, map[string]any{"error": "ffmpeg failed"})
+	}
+
+	body := raw
+	translationSource := "ffmpeg"
+	if targetLang != "" && h.App.Anthropic.HasKey() {
+		trCtx, cancelTr := context.WithTimeout(c.Request().Context(), 5*time.Minute)
+		defer cancelTr()
+		if translated, err := translateVTT(trCtx, h.App.Anthropic, raw, targetLang); err == nil && len(translated) > 0 {
+			body = translated
+			translationSource = "claude"
+			h.writeCachedTranslation(sess.id, n+10_000, targetLang, body)
+		}
+	}
+	c.Response().Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	c.Response().Header().Set("Cache-Control", "public, max-age=86400")
+	c.Response().Header().Set("X-Translation-Source", translationSource)
+	c.Response().WriteHeader(http.StatusOK)
+	_, _ = c.Response().Writer.Write(body)
+	return nil
 }
 
 // serveHLSSubtitle extracts a single subtitle stream from the source via
@@ -435,10 +550,17 @@ func probeMediaInfo(parent context.Context, url string) (float64, string) {
 // where every subtitle landed with Language="" and the player picked
 // none of them as preferred.
 func probeMediaFull(parent context.Context, url string) (float64, string, []SubtitleTrack) {
-	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 25*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ffprobe",
 		"-v", "error",
+		// Scan deeper than the default 5s/5MB. MKV stream metadata
+		// usually lives in the EBML header so this is fast, but some
+		// releases (esp. anime with many subtitle tracks) keep the
+		// secondary tracks farther back in the file. 200MB / 60s
+		// covers everything we've seen in the wild.
+		"-analyzeduration", "60M",
+		"-probesize", "200M",
 		"-show_entries", "format=duration:stream=codec_name,codec_type:stream_tags=language,title",
 		"-of", "default=noprint_wrappers=1",
 		url,
@@ -511,6 +633,11 @@ func probeMediaFull(parent context.Context, url string) (float64, string, []Subt
 			dur, audio, len(subs), strings.Join(summary, ", "))
 	} else {
 		log.Printf("ffprobe OK: duration=%.1fs audio=%q subs=0", dur, audio)
+		// Dump the raw stdout so the operator can see what ffprobe
+		// actually said. If subs really are 0 the dump shows only
+		// video + audio streams; if there's a parser miss it shows
+		// subtitle blocks we failed to capture.
+		log.Printf("ffprobe RAW:\n%s", strings.TrimRight(string(out), "\n"))
 	}
 	return dur, audio, subs
 }

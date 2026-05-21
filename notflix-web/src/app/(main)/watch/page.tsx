@@ -969,20 +969,20 @@ function Player({
                     console.error("[Notflix] video error")
                 }}
             >
-                {sessionId && resolveSubtitleTracks(subtitles, subLangPref).map(track => (
-                    <track
-                        key={`${track.index}-${track.translateTo ?? ""}`}
-                        kind="subtitles"
-                        src={
-                            track.translateTo
-                                ? `/api/v1/stream/hls/${sessionId}/sub_${track.index}.vtt?translateTo=${track.translateTo}`
-                                : `/api/v1/stream/hls/${sessionId}/sub_${track.index}.vtt`
-                        }
-                        srcLang={track.srcLang}
-                        label={track.label}
-                        default={track.isDefault}
-                    />
-                ))}
+                {sessionId && resolveSubtitleTracks(subtitles, subLangPref).map(track => {
+                    const route = track.source === "external" ? "ext" : "sub"
+                    const base = `/api/v1/stream/hls/${sessionId}/${route}_${track.index}.vtt`
+                    return (
+                        <track
+                            key={`${track.source}-${track.index}-${track.translateTo ?? ""}`}
+                            kind="subtitles"
+                            src={track.translateTo ? `${base}?translateTo=${track.translateTo}` : base}
+                            srcLang={track.srcLang}
+                            label={track.label}
+                            default={track.isDefault}
+                        />
+                    )
+                })}
             </video>
         </div>
     )
@@ -1036,6 +1036,7 @@ function subtitleLabel(track: SubtitleTrack, override?: string): string {
 }
 
 type ResolvedTrack = {
+    source: "embedded" | "external"
     index: number
     srcLang: string
     label: string
@@ -1074,6 +1075,7 @@ function resolveSubtitleTracks(
     const native: ResolvedTrack[] = supported.map(s => {
         const lang = normaliseSubLang(s.language)
         return {
+            source: s.source,
             index: s.index,
             srcLang: lang || "und",
             label: subtitleLabel(s),
@@ -1094,6 +1096,7 @@ function resolveSubtitleTracks(
         const sourceTrack =
             supported.find(s => normaliseSubLang(s.language) === "en") ?? supported[0]
         tracks.push({
+            source: sourceTrack.source,
             index: sourceTrack.index,
             srcLang: wantLang,
             label: `${subLangNames[wantLang] || wantLang} (traduit)`,
