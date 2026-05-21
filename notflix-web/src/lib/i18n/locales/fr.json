@@ -28,7 +28,7 @@
     "offline": "Hors ligne",
     "settings": "Paramètres",
     "nakama": "Nakama",
-    "refresh_anilist": "Rafraîchir AniList",
+    "refresh": "Rafraîchir le catalogue",
     "sign_in": "Se connecter",
     "sign_out": "Se déconnecter",
     "more": "Plus",
@@ -36,13 +36,14 @@
   },
   "home": {
     "rows": {
-      "continue_watching": "Continuer à regarder",
-      "trending": "Tendances actuelles",
-      "popular": "Populaires",
-      "current_season": "Cette saison",
-      "past_season": "La saison passée",
-      "movies": "Films d'animation",
-      "upcoming": "Prochainement"
+      "continue_watching": "Reprendre la lecture",
+      "now_playing": "Au cinéma en ce moment",
+      "trending_movies": "Films tendance",
+      "trending_tv": "Séries tendance",
+      "popular_movies": "Films populaires",
+      "popular_tv": "Séries populaires",
+      "top_rated_movies": "Films les mieux notés",
+      "upcoming_movies": "Prochainement"
     },
     "hero": {
       "play": "Lecture",
@@ -84,14 +85,16 @@
     "title": "Mes listes",
     "search_placeholder": "Rechercher dans mes listes…",
     "empty": "Rien pour le moment.",
-    "no_match": "Aucun anime ne correspond à ta recherche.",
+    "no_match": "Aucun titre ne correspond à ta recherche.",
+    "empty_list": "Ta liste est vide. Ajoute des films et séries depuis la fiche détaillée.",
+    "empty_history": "Aucun visionnage pour le moment.",
+    "in_progress": "En cours",
+    "finished": "Terminé",
+    "open_detail": "Ouvrir la fiche",
+    "remove": "Retirer de ma liste",
+    "remove_from_history": "Effacer de l'historique",
     "tabs": {
-      "all": "Tout",
-      "current": "En cours",
-      "planning": "À regarder",
-      "completed": "Terminés",
-      "paused": "En pause",
-      "dropped": "Abandonnés",
+      "my_list": "Ma liste",
       "history": "Historique"
     },
     "actions": {
@@ -100,7 +103,7 @@
       "add_to_list": "Ajouter à mes listes",
       "add_to": "Ajouter à",
       "delete": "Retirer de mes listes",
-      "delete_confirm": "Retirer cet anime de tes listes AniList ?"
+      "delete_confirm": "Retirer ce titre de tes listes ?"
     }
   },
   "history": {
@@ -112,48 +115,41 @@
       "older": "Plus ancien"
     },
     "no_profile": "Active un profil pour voir l'historique de visionnage.",
-    "empty": "Aucun épisode regardé pour le moment.",
+    "empty": "Aucun visionnage pour le moment.",
     "episodes_count": "épisodes vus",
     "expand": "Voir les épisodes",
     "collapse": "Masquer les épisodes",
     "clear_all": "Tout effacer",
     "clear_confirm": "Effacer tout l'historique de ce profil ?",
     "delete_series": "Supprimer la série",
-    "delete_series_with_unlist_confirm": "Supprimer aussi cet anime de tes listes AniList (En cours, etc.) ?",
+    "delete_series_with_unlist_confirm": "Supprimer aussi ce titre de tes listes ?",
     "delete_episode": "Supprimer cet épisode",
     "delete_episode_confirm": "Supprimer cet épisode de l'historique ?"
   },
   "search": {
-    "title": "Recherche",
-    "placeholder": "Cherche un anime, un genre, une année…",
+    "title": "Rechercher",
+    "placeholder": "Films, séries, acteurs…",
     "no_results": "Aucun résultat.",
-    "start_typing": "Tape pour chercher dans tout le catalogue AniList."
+    "start_typing": "Tape au moins 2 caractères pour lancer la recherche.",
+    "loading_more": "Chargement…"
   },
   "discover": {
-    "tab_anime": "Anime",
-    "tab_schedule": "Planning",
+    "tab_movies": "Films",
+    "tab_tv": "Séries",
     "trending_now": "Tendances actuelles",
-    "top_of_season": "Top de la saison",
-    "best_of_last_season": "Meilleurs de la saison passée",
     "coming_soon": "Prochainement",
     "trending_movies": "Films tendance",
     "aired_recently": "Diffusés récemment",
-    "airing_schedule": "Planning de diffusion",
     "missed_sequels": "Suites que tu pourrais avoir manquées"
   },
   "entry": {
     "specials": "Spéciaux",
     "others": "Autres",
-    "online_streaming": "Streaming en ligne",
-    "torrent_streaming": "Torrent streaming",
-    "debrid_streaming": "Streaming Debrid",
-    "no_provider_available": "Aucun provider disponible. Installe d'abord une extension provider.",
     "trailer": "Bande-annonce",
     "more_like_this": "Dans le même style",
-    "pick_provider": "Choisir un provider",
     "switch_dub": "VF (si disponible)",
     "episode_short": "ÉP",
-    "episodes_load_error": "Impossible de charger les épisodes depuis ce provider.",
+    "episodes_load_error": "Impossible de charger les épisodes.",
     "open_in_new_tab": "Ouvrir le player dans un nouvel onglet"
   },
   "errors": {
@@ -182,20 +178,18 @@
       "data": "Données",
       "ui": "Interface",
       "logs": "Journaux & Cache",
-      "denshi": "Denshi",
-      "anilist": "AniList",
       "deepl": "Traduction DeepL"
     },
     "deepl": {
-      "page_desc": "Traduit les descriptions d'animes à la volée",
-      "intro": "Notflix peut traduire les descriptions AniList en français via DeepL. Récupère une clé gratuite sur",
+      "page_desc": "Traduit les descriptions à la volée",
+      "intro": "Notflix peut traduire les descriptions TMDB en français via DeepL. Récupère une clé gratuite sur",
       "signup_link": "DeepL API Free",
       "intro_suffix": "(pas de carte, 500 000 caractères/mois — largement suffisant).",
       "key_label": "Clé API DeepL",
       "key_storage_note": "Stockée uniquement dans le localStorage de ton navigateur. Envoyée par requête au backend, jamais persistée côté serveur.",
       "test_title": "Test rapide",
       "test_button": "Traduire l'exemple",
-      "test_ok": "Ça marche — les traductions apparaîtront sur les pages d'anime quand la langue est en français.",
+      "test_ok": "Ça marche — les traductions apparaîtront sur les fiches quand la langue est en français.",
       "test_failed": "Traduction échouée. Vérifie ta clé et ton quota mensuel."
     }
   },
@@ -209,7 +203,6 @@
     "player_title": "Lecteur{{prefix}}",
     "external_prefix": " externe",
     "player_subtitle": "Configure le lecteur qui prendra en charge la lecture vidéo et le suivi de progression.",
-    "denshi_note": "Notflix Denshi inclut un lecteur natif activé par défaut. Tu peux quand même configurer un lecteur externe ici.",
     "debrid_title": "Debrid (optionnel)",
     "debrid_subtitle": "Les services de debrid (Real-Debrid, AllDebrid, TorBox) offrent du streaming instantané depuis le cloud. Laisse vide si tu n'en as pas.",
     "debrid_label": "Service",
