@@ -37,6 +37,13 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	tb.GET("/list", h.HandleTorBoxList)
 	tb.DELETE("/torrent/:id", h.HandleTorBoxDelete)
 
+	// Prowlarr — torrent indexer aggregator (search → list of magnets,
+	// annotated with TorBox cache state).
+	pr := v1.Group("/prowlarr")
+	pr.GET("/status", h.HandleProwlarrStatus)
+	pr.GET("/search/movie", h.HandleSearchMovie)
+	pr.GET("/search/tv", h.HandleSearchTV)
+
 	// Profiles
 	p := v1.Group("/profiles")
 	p.GET("", h.HandleListProfiles)

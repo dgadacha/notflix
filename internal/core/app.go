@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 
 	"notflix/internal/database/db"
+	"notflix/internal/prowlarr"
 	"notflix/internal/tmdb"
 	"notflix/internal/torbox"
 )
@@ -15,6 +16,7 @@ type App struct {
 	Database *db.Database
 	TMDB     *tmdb.Client
 	TorBox   *torbox.Client
+	Prowlarr *prowlarr.Client
 }
 
 func New() (*App, error) {
@@ -33,6 +35,7 @@ func New() (*App, error) {
 		Database: database,
 		TMDB:     tmdb.NewClient(cfg.TMDB.APIKey),
 		TorBox:   torbox.NewClient(cfg.TorBox.APIKey),
+		Prowlarr: prowlarr.NewClient(cfg.Prowlarr.BaseURL, cfg.Prowlarr.APIKey),
 	}
 	return app, nil
 }

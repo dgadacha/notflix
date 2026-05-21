@@ -1,0 +1,193 @@
+// Package prowlarr is a thin client for the Prowlarr REST API.
+//
+// Notflix uses Prowlarr as its torrent indexer aggregator — it talks to
+// Prowlarr's unified Search endpoint, gets a list of release candidates
+// (with infohashes), then asks TorBox which ones are cached. The user
+// picks (or auto-pick best cached) and we play.
+//
+// Prowlarr API docs: https://prowlarr.com/docs/api
+package prowlarr
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+type Client struct {
+	baseURL string
+	apiKey  string
+	http    *http.Client
+}
+
+// NewClient — baseURL is Prowlarr's root (e.g. http://127.0.0.1:9696),
+// apiKey from Settings → General → API Key.
+func NewClient(baseURL, apiKey string) *Client {
+	return &Client{
+		baseURL: strings.TrimRight(baseURL, "/"),
+		apiKey:  apiKey,
+		http:    &http.Client{Timeout: 30 * time.Second},
+	}
+}
+
+func (c *Client) Configured() bool {
+	return c.baseURL != "" && c.apiKey != ""
+}
+
+func (c *Client) do(ctx context.Context, method, path string, q url.Values, out any) error {
+	if !c.Configured() {
+		return fmt.Errorf("prowlarr: not configured (NOTFLIX_PROWLARR_URL + NOTFLIX_PROWLARR_API_KEY)")
+	}
+	u := c.baseURL + path
+	if len(q) > 0 {
+		u += "?" + q.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Api-Key", c.apiKey)
+	req.Header.Set("Accept", "application/json")
+
+	res, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode >= 400 {
+		return fmt.Errorf("prowlarr %d: %s", res.StatusCode, string(body))
+	}
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal(body, out)
+}
+
+// -----------------------------------------------------------------------------
+// /api/v1/system/status — health + version (use as a configured-OK check)
+// -----------------------------------------------------------------------------
+
+type SystemStatus struct {
+	Version   string `json:"version"`
+	BuildTime string `json:"buildTime"`
+	AppName   string `json:"appName"`
+	OsName    string `json:"osName"`
+}
+
+func (c *Client) SystemStatus(ctx context.Context) (*SystemStatus, error) {
+	var s SystemStatus
+	if err := c.do(ctx, http.MethodGet, "/api/v1/system/status", nil, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+// -----------------------------------------------------------------------------
+// /api/v1/indexer — list configured indexers (for the settings UI)
+// -----------------------------------------------------------------------------
+
+type Indexer struct {
+	ID                  int    `json:"id"`
+	Name                string `json:"name"`
+	Enable              bool   `json:"enable"`
+	Protocol            string `json:"protocol"`           // "torrent" or "usenet"
+	SupportsRss         bool   `json:"supportsRss"`
+	SupportsSearch      bool   `json:"supportsSearch"`
+	IndexerUrls         []any  `json:"indexerUrls"`
+	Priority            int    `json:"priority"`
+	DownloadClientID    int    `json:"downloadClientId"`
+	Tags                []int  `json:"tags"`
+}
+
+func (c *Client) ListIndexers(ctx context.Context) ([]Indexer, error) {
+	var arr []Indexer
+	if err := c.do(ctx, http.MethodGet, "/api/v1/indexer", nil, &arr); err != nil {
+		return nil, err
+	}
+	return arr, nil
+}
+
+// -----------------------------------------------------------------------------
+// /api/v1/search — the main thing Notflix uses
+// -----------------------------------------------------------------------------
+
+// SearchResult is one row from /api/v1/search (Torznab-shaped). We only
+// model the fields Notflix actually uses; Prowlarr returns ~30 fields per
+// row but most are bookkeeping.
+type SearchResult struct {
+	GUID            string  `json:"guid"`
+	Title           string  `json:"title"`
+	Indexer         string  `json:"indexer"`
+	IndexerID       int     `json:"indexerId"`
+	Protocol        string  `json:"protocol"` // "torrent" / "usenet"
+	Size            int64   `json:"size"`
+	Files           int     `json:"files"`
+	Grabs           int     `json:"grabs"`
+	Seeders         int     `json:"seeders"`
+	Leechers        int     `json:"leechers"`
+	PublishDate     string  `json:"publishDate"`
+	Categories      []Cat   `json:"categories"`
+	DownloadURL     string  `json:"downloadUrl"`
+	MagnetURL       string  `json:"magnetUrl"`
+	InfoHash        string  `json:"infoHash"`
+	InfoURL         string  `json:"infoUrl"`
+}
+
+type Cat struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// Search Prowlarr for a free-text query. Pass `categories` to restrict
+// (e.g. []{2000} for movies, []{5000} for TV) — leave empty for everything.
+//
+// Prowlarr's categories follow the Torznab spec:
+//   2000-2999  Movies     (2010 SD, 2020 HD, 2040 UHD)
+//   5000-5999  TV         (5030 SD, 5040 HD, 5045 UHD)
+//   6000-6999  XXX        (don't pass this one)
+func (c *Client) Search(ctx context.Context, query string, categories []int) ([]SearchResult, error) {
+	q := url.Values{}
+	q.Set("query", query)
+	q.Set("type", "search")
+	for _, cat := range categories {
+		q.Add("categories", fmt.Sprintf("%d", cat))
+	}
+	var arr []SearchResult
+	if err := c.do(ctx, http.MethodGet, "/api/v1/search", q, &arr); err != nil {
+		return nil, err
+	}
+	return arr, nil
+}
+
+// Helpers for common Notflix searches.
+//
+// MovieCategories — Torznab 2000-series. SearchMovie restricts to those
+// so we don't get a /TV/Anime/XXX mishmash in the results.
+var MovieCategories = []int{2000, 2010, 2020, 2030, 2040, 2045, 2050, 2060, 2070, 2080}
+
+// TVCategories — Torznab 5000-series.
+var TVCategories = []int{5000, 5010, 5020, 5030, 5040, 5045, 5050, 5060, 5070, 5080}
+
+func (c *Client) SearchMovie(ctx context.Context, title string, year int) ([]SearchResult, error) {
+	q := title
+	if year > 0 {
+		q = fmt.Sprintf("%s %d", title, year)
+	}
+	return c.Search(ctx, q, MovieCategories)
+}
+
+func (c *Client) SearchTV(ctx context.Context, title string, season, episode int) ([]SearchResult, error) {
+	q := title
+	if season > 0 && episode > 0 {
+		q = fmt.Sprintf("%s S%02dE%02d", title, season, episode)
+	} else if season > 0 {
+		q = fmt.Sprintf("%s S%02d", title, season)
+	}
+	return c.Search(ctx, q, TVCategories)
+}
