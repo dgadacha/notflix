@@ -7,7 +7,7 @@ function devOrProd(dev: string, prod: string): string {
 
 export function getServerBaseUrl(removeProtocol: boolean = false): string {
     if (__isDesktop__) {
-        let ret = devOrProd(`http://127.0.0.1:${__DEV_SERVER_PORT}`, "http://127.0.0.1:43211")
+        let ret = devOrProd(`http://127.0.0.1:${__DEV_SERVER_PORT}`, "http://127.0.0.1:43212")
         if (removeProtocol) {
             ret = ret.replace("http://", "").replace("https://", "")
         }

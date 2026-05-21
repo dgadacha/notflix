@@ -8,8 +8,8 @@
 # Override defaults inline, e.g. `make dev DATADIR=/tmp/notflix PORT=43000`.
 
 DATADIR ?= $$HOME/.notflix-data
-# 43211 is the notflix default — extensions hardcode it for the proxy URL
-PORT    ?= 43211
+# 43212 is the notflix default — cohabite with Kuro on 43211
+PORT    ?= 43212
 GO      ?= go
 NPM     ?= npm
 

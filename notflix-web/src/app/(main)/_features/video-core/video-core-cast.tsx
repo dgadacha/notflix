@@ -156,7 +156,7 @@ export async function castCurrentMedia(playbackInfo: any) {
     if (!window.electron?.cast || !playbackInfo) return
 
     const serverBaseUrl = getServerBaseUrl()
-    const serverPort = parseInt(serverBaseUrl.split(":").pop() || "43211", 10)
+    const serverPort = parseInt(serverBaseUrl.split(":").pop() || "43212", 10)
 
     // Build the stream URL
     let streamUrl = playbackInfo.streamUrl || ""

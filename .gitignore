@@ -47,34 +47,34 @@ seanime-parser/.git
 ##
 ## Web App
 ##
-seanime-web/node_modules
-seanime-web/dist
-seanime-web/out
-seanime-web/out-desktop
-seanime-web/out-denshi
-seanime-web/web
-seanime-web/.tanstack
-seanime-web/.next
-seanime-web/.idea
-seanime-web/.pnp
-seanime-web/.pnp.js
-seanime-web/.yarn/install-state.gz
-seanime-web/coverage
-seanime-web/build
-seanime-web/.DS_Store
-seanime-web/*.pem
-seanime-web/npm-debug.log*
-seanime-web/yarn-debug.log*
-seanime-web/yarn-error.log*
-seanime-web/.env*.local
-seanime-web/*.tsbuildinfo
-seanime-web/snapshot
-seanime-web/logs
-seanime-web/analyze
-seanime-web/TODO-priv.md
-seanime-web/CHANGELOG-priv.md
+notflix-web/node_modules
+notflix-web/dist
+notflix-web/out
+notflix-web/out-desktop
+notflix-web/out-denshi
+notflix-web/web
+notflix-web/.tanstack
+notflix-web/.next
+notflix-web/.idea
+notflix-web/.pnp
+notflix-web/.pnp.js
+notflix-web/.yarn/install-state.gz
+notflix-web/coverage
+notflix-web/build
+notflix-web/.DS_Store
+notflix-web/*.pem
+notflix-web/npm-debug.log*
+notflix-web/yarn-debug.log*
+notflix-web/yarn-error.log*
+notflix-web/.env*.local
+notflix-web/*.tsbuildinfo
+notflix-web/snapshot
+notflix-web/logs
+notflix-web/analyze
+notflix-web/TODO-priv.md
+notflix-web/CHANGELOG-priv.md
 
-seanime-webapp/public/test*
+notflix-webapp/public/test*
 
 codegen/generated/hooks.mdx
 
@@ -84,7 +84,7 @@ internal/extension_repo/goja_plugin_test
 
 *.sh
 
-seanime-web-tr/
+notflix-web-tr/
 codegen/nonext/
 docs/support-skills
 

@@ -48,16 +48,16 @@ WORKDIR /app
 COPY --from=go-builder /out/notflix /app/notflix
 
 # Datadir defaults to /data (mounted PVC in k8s). Pre-seed config.toml with the
-# port community extensions hardcode (43211) and bind on 0.0.0.0 so other pods
+# port chosen to cohabite with Kuro (43211) and bind on 0.0.0.0 so other pods
 # / Cloudflare Tunnel can reach us.
 # Note: when /data is a PVC mount this file is shadowed at runtime — the k8s
 # initContainer rewrites it on every start with the canonical [server] block.
 RUN mkdir -p /data \
- && printf "[server]\nhost = \"0.0.0.0\"\nport = 43211\n" > /data/config.toml \
+ && printf "[server]\nhost = \"0.0.0.0\"\nport = 43212\n" > /data/config.toml \
  && chown -R notflix:notflix /app /data
 
 USER notflix
-EXPOSE 43211
+EXPOSE 43212
 VOLUME ["/data"]
 
 ENTRYPOINT ["/app/notflix"]

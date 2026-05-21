@@ -43,7 +43,7 @@ spec:
               {
                 echo '[server]'
                 echo 'host = "0.0.0.0"'
-                echo 'port = 43211'
+                echo 'port = 43212'
                 echo 'secureMode = "lax"'
                 echo 'externalURL = "https://notflix.nc-maiz.org"'
                 echo 'accessAllowlist = ["notflix.nc-maiz.org"]'
@@ -70,22 +70,22 @@ spec:
           imagePullPolicy: Always
           args: ["--datadir=/data"]
           ports:
-            - containerPort: 43211
+            - containerPort: 43212
               name: http
           volumeMounts:
             - name: data
               mountPath: /data
           # TCP probes — the embedded HTTP handler doesn't expose a /healthz
-          # but a successful TCP accept on 43211 means the binary is past
+          # but a successful TCP accept on 43212 means the binary is past
           # config init.
           readinessProbe:
             tcpSocket:
-              port: 43211
+              port: 43212
             initialDelaySeconds: 15
             periodSeconds: 10
           livenessProbe:
             tcpSocket:
-              port: 43211
+              port: 43212
             initialDelaySeconds: 60
             periodSeconds: 30
           resources:

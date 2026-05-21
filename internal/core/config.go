@@ -93,7 +93,7 @@ func NewConfig(options *ConfigOptions, logger *zerolog.Logger) (*Config, error) 
 	}
 
 	defaultHost := "127.0.0.1"
-	defaultPort := 43211
+	defaultPort := 43212
 
 	// Environment variables override defaults
 	if os.Getenv("SEANIME_SERVER_HOST") != "" {
