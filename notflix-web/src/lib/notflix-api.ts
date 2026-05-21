@@ -46,6 +46,21 @@ export function useTorBoxStatus() {
     })
 }
 
+/** One embedded subtitle stream found in the source file. */
+export type SubtitleTrack = {
+    /** 0-based position among subtitle streams (NOT global stream index). */
+    index: number
+    /** ffprobe codec_name, lowercased — "ass", "subrip", "pgssub", … */
+    codec: string
+    /** ISO-639 tag, e.g. "fre" / "eng" / "jpn". May be empty. */
+    language: string
+    /** Optional descriptive label set by the muxer (e.g. "Forced"). */
+    title: string
+    /** True iff ffmpeg can convert to WebVTT (text-based subs).
+     *  False for graphical formats like PGS/VobSub — we don't OCR yet. */
+    supported: boolean
+}
+
 export type TorBoxPlayResult = {
     streamUrl: string
     torrentId: number
@@ -58,6 +73,12 @@ export type TorBoxPlayResult = {
     audioCodec?: string
     /** Total duration in seconds from ffprobe. 0 on probe failure. */
     durationSec?: number
+    /** Embedded subtitle streams. Always sent (empty array when none). */
+    subtitles?: SubtitleTrack[]
+    /** HLS session id — used by both the transmuxed playback path AND
+     *  the subtitle <track> URLs (/stream/hls/<id>/sub_<n>.vtt). Empty
+     *  when ffprobe failed and no session could be opened. */
+    sessionId?: string
 }
 
 /**

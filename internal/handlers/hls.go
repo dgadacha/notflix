@@ -42,11 +42,31 @@ import (
 
 const hlsSegDurSec = 4.0
 
+// SubtitleTrack describes one embedded subtitle stream we found inside
+// the source file. The frontend builds a <track> element per entry;
+// the user toggles between them from the native player's CC menu.
+//
+// Codec → support matrix:
+//   subrip / srt    → convertible to WebVTT          ✓
+//   ass / ssa       → convertible to WebVTT          ✓ (styling stripped)
+//   webvtt / vtt    → passthrough                     ✓
+//   mov_text        → convertible                     ✓
+//   pgssub / hdmv   → graphical, needs OCR            ✗
+//   dvdsub / vobsub → graphical, needs OCR            ✗
+type SubtitleTrack struct {
+	Index     int    `json:"index"`     // Subtitle stream index (0-based among subs)
+	Codec     string `json:"codec"`     // ffprobe codec_name
+	Language  string `json:"language"`  // ISO-639 tag, e.g. "fre" / "eng" / "jpn"
+	Title     string `json:"title"`     // Optional descriptive label
+	Supported bool   `json:"supported"` // false for graphical subs we can't convert
+}
+
 type hlsSession struct {
 	id         string
 	url        string
 	duration   float64 // seconds, 0 if probe failed
 	audioCodec string
+	subtitles  []SubtitleTrack
 	lastUsed   time.Time
 }
 
@@ -59,11 +79,13 @@ var (
 // HandleStreamHLSStart — POST /api/v1/stream/hls/start
 //
 // Body: {"url": "<torbox-cdn-url>", "durationSec"?: float, "audioCodec"?: string}
-// Returns: {"sessionId", "playlistUrl", "durationSec", "audioCodec"}
+// Returns: {"sessionId", "playlistUrl", "durationSec", "audioCodec", "subtitles"}
 //
 // If the caller already ffprobed the URL (e.g. /torbox/play just did it),
 // they can pass `durationSec` + `audioCodec` and the HLS handler skips
-// the re-probe — saves ~1-2s on the second hop.
+// the re-probe — saves ~1-2s on the second hop. Subtitles are always
+// (re-)probed here so the session knows what tracks to expose via
+// /sub_<idx>.vtt — there's no piggy-back-from-caller for that yet.
 func (h *Handler) HandleStreamHLSStart(c echo.Context) error {
 	var body struct {
 		URL         string  `json:"url"`
@@ -84,52 +106,67 @@ func (h *Handler) HandleStreamHLSStart(c echo.Context) error {
 		})
 	}
 
-	digest := sha256.Sum256([]byte(raw))
+	sess, err := openHLSSession(c.Request().Context(), raw, body.DurationSec, body.AudioCodec)
+	if err != nil {
+		return c.JSON(http.StatusBadGateway, map[string]any{"error": err.Error()})
+	}
+
+	return RespondOK(c, map[string]any{
+		"sessionId":   sess.id,
+		"playlistUrl": "/api/v1/stream/hls/" + sess.id + "/index.m3u8",
+		"durationSec": sess.duration,
+		"audioCodec":  sess.audioCodec,
+		"subtitles":   sess.subtitles,
+	})
+}
+
+// openHLSSession opens (or refreshes) a session for the given source URL.
+// Pulled out of HandleStreamHLSStart so /torbox/play can use the same
+// machinery to expose subtitle URLs even for direct (non-transmux)
+// playback.
+//
+// hint{Duration,AudioCodec} are caller-provided ffprobe results — if
+// non-empty we use them and only ffprobe again to discover subtitles
+// (cheap because most tags are inline near the start of the file).
+func openHLSSession(parent context.Context, sourceURL string, hintDur float64, hintAudio string) (*hlsSession, error) {
+	digest := sha256.Sum256([]byte(sourceURL))
 	sessionID := hex.EncodeToString(digest[:8])
 
 	hlsLock.Lock()
 	sess, exists := hlsSessions[sessionID]
 	hlsLock.Unlock()
 
-	if !exists {
-		// Reuse caller's ffprobe result when provided, otherwise run
-		// our own. Either way we need a valid duration to build the
-		// VOD playlist.
-		dur := body.DurationSec
-		codec := body.AudioCodec
-		if dur == 0 {
-			dur, codec = probeMediaInfo(c.Request().Context(), raw)
-		}
-		if dur == 0 {
-			return c.JSON(http.StatusBadGateway, map[string]any{
-				"error": "ffprobe failed to read duration",
-			})
-		}
-		sess = &hlsSession{
-			id:         sessionID,
-			url:        raw,
-			duration:   dur,
-			audioCodec: codec,
-			lastUsed:   time.Now(),
-		}
-		hlsLock.Lock()
-		hlsSessions[sessionID] = sess
-		hlsLock.Unlock()
-		log.Printf("hls: opened session %s (dur=%.1fs codec=%s)", sessionID, dur, codec)
-	} else {
+	if exists {
 		hlsLock.Lock()
 		sess.lastUsed = time.Now()
 		hlsLock.Unlock()
+		return sess, nil
 	}
 
+	dur, audio, subs := probeMediaFull(parent, sourceURL)
+	if hintDur > 0 {
+		dur = hintDur
+	}
+	if hintAudio != "" {
+		audio = hintAudio
+	}
+	if dur == 0 {
+		return nil, fmt.Errorf("ffprobe failed to read duration")
+	}
+	sess = &hlsSession{
+		id:         sessionID,
+		url:        sourceURL,
+		duration:   dur,
+		audioCodec: audio,
+		subtitles:  subs,
+		lastUsed:   time.Now(),
+	}
+	hlsLock.Lock()
+	hlsSessions[sessionID] = sess
+	hlsLock.Unlock()
+	log.Printf("hls: opened session %s (dur=%.1fs codec=%s subs=%d)", sessionID, dur, audio, len(subs))
 	hlsCleanupOnce.Do(startHLSCleanup)
-
-	return RespondOK(c, map[string]any{
-		"sessionId":   sessionID,
-		"playlistUrl": "/api/v1/stream/hls/" + sessionID + "/index.m3u8",
-		"durationSec": sess.duration,
-		"audioCodec":  sess.audioCodec,
-	})
+	return sess, nil
 }
 
 // HandleStreamHLSFile — GET /api/v1/stream/hls/:sessionId/*
@@ -164,8 +201,70 @@ func (h *Handler) HandleStreamHLSFile(c echo.Context) error {
 		return h.serveHLSPlaylist(c, sess)
 	case strings.HasPrefix(file, "segment_") && strings.HasSuffix(file, ".ts"):
 		return h.serveHLSSegment(c, sess, file)
+	case strings.HasPrefix(file, "sub_") && strings.HasSuffix(file, ".vtt"):
+		return h.serveHLSSubtitle(c, sess, file)
 	}
 	return c.NoContent(http.StatusNotFound)
+}
+
+// serveHLSSubtitle extracts a single subtitle stream from the source via
+// ffmpeg and converts it to WebVTT on the fly. The result is small
+// (typically 50-200 KB even for a full film) so we just stream the
+// pipe straight back — no caching layer yet.
+//
+// URL shape: /api/v1/stream/hls/<sessionId>/sub_<idx>.vtt
+//   idx is the position in session.subtitles, NOT the absolute stream
+//   index. We translate via the session map so the frontend doesn't
+//   have to know about ffmpeg's stream numbering.
+func (h *Handler) serveHLSSubtitle(c echo.Context, sess *hlsSession, file string) error {
+	numPart := strings.TrimSuffix(strings.TrimPrefix(file, "sub_"), ".vtt")
+	n, err := strconv.Atoi(numPart)
+	if err != nil || n < 0 || n >= len(sess.subtitles) {
+		return c.NoContent(http.StatusNotFound)
+	}
+	track := sess.subtitles[n]
+	if !track.Supported {
+		return c.JSON(http.StatusUnprocessableEntity, map[string]any{
+			"error": "subtitle codec not convertible to webvtt: " + track.Codec,
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request().Context(), 30*time.Second)
+	defer cancel()
+
+	// `-map 0:s:N` picks the Nth subtitle stream specifically (not the
+	// Nth absolute stream). `-c:s webvtt` does the format conversion.
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-hide_banner",
+		"-loglevel", "warning",
+		"-i", sess.url,
+		"-map", fmt.Sprintf("0:s:%d", track.Index),
+		"-c:s", "webvtt",
+		"-f", "webvtt",
+		"pipe:1",
+	)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return RespondErr(c, err)
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return c.JSON(http.StatusBadGateway, map[string]any{
+			"error": "ffmpeg start: " + err.Error(),
+		})
+	}
+
+	c.Response().Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	// Long-cache: the subtitle bytes are deterministic for (sourceURL, idx)
+	// and the session ID embeds a hash of the source URL.
+	c.Response().Header().Set("Cache-Control", "public, max-age=86400")
+	c.Response().WriteHeader(http.StatusOK)
+	_, _ = io.Copy(c.Response().Writer, stdout)
+	if werr := cmd.Wait(); werr != nil {
+		log.Printf("hls sub %d: ffmpeg %v | %s", n, werr, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // serveHLSPlaylist generates a VOD-typed m3u8 listing every segment from
@@ -267,15 +366,31 @@ func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string)
 	return nil
 }
 
-// probeMediaInfo runs ffprobe once to extract both the duration and the
-// first audio stream codec. Returns (duration, "") on success, (0, "")
-// on failure.
+// probeMediaInfo runs ffprobe once to extract the duration and the
+// first audio stream codec. Returns (duration, "") on success,
+// (0, "") on failure. Kept as a tiny shim around probeMediaFull for
+// callers that only need the duration/audio pair.
 func probeMediaInfo(parent context.Context, url string) (float64, string) {
-	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
+	dur, audio, _ := probeMediaFull(parent, url)
+	return dur, audio
+}
+
+// probeMediaFull runs a single ffprobe invocation that returns the
+// duration, the first audio stream's codec, and every subtitle stream
+// in the source (with language + codec metadata).
+//
+// One probe is preferable to two because TorBox's CDN sometimes
+// rate-limits / 403s on rapid repeats, and ffprobe-over-network is the
+// expensive part of the cold-play path (≈ 1-2 s).
+//
+// Subtitle indices are 0-based among the subtitle streams themselves,
+// not the global stream index — what we hand to `-map 0:s:N` later.
+func probeMediaFull(parent context.Context, url string) (float64, string, []SubtitleTrack) {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ffprobe",
 		"-v", "error",
-		"-show_entries", "format=duration:stream=codec_name,codec_type",
+		"-show_entries", "format=duration:stream=codec_name,codec_type:stream_tags=language,title",
 		"-of", "default=noprint_wrappers=1",
 		url,
 	)
@@ -284,12 +399,43 @@ func probeMediaInfo(parent context.Context, url string) (float64, string) {
 	out, err := cmd.Output()
 	if err != nil {
 		log.Printf("ffprobe FAIL: %v | %s", err, strings.TrimSpace(stderr.String()))
-		return 0, ""
+		return 0, "", nil
 	}
-	// Parse "codec_name=h264\ncodec_type=video\ncodec_name=aac\ncodec_type=audio\nduration=3599.456"
-	var dur float64
-	var audio string
-	var pendingName string
+
+	// Parse the per-stream key=value blocks. Each stream block looks like:
+	//   codec_name=ass
+	//   codec_type=subtitle
+	//   TAG:language=fre
+	//   TAG:title=Forced
+	// Blocks are separated by the `format=` lines at the top so we just
+	// track "current stream attributes" and flush them on codec_type.
+	var (
+		dur     float64
+		audio   string
+		subs    []SubtitleTrack
+		subIdx  int
+		curName string
+		curLang string
+		curTitle string
+	)
+	flush := func(typ string) {
+		switch typ {
+		case "audio":
+			if audio == "" {
+				audio = strings.ToLower(curName)
+			}
+		case "subtitle":
+			subs = append(subs, SubtitleTrack{
+				Index:     subIdx,
+				Codec:     strings.ToLower(curName),
+				Language:  curLang,
+				Title:     curTitle,
+				Supported: isSubtitleConvertible(curName),
+			})
+			subIdx++
+		}
+		curName, curLang, curTitle = "", "", ""
+	}
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		switch {
@@ -299,17 +445,34 @@ func probeMediaInfo(parent context.Context, url string) (float64, string) {
 				dur = v
 			}
 		case strings.HasPrefix(line, "codec_name="):
-			pendingName = strings.TrimPrefix(line, "codec_name=")
-		case line == "codec_type=audio":
-			if audio == "" {
-				audio = strings.ToLower(pendingName)
-			}
+			curName = strings.TrimPrefix(line, "codec_name=")
+		case strings.HasPrefix(line, "TAG:language="):
+			curLang = strings.ToLower(strings.TrimPrefix(line, "TAG:language="))
+		case strings.HasPrefix(line, "TAG:title="):
+			curTitle = strings.TrimPrefix(line, "TAG:title=")
 		case strings.HasPrefix(line, "codec_type="):
-			pendingName = ""
+			flush(strings.TrimPrefix(line, "codec_type="))
 		}
 	}
-	log.Printf("ffprobe OK: duration=%.1fs audio=%q", dur, audio)
-	return dur, audio
+	log.Printf("ffprobe OK: duration=%.1fs audio=%q subs=%d", dur, audio, len(subs))
+	return dur, audio, subs
+}
+
+// isSubtitleConvertible reports whether ffmpeg can turn this codec into
+// WebVTT. Text-based formats (ASS, SRT, mov_text, WebVTT itself) are
+// fine; graphical formats (PGS, VobSub) need an OCR step we don't
+// implement, so we mark them unsupported and the frontend disables the
+// corresponding <track>.
+func isSubtitleConvertible(codec string) bool {
+	switch strings.ToLower(codec) {
+	case "subrip", "srt",
+		"ass", "ssa",
+		"webvtt", "vtt",
+		"mov_text",
+		"text", "subviewer":
+		return true
+	}
+	return false
 }
 
 // startHLSCleanup reaps sessions idle for more than 15 min. No temp

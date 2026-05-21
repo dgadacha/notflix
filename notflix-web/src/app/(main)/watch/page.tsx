@@ -20,7 +20,7 @@
  */
 import { useNetflixDetailModal } from "@/app/(main)/_features/netflix/netflix-detail-modal"
 import { NetflixWatchHistorySaver } from "@/app/(main)/_features/netflix/netflix-watch-history-saver"
-import { Release, releaseTorBoxPayload, useSearchMovie, useSearchTV, useTorBoxPlay } from "@/lib/notflix-api"
+import { Release, releaseTorBoxPayload, SubtitleTrack, useSearchMovie, useSearchTV, useTorBoxPlay } from "@/lib/notflix-api"
 import Hls from "hls.js"
 import {
     AudioPref,
@@ -90,6 +90,8 @@ export default function WatchPage() {
     const [streamUrl, setStreamUrl] = React.useState<string | null>(null)
     const [streamAudioCodec, setStreamAudioCodec] = React.useState<string>("")
     const [streamDurationSec, setStreamDurationSec] = React.useState<number>(0)
+    const [streamSubtitles, setStreamSubtitles] = React.useState<SubtitleTrack[]>([])
+    const [streamSessionId, setStreamSessionId] = React.useState<string>("")
     const [errorMsg, setErrorMsg] = React.useState<string | null>(null)
     // Lets the user opt out of the auto-pick: once they click "Changer de
     // source" we stop trying to launch the top result behind their back.
@@ -111,6 +113,8 @@ export default function WatchPage() {
         setStreamUrl(null)
         setStreamAudioCodec("")
         setStreamDurationSec(0)
+        setStreamSubtitles([])
+        setStreamSessionId("")
         setErrorMsg(null)
         // Honour the settings preference on the reset too — manual mode
         // means "always stop at the picker", not "stop the first time".
@@ -241,6 +245,8 @@ export default function WatchPage() {
                         ? (result as { durationSec: number }).durationSec
                         : 0,
                 )
+                setStreamSubtitles(result.subtitles ?? [])
+                setStreamSessionId(result.sessionId ?? "")
                 setPhase("playing")
                 setFallbackAttempt(0)
             } catch (err) {
@@ -327,6 +333,8 @@ export default function WatchPage() {
         setStreamUrl(null)
         setStreamAudioCodec("")
         setStreamDurationSec(0)
+        setStreamSubtitles([])
+        setStreamSessionId("")
         // Re-apply the preference: in manual mode "Réessayer" still lands
         // back on the picker, not on an auto-launch.
         setAutoPickDisabled(sourcePickMode === "manual")
@@ -393,6 +401,8 @@ export default function WatchPage() {
                     releaseTitle={pickedRelease?.title ?? ""}
                     audioCodec={streamAudioCodec}
                     durationSec={streamDurationSec}
+                    subtitles={streamSubtitles}
+                    sessionId={streamSessionId}
                     resumeSec={resumeSec}
                     onBack={handleClose}
                     onChangeSource={handleChangeSource}
@@ -721,6 +731,8 @@ function Player({
     releaseTitle,
     audioCodec,
     durationSec,
+    subtitles,
+    sessionId,
     resumeSec,
     onBack,
     onChangeSource,
@@ -730,6 +742,8 @@ function Player({
     releaseTitle: string
     audioCodec: string
     durationSec: number
+    subtitles: SubtitleTrack[]
+    sessionId: string
     resumeSec: number
     onBack: () => void
     onChangeSource: () => void
@@ -905,7 +919,11 @@ function Player({
 
             {/* src is set imperatively in the effect above — either
                 directly (native HTTP playback) or via Hls.attachMedia
-                pointing at the backend's HLS playlist. */}
+                pointing at the backend's HLS playlist. The <track>
+                children mount the embedded subtitle streams the backend
+                discovered during ffprobe. The browser surfaces them
+                through the native CC menu (a "subtitles" icon on the
+                control bar). */}
             <video
                 ref={videoRef}
                 autoPlay
@@ -915,7 +933,76 @@ function Player({
                 onError={() => {
                     console.error("[Notflix] video error")
                 }}
-            />
+            >
+                {sessionId && subtitles.filter(s => s.supported).map(track => {
+                    const lang = normaliseSubLang(track.language)
+                    return (
+                        <track
+                            key={track.index}
+                            kind="subtitles"
+                            src={`/api/v1/stream/hls/${sessionId}/sub_${track.index}.vtt`}
+                            srcLang={lang || "und"}
+                            label={subtitleLabel(track)}
+                            default={isPreferredSubLang(lang)}
+                        />
+                    )
+                })}
+            </video>
         </div>
     )
+}
+
+/** Map ffprobe's ISO-639-2 (3-letter) tags to the 2-letter BCP-47 codes
+ *  browsers prefer for <track srclang>. Falls through unchanged for
+ *  tags we don't know about — the browser still accepts them as opaque. */
+function normaliseSubLang(raw: string): string {
+    const m: Record<string, string> = {
+        fre: "fr", fra: "fr", fr: "fr",
+        eng: "en", en: "en",
+        jpn: "ja", ja: "ja",
+        spa: "es", es: "es",
+        ger: "de", deu: "de", de: "de",
+        ita: "it", it: "it",
+        por: "pt", pt: "pt",
+        ara: "ar", ar: "ar",
+        chi: "zh", zho: "zh", zh: "zh",
+        kor: "ko", ko: "ko",
+        rus: "ru", ru: "ru",
+        nld: "nl", dut: "nl", nl: "nl",
+    }
+    const k = raw.toLowerCase()
+    return m[k] ?? k
+}
+
+/** True iff this language should be selected by default in the CC menu.
+ *  Hard-coded to French for Notflix's audience — could later read from
+ *  the audio preference atom. */
+function isPreferredSubLang(lang: string): boolean {
+    return lang === "fr"
+}
+
+/** Human-readable label shown in the CC menu. Includes the title when
+ *  the source set one ("Forced", "SDH"), falls back to the language
+ *  name when not. */
+function subtitleLabel(track: SubtitleTrack): string {
+    const lang = normaliseSubLang(track.language)
+    const langName: Record<string, string> = {
+        fr: "Français",
+        en: "English",
+        ja: "日本語",
+        es: "Español",
+        de: "Deutsch",
+        it: "Italiano",
+        pt: "Português",
+        ar: "العربية",
+        zh: "中文",
+        ko: "한국어",
+        ru: "Русский",
+        nl: "Nederlands",
+    }
+    const base = langName[lang] || track.language || "?"
+    if (track.title && track.title.toLowerCase() !== base.toLowerCase()) {
+        return `${base} · ${track.title}`
+    }
+    return base
 }

@@ -251,12 +251,23 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 		return RespondErr(c, err)
 	}
 
-	// 5) Single ffprobe call covers both pieces of info we need: the
-	//    audio codec (frontend decides direct vs HLS transmux) and the
-	//    duration (HLS playlist is built from that). The frontend
-	//    forwards both to /hls/start so the HLS handler can skip
-	//    reprobing — saves 1-2s on the second hop.
-	durationSec, audioCodec := probeMediaInfo(ctx, streamURL)
+	// 5) Single ffprobe call covers everything we need for playback:
+	//    duration, audio codec, AND subtitle tracks. Subtitles are
+	//    surfaced regardless of audio path so that even a direct
+	//    (AAC) playback can mount <track> elements pointing at the
+	//    HLS endpoint's /sub_N.vtt route.
+	durationSec, audioCodec, subs := probeMediaFull(ctx, streamURL)
+
+	// Open an HLS session up-front. Cheap (just metadata + a map
+	// entry) and lets the frontend reference subtitles by sessionId
+	// without first having to round-trip through /stream/hls/start.
+	// If the session can't be opened (probe failure) we still serve
+	// the direct stream — subtitles won't be available, but playback
+	// itself works.
+	var sessionID string
+	if sess, err := openHLSSession(ctx, streamURL, durationSec, audioCodec); err == nil {
+		sessionID = sess.id
+	}
 
 	return RespondOK(c, map[string]any{
 		"streamUrl":   streamURL,
@@ -266,6 +277,8 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 		"cached":      ready.Cached,
 		"audioCodec":  audioCodec,  // "aac" / "ac3" / "eac3" / "dts" / … / ""
 		"durationSec": durationSec, // 0 on probe failure
+		"subtitles":   subs,        // [{index, codec, language, title, supported}, …]
+		"sessionId":   sessionID,   // for subtitle URL construction
 	})
 }
 
