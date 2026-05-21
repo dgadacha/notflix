@@ -19,6 +19,7 @@
  *   error       Surfaced + retry / change-source.
  */
 import { Release, releaseTorBoxPayload, useSearchMovie, useSearchTV, useTorBoxPlay } from "@/lib/notflix-api"
+import Hls from "hls.js"
 import {
     AudioPref,
     QualityPref,
@@ -629,33 +630,98 @@ function Player({
     const { t } = useTranslation()
     const videoRef = React.useRef<HTMLVideoElement>(null)
 
-    // Decide whether to route through the ffmpeg transmux. Priority:
+    // Decide the streaming path:
     //
-    //   1. ffprobe identified the codec → trust it. "aac" / "aac_he"
-    //      etc. → direct stream → full seek. Anything else → transmux.
+    //   - audioCodec === "aac…" → DIRECT TorBox URL, native <video src>.
+    //     Full seek + native bandwidth, the best path. Most YTS / WEBRip
+    //     releases land here.
     //
-    //   2. ffprobe failed (empty string) → prefer the direct URL so
-    //      seek works. If the audio turns out to be silent, the user's
-    //      "Changer de source" escape hatch lets them switch to a
-    //      different release. (Previously we defaulted to transmux on
-    //      probe failure — Dylan rightly noted that costs seek for
-    //      every probe failure, even on AAC files where probe just
-    //      didn't manage to talk to the CDN in time.)
-    const needsTransmux = audioCodec
-        ? !audioCodec.startsWith("aac")
-        : false
-    const videoSrc = needsTransmux
-        ? `/api/v1/stream/transmux?url=${encodeURIComponent(src)}`
-        : src
+    //   - audioCodec === something else → HLS via ffmpeg backend. Audio
+    //     is re-encoded to AAC, video copied verbatim into 4-second .ts
+    //     chunks behind a growing .m3u8 playlist. hls.js (or Safari
+    //     native) plays the playlist — the seek bar works because each
+    //     chunk is independently fetchable.
+    //
+    //   - audioCodec empty (probe failed) → fall through to DIRECT, on
+    //     the bet that probe failures correlate with CDN hiccups, not
+    //     exotic codecs. If audio ends up silent the user clicks
+    //     "Changer de source".
+    const needsTransmux = audioCodec ? !audioCodec.startsWith("aac") : false
 
-    // One-line console hint so debugging "why no seek?" / "why no
-    // audio?" is a Cmd-Shift-I away.
     React.useEffect(() => {
         console.info(
             `[Notflix] audioCodec=${audioCodec || "(probe failed)"} → ` +
-            `${needsTransmux ? "TRANSMUX (no seek)" : "DIRECT (full seek)"}`,
+            `${needsTransmux ? "HLS transmux (seek OK)" : "DIRECT (seek OK)"}`,
         )
     }, [audioCodec, needsTransmux])
+
+    // Drive the <video> source imperatively so we can:
+    //   - flip between native src and hls.js attachMedia
+    //   - tear down hls.js cleanly on unmount or source switch
+    React.useEffect(() => {
+        const video = videoRef.current
+        if (!video) return
+        let cancelled = false
+        let hls: Hls | null = null
+
+        if (!needsTransmux) {
+            video.src = src
+            return () => {
+                video.removeAttribute("src")
+                video.load()
+            }
+        }
+
+        // Kick off an HLS session on the backend, then wire hls.js to
+        // the playlist URL it returns. Safari natively plays HLS, so
+        // we skip hls.js there.
+        ;(async () => {
+            try {
+                const r = await fetch("/api/v1/stream/hls/start", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ url: src }),
+                })
+                if (!r.ok) {
+                    console.error("[Notflix] HLS start failed:", r.status, await r.text())
+                    return
+                }
+                const j = (await r.json()) as { data: { playlistUrl: string } }
+                if (cancelled) return
+                const playlistUrl = j.data.playlistUrl
+
+                if (Hls.isSupported()) {
+                    hls = new Hls({
+                        // ~30s of pre-buffer keeps seek-forward smooth
+                        // without hoarding RAM.
+                        maxBufferLength: 30,
+                    })
+                    hls.loadSource(playlistUrl)
+                    hls.attachMedia(video)
+                    hls.on(Hls.Events.ERROR, (_, data) => {
+                        if (data.fatal) {
+                            console.error("[Notflix] hls fatal error", data)
+                        }
+                    })
+                } else {
+                    // Safari + iOS Chrome have native HLS.
+                    video.src = playlistUrl
+                }
+            } catch (err) {
+                console.error("[Notflix] HLS init failed:", err)
+            }
+        })()
+
+        return () => {
+            cancelled = true
+            if (hls) {
+                hls.destroy()
+                hls = null
+            }
+            video.removeAttribute("src")
+            video.load()
+        }
+    }, [src, needsTransmux])
 
     // Picture-in-Picture on tab blur — Netflix-style "keep playing while I
     // check Slack". Restored when the user comes back.
@@ -703,19 +769,17 @@ function Player({
                 </button>
             </div>
 
-            {/* key={videoSrc} forces a fresh <video> when the user toggles
-                the transmux — otherwise the browser keeps trying to load
-                the previous URL into the existing element. */}
+            {/* src is set imperatively in the effect above — either
+                directly (native HTTP playback) or via Hls.attachMedia
+                pointing at the backend's HLS playlist. */}
             <video
-                key={videoSrc}
                 ref={videoRef}
-                src={videoSrc}
                 autoPlay
                 controls
                 playsInline
                 className="w-full h-full object-contain"
                 onError={() => {
-                    console.error("[Notflix] video error on", videoSrc)
+                    console.error("[Notflix] video error")
                 }}
             />
         </div>

@@ -47,8 +47,14 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	// Stream transmux — pipes a TorBox URL through ffmpeg to swap the
 	// audio codec for AAC. Used as a fallback when the browser can't
 	// decode the source audio (DDP / DTS / TrueHD on non-Apple Chrome).
+	//
+	// Two flavours:
+	//   - /transmux : raw matroska pipe, no seek (legacy, simpler)
+	//   - /hls/*    : HLS chunked playlist, full seek bar support
 	s := v1.Group("/stream")
 	s.GET("/transmux", h.HandleStreamTransmux)
+	s.POST("/hls/start", h.HandleStreamHLSStart)
+	s.GET("/hls/:sessionId/*", h.HandleStreamHLSFile)
 
 	// Profiles
 	p := v1.Group("/profiles")
