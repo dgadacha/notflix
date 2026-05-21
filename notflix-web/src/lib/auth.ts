@@ -68,6 +68,23 @@ export function useLogin() {
     })
 }
 
+export function useChangeOwnPassword() {
+    return useMutation<boolean, Error, { currentPassword: string; newPassword: string }>({
+        mutationFn: async (body) => {
+            const r = await fetch("/api/v1/auth/password", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            })
+            if (!r.ok) {
+                const j = (await r.json().catch(() => ({}))) as { error?: string }
+                throw new Error(j.error || "Changement impossible")
+            }
+            return true
+        },
+    })
+}
+
 export function useLogout() {
     return useMutation<boolean, Error, void>({
         mutationFn: async () => {

@@ -16,13 +16,14 @@ import (
 
 // Auth handlers — small surface:
 //
-//   POST   /api/v1/auth/login   {username, password}     → set cookie
-//   POST   /api/v1/auth/logout                            → clear cookie
-//   GET    /api/v1/auth/me                                → current user
-//   GET    /api/v1/users          (admin)                 → list child accounts
+//   POST   /api/v1/auth/login    {username, password}             → set cookie
+//   POST   /api/v1/auth/logout                                    → clear cookie
+//   GET    /api/v1/auth/me                                        → current user
+//   POST   /api/v1/auth/password {currentPassword, newPassword}   → change own password
+//   GET    /api/v1/users          (admin)                         → list child accounts
 //   POST   /api/v1/users          (admin) {username, password, displayName, isAdmin}
 //   DELETE /api/v1/users/:id      (admin)
-//   POST   /api/v1/users/:id/password {password} (admin)  → reset child password
+//   POST   /api/v1/users/:id/password {password} (admin)          → reset child password
 //
 // Sessions live in SQLite (one row per active session) so the admin
 // deleting a child account immediately kicks them out.
@@ -86,6 +87,47 @@ func (h *Handler) HandleAuthMe(c echo.Context) error {
 		return c.JSON(http.StatusUnauthorized, map[string]any{"error": "not authenticated"})
 	}
 	return RespondOK(c, sanitiseUser(user))
+}
+
+// HandleChangeOwnPassword lets the currently-authenticated user rotate
+// their own password without needing admin privileges. The current
+// password is verified up-front so a stolen session cookie can't be
+// used to lock the rightful owner out.
+func (h *Handler) HandleChangeOwnPassword(c echo.Context) error {
+	user := UserFromContext(c)
+	if user == nil {
+		return c.JSON(http.StatusUnauthorized, map[string]any{"error": "not authenticated"})
+	}
+	var body struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return RespondErr(c, err)
+	}
+	if body.CurrentPassword == "" || body.NewPassword == "" {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error": "current and new password are required",
+		})
+	}
+	if len(body.NewPassword) < 4 {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error": "new password must be at least 4 characters",
+		})
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(body.CurrentPassword)); err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]any{
+			"error": "current password is incorrect",
+		})
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(body.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return RespondErr(c, err)
+	}
+	if err := h.App.Database.UpdateUserPasswordHash(user.ID, string(hash)); err != nil {
+		return RespondErr(c, err)
+	}
+	return RespondOK(c, true)
 }
 
 // -----------------------------------------------------------------------------

@@ -35,6 +35,7 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	auth.POST("/login", h.HandleLogin)
 	auth.POST("/logout", h.HandleLogout)
 	auth.GET("/me", h.HandleAuthMe)
+	auth.POST("/password", h.HandleChangeOwnPassword)
 
 	// Users — admin-only CRUD on child accounts.
 	users := v1.Group("/users", h.RequireAdmin)
