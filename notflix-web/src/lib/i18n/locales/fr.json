@@ -89,7 +89,10 @@
     "episodes": "Épisodes",
     "episodes_count": "épisodes",
     "genres": "Genres",
-    "subtitles": "Sous-titres"
+    "subtitles": "Sous-titres",
+    "sub_prep_mode": "Préparation",
+    "sub_prep_wait": "Attendre les sous-titres",
+    "sub_prep_background": "Lecture immédiate"
   },
   "lists": {
     "title": "Mes listes",

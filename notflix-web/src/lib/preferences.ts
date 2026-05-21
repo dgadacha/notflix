@@ -21,6 +21,20 @@ export type AudioPref = "auto" | "fr" | "vo"
 export type SubtitleLangPref = "off" | "auto" | "fr" | "en" | "es" | "de" | "it" | "pt" | "ja"
 
 /**
+ * Whether /watch should BLOCK playback on the subtitle prep step
+ * (extraction + optional translation) or just kick prep off in the
+ * background and start the video immediately.
+ *
+ *   "wait"       — show the progress overlay until subs are ready
+ *                   (current default — safer for first-watch).
+ *   "background" — play immediately. The subtitle <track> elements
+ *                   still mount, but they only become populated once
+ *                   the backend cache file is ready, which may be
+ *                   several seconds to minutes into playback.
+ */
+export type SubPrepMode = "wait" | "background"
+
+/**
  * SourcePickMode controls what /watch does once Prowlarr returns the
  * release list:
  *
@@ -67,6 +81,7 @@ export const qualityPrefAtom = atomWithStorage<QualityPref>("notflix-pref-qualit
 export const audioPrefAtom = atomWithStorage<AudioPref>("notflix-pref-audio", "auto")
 export const sourcePickModeAtom = atomWithStorage<SourcePickMode>("notflix-pref-source-pick", "auto")
 export const subtitleLangPrefAtom = atomWithStorage<SubtitleLangPref>("notflix-pref-subtitle", "fr")
+export const subPrepModeAtom = atomWithStorage<SubPrepMode>("notflix-pref-sub-prep-mode", "wait")
 
 export function useQualityPref() {
     return useAtom(qualityPrefAtom)
@@ -82,6 +97,10 @@ export function useSourcePickMode() {
 
 export function useSubtitleLangPref() {
     return useAtom(subtitleLangPrefAtom)
+}
+
+export function useSubPrepMode() {
+    return useAtom(subPrepModeAtom)
 }
 
 /**

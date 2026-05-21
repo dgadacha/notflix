@@ -42,6 +42,7 @@ import {
     releaseMatchesQuality,
     releaseNeedsTransmux,
     useSourcePickMode,
+    useSubPrepMode,
     useSubtitleLangPref,
 } from "@/lib/preferences"
 import { titleOf, tmdbImage, useTMDBDetail, yearOf } from "@/lib/tmdb"
@@ -102,6 +103,9 @@ export default function WatchPage() {
     // "auto" = fire the top release as soon as the search resolves.
     // "manual" = stop at the picker so the user always chooses.
     const [sourcePickMode] = useSourcePickMode()
+    // "wait" = block playback on subtitle prep (progress overlay).
+    // "background" = play immediately, mount tracks when ready.
+    const [subPrepMode] = useSubPrepMode()
 
     const [phase, setPhase] = React.useState<Phase>("searching")
     const [pickedRelease, setPickedRelease] = React.useState<Release | null>(null)
@@ -267,10 +271,28 @@ export default function WatchPage() {
                 )
                 setStreamSubtitles(result.subtitles ?? [])
                 setStreamSessionId(result.sessionId ?? "")
-                // If subtitles are disabled in prefs, or we have no
-                // session id (probe failed), skip the prep step and
-                // play immediately.
-                if (subLangPref === "off" || !result.sessionId || (result.subtitles ?? []).length === 0) {
+                // Decide whether to BLOCK on subtitle prep:
+                //   - off / no subs / no session   → skip prep, play
+                //   - subPrepMode = "background"   → kick prep off in
+                //     the background, play immediately. <track>
+                //     elements still mount; they populate once the
+                //     backend cache file is ready.
+                //   - default ("wait")             → show progress
+                //     overlay until ready.
+                const noSubsToShow =
+                    subLangPref === "off" ||
+                    !result.sessionId ||
+                    (result.subtitles ?? []).length === 0
+                if (noSubsToShow) {
+                    setPhase("playing")
+                } else if (subPrepMode === "background") {
+                    // Fire-and-forget — backend extracts on its own
+                    // pace; we don't wait for the result.
+                    if (result.sessionId) {
+                        void startSubPrep(result.sessionId, subLangPref).catch(err => {
+                            console.warn("[Notflix] background sub prep failed to start:", err)
+                        })
+                    }
                     setPhase("playing")
                 } else {
                     setPhase("preparing_subs")

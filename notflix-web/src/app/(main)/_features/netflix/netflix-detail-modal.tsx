@@ -16,6 +16,7 @@ import {
     SUBTITLE_LANG_OPTIONS,
     useAudioPref,
     useQualityPref,
+    useSubPrepMode,
     useSubtitleLangPref,
 } from "@/lib/preferences"
 import {
@@ -104,6 +105,7 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
     const [quality, setQuality] = useQualityPref()
     const [audio, setAudio] = useAudioPref()
     const [subLang, setSubLang] = useSubtitleLangPref()
+    const [subPrepMode, setSubPrepMode] = useSubPrepMode()
 
     // TV series: track which season we're showing in the episode list.
     // Episode is no longer a separate piece of state — the user clicks an
@@ -225,6 +227,17 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
                             options={SUBTITLE_LANG_OPTIONS}
                             onChange={(v) => setSubLang(v as typeof subLang)}
                         />
+                        {subLang !== "off" && (
+                            <PrefSelect
+                                label={t("modal.sub_prep_mode", "Préparation")}
+                                value={subPrepMode}
+                                options={[
+                                    { value: "wait", label: t("modal.sub_prep_wait", "Attendre les sous-titres") },
+                                    { value: "background", label: t("modal.sub_prep_background", "Lecture immédiate") },
+                                ]}
+                                onChange={(v) => setSubPrepMode(v as typeof subPrepMode)}
+                            />
+                        )}
                     </div>
                 </div>
             </div>
