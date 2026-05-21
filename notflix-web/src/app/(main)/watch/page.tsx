@@ -61,6 +61,15 @@ export default function WatchPage() {
     const resumeSecParam = searchParams.get("t")
     const resumeSec = resumeSecParam ? parseInt(resumeSecParam, 10) : 0
 
+    // Optional pre-selected release. When the resume rail / history grid
+    // links here, they encode the original release's source so we can
+    // skip the Prowlarr search + auto-pick and re-stream the exact same
+    // file. Without these, switching from a 1080p AAC to a 2160p DDP
+    // would scramble the resume timestamp (different duration).
+    const resumeReleaseSource = searchParams.get("releaseSource") ?? ""
+    const resumeReleaseName = searchParams.get("releaseName") ?? ""
+    const resumeReleaseHash = searchParams.get("releaseHash") ?? ""
+
     // Playback prefs come from the modal's selectors via the URL.
     const qualityPref = (searchParams.get("quality") as QualityPref | null) ?? "auto"
     const audioPref = (searchParams.get("audio") as AudioPref | null) ?? "auto"
@@ -230,10 +239,44 @@ export default function WatchPage() {
         [play, filteredReleases, releaseKey, t],
     )
 
+    // Synthesised release used when /watch is loaded with an explicit
+    // resume release (e.g. from the home's "Reprendre la lecture" card).
+    // We build a Release-shaped object so the existing launchRelease
+    // pipeline can drive it without caring whether it came from a
+    // Prowlarr search or a stored history row.
+    const resumeRelease = React.useMemo<Release | null>(() => {
+        if (!resumeReleaseSource && !resumeReleaseHash) return null
+        const isMagnet = resumeReleaseSource.toLowerCase().startsWith("magnet:")
+        return {
+            guid: `resume:${resumeReleaseHash || resumeReleaseSource}`,
+            title: resumeReleaseName || "Source précédente",
+            indexer: "history",
+            protocol: "torrent",
+            size: 0,
+            seeders: 0,
+            leechers: 0,
+            publishDate: "",
+            magnetUrl: isMagnet ? resumeReleaseSource : "",
+            downloadUrl: isMagnet ? "" : resumeReleaseSource,
+            infoHash: resumeReleaseHash,
+            cached: false,
+            quality: "?",
+            score: 0,
+        }
+    }, [resumeReleaseSource, resumeReleaseName, resumeReleaseHash])
+
     // Auto-pick: fire the top (pref-filtered) release as soon as the search
     // resolves, unless the user has explicitly opted into manual picking.
+    //
+    // When a resumeRelease is present we short-circuit the search step
+    // entirely — different code path, no Prowlarr roundtrip, no chance
+    // of picking a different file.
     React.useEffect(() => {
         if (phase !== "searching") return
+        if (resumeRelease) {
+            void launchRelease(resumeRelease)
+            return
+        }
         if (search.isFetching) return
         if (search.isError) {
             setErrorMsg(t("watch.search_failed", "La recherche Prowlarr a échoué."))
@@ -250,7 +293,7 @@ export default function WatchPage() {
             return
         }
         void launchRelease(filteredReleases[0])
-    }, [phase, search.isFetching, search.isError, filteredReleases, autoPickDisabled, launchRelease, t])
+    }, [phase, resumeRelease, search.isFetching, search.isError, filteredReleases, autoPickDisabled, launchRelease, t])
 
     const handleChangeSource = React.useCallback(() => {
         setAutoPickDisabled(true)
@@ -306,7 +349,9 @@ export default function WatchPage() {
         return (
             <>
                 {/* Per-profile history mirror — fires every 5s + on
-                    pagehide. No-op without an active profile. */}
+                    pagehide. No-op without an active profile. Carries
+                    the release identifiers so resume can re-pick the
+                    same source. */}
                 <NetflixWatchHistorySaver
                     tmdbId={mediaId}
                     mediaType={typeParam}
@@ -315,6 +360,7 @@ export default function WatchPage() {
                     title={displayTitle}
                     posterPath={detail?.poster_path ?? ""}
                     backdropUrl={detail?.backdrop_path ?? ""}
+                    release={pickedRelease}
                 />
                 <Player
                     src={streamUrl}

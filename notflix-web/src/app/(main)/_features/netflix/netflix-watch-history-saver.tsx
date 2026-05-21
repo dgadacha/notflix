@@ -15,6 +15,7 @@
  * a ref through the player. The /watch page can swap between native
  * playback and hls.js attachMedia and this still works.
  */
+import { Release } from "@/lib/notflix-api"
 import {
     useActiveProfileId,
     useProfileHistoryUpsert,
@@ -30,6 +31,9 @@ type Props = {
     title: string
     posterPath: string
     backdropUrl: string
+    /** The Prowlarr release currently being streamed. Captured into the
+     *  history row so the resume path can re-pick the same source. */
+    release: Release | null
 }
 
 const POLL_INTERVAL_MS = 5_000
@@ -45,6 +49,7 @@ export function NetflixWatchHistorySaver({
     title,
     posterPath,
     backdropUrl,
+    release,
 }: Props) {
     const profileUid = useActiveProfileId()
     const upsert = useProfileHistoryUpsert()
@@ -59,6 +64,9 @@ export function NetflixWatchHistorySaver({
         title,
         posterPath,
         backdropUrl,
+        releaseName: release?.title ?? "",
+        releaseSource: release?.magnetUrl || release?.downloadUrl || "",
+        releaseInfoHash: release?.infoHash ?? "",
     })
     React.useEffect(() => {
         payloadRef.current = {
@@ -69,8 +77,11 @@ export function NetflixWatchHistorySaver({
             title,
             posterPath,
             backdropUrl,
+            releaseName: release?.title ?? "",
+            releaseSource: release?.magnetUrl || release?.downloadUrl || "",
+            releaseInfoHash: release?.infoHash ?? "",
         }
-    }, [tmdbId, mediaType, season, episode, title, posterPath, backdropUrl])
+    }, [tmdbId, mediaType, season, episode, title, posterPath, backdropUrl, release])
 
     React.useEffect(() => {
         if (!profileUid) return

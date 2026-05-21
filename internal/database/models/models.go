@@ -22,7 +22,7 @@ type Profile struct {
 
 // Watch history is per (profile, tmdbId, mediaType). For movies, episode is
 // always 0; for TV shows we store (season, episode) so resume works at the
-// episode level just like Kuro.
+// episode level.
 type ProfileWatchHistory struct {
 	BaseModel
 	ProfileUID string `gorm:"column:profile_uid;size:64;not null;uniqueIndex:idx_profile_media,priority:1" json:"profileUid"`
@@ -37,6 +37,14 @@ type ProfileWatchHistory struct {
 	Title       string `gorm:"column:title;size:255" json:"title"`
 	PosterPath  string `gorm:"column:poster_path;size:255" json:"posterPath"`
 	BackdropURL string `gorm:"column:backdrop_url;size:255" json:"backdropUrl"`
+	// Identifies the specific release that produced this stream — without
+	// these the resume path would re-run the Prowlarr search and could
+	// land on a different file (different duration, different audio).
+	// Saved on every history upsert so even a mid-film source switch is
+	// captured.
+	ReleaseName     string `gorm:"column:release_name;size:512" json:"releaseName"`
+	ReleaseSource   string `gorm:"column:release_source;size:4096" json:"releaseSource"`
+	ReleaseInfoHash string `gorm:"column:release_info_hash;size:64" json:"releaseInfoHash"`
 }
 
 // Per-profile list of "to watch" / "currently watching" / etc.

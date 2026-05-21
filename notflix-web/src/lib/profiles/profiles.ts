@@ -50,6 +50,15 @@ export type ProfileWatchEntry = {
     title: string
     posterPath: string
     backdropUrl: string
+    /** Original Prowlarr release name (for display + fallback). */
+    releaseName: string
+    /** Magnet URI or Prowlarr downloadUrl that produced the stream. Used
+     *  by /watch to skip the Prowlarr search on resume and re-pick the
+     *  exact same source, avoiding duration mismatches. */
+    releaseSource: string
+    /** 40-hex info hash, when known — fallback when releaseSource is a
+     *  HTTP download URL that may have expired. */
+    releaseInfoHash: string
     createdAt: string
     updatedAt: string
 }
@@ -243,6 +252,11 @@ export type WatchHistoryUpsertBody = {
     title: string
     posterPath: string
     backdropUrl: string
+    // Release identifiers — let "Reprendre la lecture" re-pick the same
+    // source instead of re-running the Prowlarr search.
+    releaseName: string
+    releaseSource: string
+    releaseInfoHash: string
 }
 
 /**
@@ -320,6 +334,9 @@ function optimisticUpsertHistory(
             title: entry.title,
             posterPath: entry.posterPath,
             backdropUrl: entry.backdropUrl,
+            releaseName: entry.releaseName,
+            releaseSource: entry.releaseSource,
+            releaseInfoHash: entry.releaseInfoHash,
             createdAt: existing?.createdAt ?? new Date().toISOString(),
             updatedAt: new Date().toISOString(),
         }

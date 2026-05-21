@@ -80,30 +80,36 @@ func (h *Handler) HandleListHistory(c echo.Context) error {
 func (h *Handler) HandleUpsertHistory(c echo.Context) error {
 	uid := c.Param("uid")
 	var body struct {
-		TMDBID      int     `json:"tmdbId"`
-		MediaType   string  `json:"mediaType"`
-		Season      int     `json:"season"`
-		Episode     int     `json:"episode"`
-		CurrentTime float64 `json:"currentTime"`
-		Duration    float64 `json:"duration"`
-		Title       string  `json:"title"`
-		PosterPath  string  `json:"posterPath"`
-		BackdropURL string  `json:"backdropUrl"`
+		TMDBID          int     `json:"tmdbId"`
+		MediaType       string  `json:"mediaType"`
+		Season          int     `json:"season"`
+		Episode         int     `json:"episode"`
+		CurrentTime     float64 `json:"currentTime"`
+		Duration        float64 `json:"duration"`
+		Title           string  `json:"title"`
+		PosterPath      string  `json:"posterPath"`
+		BackdropURL     string  `json:"backdropUrl"`
+		ReleaseName     string  `json:"releaseName"`
+		ReleaseSource   string  `json:"releaseSource"`
+		ReleaseInfoHash string  `json:"releaseInfoHash"`
 	}
 	if err := c.Bind(&body); err != nil {
 		return RespondErr(c, err)
 	}
 	item := &models.ProfileWatchHistory{
-		ProfileUID:  uid,
-		TMDBID:      body.TMDBID,
-		MediaType:   body.MediaType,
-		Season:      body.Season,
-		Episode:     body.Episode,
-		CurrentTime: body.CurrentTime,
-		Duration:    body.Duration,
-		Title:       body.Title,
-		PosterPath:  body.PosterPath,
-		BackdropURL: body.BackdropURL,
+		ProfileUID:      uid,
+		TMDBID:          body.TMDBID,
+		MediaType:       body.MediaType,
+		Season:          body.Season,
+		Episode:         body.Episode,
+		CurrentTime:     body.CurrentTime,
+		Duration:        body.Duration,
+		Title:           body.Title,
+		PosterPath:      body.PosterPath,
+		BackdropURL:     body.BackdropURL,
+		ReleaseName:     body.ReleaseName,
+		ReleaseSource:   body.ReleaseSource,
+		ReleaseInfoHash: body.ReleaseInfoHash,
 	}
 	saved, err := h.App.Database.UpsertWatchHistory(item)
 	if err != nil {

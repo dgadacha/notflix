@@ -122,7 +122,10 @@ func (db *Database) UpsertWatchHistory(item *models.ProfileWatchHistory) (*model
 				{Name: "season"}, {Name: "episode"},
 			},
 			DoUpdates: clause.AssignmentColumns([]string{
-				"current_time", "duration", "title", "poster_path", "backdrop_url", "updated_at",
+				"current_time", "duration",
+				"title", "poster_path", "backdrop_url",
+				"release_name", "release_source", "release_info_hash",
+				"updated_at",
 			}),
 		}).
 		Create(item).Error

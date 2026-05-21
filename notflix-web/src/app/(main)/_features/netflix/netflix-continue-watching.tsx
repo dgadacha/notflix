@@ -63,6 +63,11 @@ export function NetflixContinueWatching() {
             params.set("episode", String(e.episode || 1))
         }
         params.set("t", String(Math.floor(e.currentTime)))
+        // Re-pin the original release so /watch resumes the same file
+        // (right duration → right resume position).
+        if (e.releaseSource) params.set("releaseSource", e.releaseSource)
+        if (e.releaseName) params.set("releaseName", e.releaseName)
+        if (e.releaseInfoHash) params.set("releaseHash", e.releaseInfoHash)
         router.push(`/watch?${params.toString()}`)
     }
 
