@@ -60,6 +60,7 @@ func (h *Handler) HandleSearchMovie(c echo.Context) error {
 	if err != nil {
 		return RespondErr(c, err)
 	}
+	results = filterByTitleRelevance(results, title)
 	return RespondOK(c, h.annotateAndSort(c, results))
 }
 
@@ -76,7 +77,104 @@ func (h *Handler) HandleSearchTV(c echo.Context) error {
 	if err != nil {
 		return RespondErr(c, err)
 	}
+	results = filterByTitleRelevance(results, title)
 	return RespondOK(c, h.annotateAndSort(c, results))
+}
+
+// filterByTitleRelevance drops Prowlarr results whose title doesn't share
+// enough significant words with the searched title. Prowlarr's Torznab
+// search is fuzzy and indexer-dependent — for "Super Mario Galaxy" we'd
+// see "Le Réveil de la Momie" (a popular cached release from the same
+// year) leak into the results, then float to #1 thanks to the cached
+// bonus. This filter runs BEFORE annotateAndSort so the bad matches are
+// out of the picture before the scoring even fires.
+//
+// Threshold: 60% of significant words must appear, except for 1-2-word
+// titles ("Tenet", "Joker") where we require 100% — short titles need
+// strict matching or anything containing the word "the" will pass.
+func filterByTitleRelevance(results []prowlarr.SearchResult, searched string) []prowlarr.SearchResult {
+	needles := significantWords(normalizeTitle(searched))
+	if len(needles) == 0 {
+		return results
+	}
+	threshold := 0.6
+	if len(needles) <= 2 {
+		threshold = 1.0
+	}
+	out := make([]prowlarr.SearchResult, 0, len(results))
+	for _, r := range results {
+		hay := normalizeTitle(r.Title)
+		matched := 0
+		for _, w := range needles {
+			if strings.Contains(hay, w) {
+				matched++
+			}
+		}
+		ratio := float64(matched) / float64(len(needles))
+		if ratio >= threshold {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// normalizeTitle lowercases, strips accents and collapses every
+// non-alphanumeric character to a space — so "Le Réveil de la Momie" and
+// "Le.Reveil.De.La.Momie" both become "le reveil de la momie".
+func normalizeTitle(s string) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case 'à', 'á', 'â', 'ä', 'ã', 'å', 'ą':
+			b.WriteByte('a')
+		case 'è', 'é', 'ê', 'ë', 'ę':
+			b.WriteByte('e')
+		case 'ì', 'í', 'î', 'ï':
+			b.WriteByte('i')
+		case 'ò', 'ó', 'ô', 'ö', 'õ':
+			b.WriteByte('o')
+		case 'ù', 'ú', 'û', 'ü':
+			b.WriteByte('u')
+		case 'ç':
+			b.WriteByte('c')
+		case 'ñ':
+			b.WriteByte('n')
+		default:
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+				b.WriteRune(r)
+			} else {
+				b.WriteByte(' ')
+			}
+		}
+	}
+	return b.String()
+}
+
+// stopwords for title-match — short connective words present in too many
+// release names to be useful as needles ("the", "of", "and", French "le"
+// "la" "les", …).
+var titleStopwords = map[string]bool{
+	"the": true, "a": true, "an": true, "of": true, "and": true,
+	"to": true, "in": true, "on": true, "for": true, "with": true,
+	"le": true, "la": true, "les": true, "un": true, "une": true,
+	"des": true, "de": true, "du": true, "et": true, "au": true,
+	"aux": true, "ou": true, "il": true, "elle": true,
+}
+
+func significantWords(normalized string) []string {
+	out := make([]string, 0, 8)
+	for _, w := range strings.Fields(normalized) {
+		if len(w) < 2 {
+			continue
+		}
+		if titleStopwords[w] {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
 }
 
 // annotateAndSort decorates each search result with cache state and a
