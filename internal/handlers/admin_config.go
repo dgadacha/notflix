@@ -112,9 +112,12 @@ func mask(currentVal, dbVal string) map[string]any {
 	}
 }
 
-// maskedTail shows the last 4 chars of a secret with the rest stubbed
-// out — enough to identify a key at a glance, not enough to recover it.
-// Very short values fall back to a flat "****" (no leakage).
+// maskedTail shows the last 4 chars of a secret with a short stub of
+// asterisks in front. Anthropic API keys are ~108 chars long; with the
+// full-length mask the resulting "***…***abcd" string overflowed the
+// settings card. Cap the stub at 8 asterisks — the masked output is
+// purely cosmetic (lets the admin glance at the key tail), no need to
+// echo back the full length.
 func maskedTail(s string) string {
 	if s == "" {
 		return ""
@@ -122,7 +125,7 @@ func maskedTail(s string) string {
 	if len(s) <= 6 {
 		return strings.Repeat("*", len(s))
 	}
-	return strings.Repeat("*", len(s)-4) + s[len(s)-4:]
+	return "********" + s[len(s)-4:]
 }
 
 // sourceOf reports where a credential is currently coming from. If the

@@ -677,7 +677,7 @@ function ServerSecretRow({
             </div>
 
             {!editing && field.isSet && (
-                <p className="font-mono text-[11px] text-[--muted]">{field.masked}</p>
+                <p className="font-mono text-[11px] text-[--muted] break-all">{field.masked}</p>
             )}
 
             {editing && (
