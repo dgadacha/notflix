@@ -125,7 +125,10 @@ export async function buildSeaQuery<T, D extends any = any>(
             data,
             params,
             headers,
-            withCredentials: true,
+            // Notflix has no cookie-based auth — keep credentials off so CORS
+            // can stay wildcard-friendly in dev (browsers reject `Allow-Origin: *`
+            // alongside credentialed requests).
+            withCredentials: false,
         })
     }
     catch (error) {
