@@ -18,6 +18,7 @@
  *               kicks in so the player keeps going if the user tabs away.
  *   error       Surfaced + retry / change-source.
  */
+import { useNetflixDetailModal } from "@/app/(main)/_features/netflix/netflix-detail-modal"
 import { NetflixWatchHistorySaver } from "@/app/(main)/_features/netflix/netflix-watch-history-saver"
 import { Release, releaseTorBoxPayload, useSearchMovie, useSearchTV, useTorBoxPlay } from "@/lib/notflix-api"
 import Hls from "hls.js"
@@ -334,16 +335,27 @@ export default function WatchPage() {
         setPhase("searching")
     }, [sourcePickMode])
 
+    const { openDetail } = useNetflixDetailModal()
+
     const handleClose = React.useCallback(() => {
-        // Go back to the previous page (typically the home or the lists
-        // grid). If there's no history entry (player opened in a fresh tab)
-        // fall back to /.
+        // Re-open the detail modal for the media we were watching, so the
+        // user can pick a different episode / source without going through
+        // search again. For TV, restore the same season they were on so
+        // they don't have to navigate back to S2 / S3 / … from scratch.
+        //
+        // The actual URL navigation still does router.back() — the modal
+        // opens on top of whatever page that brings us back to (home,
+        // /lists, /search, /categories, …), so the user keeps their
+        // browsing context.
+        if (!Number.isNaN(mediaId)) {
+            openDetail(mediaId, typeParam, typeParam === "tv" ? season : undefined)
+        }
         if (window.history.length > 1) {
             router.back()
         } else {
             router.push("/")
         }
-    }, [router])
+    }, [router, openDetail, mediaId, typeParam, season])
 
     if (Number.isNaN(mediaId)) {
         return (

@@ -36,15 +36,27 @@ import React from "react"
 import { useTranslation } from "react-i18next"
 import { BiCheck, BiPlay, BiPlus, BiX } from "react-icons/bi"
 
-type ModalTarget = { id: number; type: "movie" | "tv" } | null
+type ModalTarget = {
+    id: number
+    type: "movie" | "tv"
+    /**
+     * Optional season to pre-select on open. Used when re-opening the modal
+     * from /watch's back button so the user returns to the same season they
+     * picked the episode from, not the show's default (S01).
+     */
+    initialSeason?: number
+} | null
 
 const __notflixDetailModalAtom = atom<ModalTarget>(null)
 
 export function useNetflixDetailModal() {
     const set = useSetAtom(__notflixDetailModalAtom)
     return {
-        openDetail: (mediaId: number, mediaType: "movie" | "tv" = "movie") =>
-            set({ id: mediaId, type: mediaType }),
+        openDetail: (
+            mediaId: number,
+            mediaType: "movie" | "tv" = "movie",
+            initialSeason?: number,
+        ) => set({ id: mediaId, type: mediaType, initialSeason }),
         closeDetail: () => set(null),
     }
 }
@@ -82,7 +94,7 @@ export function NetflixDetailModal() {
     )
 }
 
-function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
+function Body({ target }: { target: NonNullable<ModalTarget> }) {
     const { t } = useTranslation()
     const router = useRouter()
     const { closeDetail } = useNetflixDetailModal()
@@ -98,7 +110,11 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
         if (target.type !== "tv") return [] as NonNullable<typeof data>["seasons"]
         return (data?.seasons ?? []).filter(s => s.season_number > 0)
     }, [target.type, data?.seasons])
-    const [selectedSeason, setSelectedSeason] = React.useState<number | null>(null)
+    // Honour target.initialSeason on open — used by /watch's back button
+    // so the user returns to the same season they were browsing, not S01.
+    const [selectedSeason, setSelectedSeason] = React.useState<number | null>(
+        target.initialSeason ?? null,
+    )
 
     React.useEffect(() => {
         if (target.type !== "tv") return
