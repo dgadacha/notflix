@@ -295,6 +295,12 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 	if sess, err := openHLSSession(ctx, streamURL, durationSec, audioCodec, embeddedSubs, externals); err == nil {
 		sessionID = sess.id
 		allSubs = sess.subtitles
+		// Pre-warm the subtitle cache in the background. Returns
+		// /torbox/play to the user immediately while ffmpeg extracts
+		// every supported track to disk in one pass. By the time the
+		// user clicks the CC menu the bytes are already cached →
+		// instant track loads.
+		go h.prewarmSessionSubtitles(sess)
 	}
 
 	return RespondOK(c, map[string]any{

@@ -201,6 +201,15 @@ func (h *Handler) readCachedTranslation(sessionID string, idx int, lang string) 
 	return b
 }
 
+// hasCachedTranslation cheaply checks whether the cache file exists,
+// without reading or returning the bytes. Used by the pre-warm path
+// to skip tracks that are already extracted.
+func (h *Handler) hasCachedTranslation(sessionID string, idx int, lang string) bool {
+	p := h.translateSubtitleCachePath(sessionID, idx, lang)
+	info, err := os.Stat(p)
+	return err == nil && info.Size() > 0
+}
+
 // writeCachedTranslation persists the translated VTT to disk. Best
 // effort — cache misses on subsequent fetches just regenerate.
 func (h *Handler) writeCachedTranslation(sessionID string, idx int, lang string, vtt []byte) {

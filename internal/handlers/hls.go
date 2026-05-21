@@ -320,6 +320,149 @@ func (h *Handler) serveHLSExternalSubtitle(c echo.Context, sess *hlsSession, fil
 	return nil
 }
 
+// prewarmSessionSubtitles kicks off ffmpeg extractions for every
+// supported subtitle in the session, writing results directly into the
+// disk cache. Meant to run as a background goroutine straight after
+// /torbox/play returns, so by the time the user opens the CC menu
+// (or scrubs to a position that triggers a track load) the bytes are
+// already on disk — instant response instead of a 1-3 min cold extract.
+//
+// Embedded subs are extracted in a SINGLE ffmpeg invocation with one
+// output per track. ffmpeg reads the source file once and demuxes all
+// the subtitle streams in parallel — much cheaper than N separate
+// ffmpeg processes each reading the whole MKV from TorBox's CDN.
+//
+// External (sidecar) subs run sequentially since each has its own URL.
+// They're tiny so the loop is fast.
+//
+// Errors are logged but never propagated — pre-warm is best-effort.
+// The on-demand extraction path still works as a fallback.
+func (h *Handler) prewarmSessionSubtitles(sess *hlsSession) {
+	if sess == nil {
+		return
+	}
+
+	// Collect embedded subs that aren't already cached. Two slices
+	// instead of a struct so the helper signature stays plain.
+	var cacheIdxs []int  // per-subtitles[] position, used for cache key
+	var streamIdxs []int // ffmpeg's `0:s:N` index
+	for i, t := range sess.subtitles {
+		if t.Source != "embedded" || !t.Supported {
+			continue
+		}
+		if h.hasCachedTranslation(sess.id, i, "") {
+			continue
+		}
+		cacheIdxs = append(cacheIdxs, i)
+		streamIdxs = append(streamIdxs, t.Index)
+	}
+
+	if len(cacheIdxs) > 0 {
+		h.prewarmEmbeddedBatch(sess, cacheIdxs, streamIdxs)
+	}
+
+	// External subs — one ffmpeg per URL, sequential.
+	for i, t := range sess.subtitles {
+		if t.Source != "external" || !t.Supported {
+			continue
+		}
+		cacheIdx := t.Index + 10_000
+		if h.hasCachedTranslation(sess.id, cacheIdx, "") {
+			continue
+		}
+		ext := sess.externalSubs[t.Index]
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		out, err := h.extractExternalSubtitleVTT(ctx, ext.URL)
+		cancel()
+		if err != nil {
+			log.Printf("hls prewarm: external sub %d (%s) failed: %v", i, ext.Filename, err)
+			continue
+		}
+		h.writeCachedTranslation(sess.id, cacheIdx, "", out)
+	}
+}
+
+// prewarmEmbeddedBatch runs ONE ffmpeg invocation with multiple
+// outputs to extract every supplied subtitle track in a single pass
+// over the source file.
+//
+// Layout: `ffmpeg -i <src> -map 0:s:0 -c:s webvtt -f webvtt out0.tmp
+//                          -map 0:s:1 -c:s webvtt -f webvtt out1.tmp ...`
+// Each output's args (everything between two outputs) apply only to
+// that output. ffmpeg demuxes the source ONCE.
+func (h *Handler) prewarmEmbeddedBatch(sess *hlsSession, cacheIdxs, streamIdxs []int) {
+	if len(cacheIdxs) == 0 || len(cacheIdxs) != len(streamIdxs) {
+		return
+	}
+	cacheDir := filepath.Dir(h.translateSubtitleCachePath(sess.id, 0, ""))
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		log.Printf("hls prewarm: mkdir cache dir: %v", err)
+		return
+	}
+
+	args := []string{
+		"-hide_banner",
+		"-loglevel", "warning",
+		"-i", sess.url,
+	}
+	tmpPaths := make([]string, 0, len(cacheIdxs))
+	finalPaths := make([]string, 0, len(cacheIdxs))
+	for i, ci := range cacheIdxs {
+		final := h.translateSubtitleCachePath(sess.id, ci, "")
+		tmp := final + ".tmp"
+		finalPaths = append(finalPaths, final)
+		tmpPaths = append(tmpPaths, tmp)
+		args = append(args,
+			"-map", fmt.Sprintf("0:s:%d", streamIdxs[i]),
+			"-c:s", "webvtt",
+			"-f", "webvtt",
+			"-y", // overwrite tmp from a previous crash
+			tmp,
+		)
+	}
+
+	log.Printf("hls prewarm: batch extracting %d embedded subs for session %s",
+		len(cacheIdxs), sess.id)
+	start := time.Now()
+
+	// 10 min covers a feature-length anime over a slow CDN. ffmpeg
+	// only reads the source once but still has to find the last
+	// subtitle event for each track, which means reading near the
+	// end of the file.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	dur := time.Since(start)
+
+	if err != nil {
+		log.Printf("hls prewarm: ffmpeg failed after %s: %v | %s",
+			dur, err, strings.TrimSpace(stderr.String()))
+		// Clean up the .tmp files; the on-demand path will retry.
+		for _, p := range tmpPaths {
+			_ = os.Remove(p)
+		}
+		return
+	}
+
+	// Promote .tmp → final atomically per file.
+	ok := 0
+	for i, tmp := range tmpPaths {
+		info, statErr := os.Stat(tmp)
+		if statErr != nil || info.Size() == 0 {
+			_ = os.Remove(tmp)
+			continue
+		}
+		if err := os.Rename(tmp, finalPaths[i]); err == nil {
+			ok++
+		}
+	}
+	log.Printf("hls prewarm: batch done in %s, %d/%d subs cached",
+		dur, ok, len(cacheIdxs))
+}
+
 // extractExternalSubtitleVTT converts a sidecar subtitle file (HTTP
 // URL — TorBox direct download) to WebVTT. Files are small (a few KB
 // to ~1 MB) so a 60 s timeout is generous.
