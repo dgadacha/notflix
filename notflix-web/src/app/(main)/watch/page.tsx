@@ -19,6 +19,13 @@
  *   error       Surfaced + retry / change-source.
  */
 import { Release, TorBoxPlayBody, useSearchMovie, useSearchTV, useTorBoxPlay } from "@/lib/notflix-api"
+import {
+    AudioPref,
+    QualityPref,
+    releaseHasFrenchAudio,
+    releaseMatchesAudio,
+    releaseMatchesQuality,
+} from "@/lib/preferences"
 import { titleOf, tmdbImage, useTMDBDetail, yearOf } from "@/lib/tmdb"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/components/ui/core/styling"
@@ -43,6 +50,10 @@ export default function WatchPage() {
     const mediaId = idParam ? parseInt(idParam, 10) : NaN
     const season = seasonParam ? parseInt(seasonParam, 10) : undefined
     const episode = episodeParam ? parseInt(episodeParam, 10) : undefined
+
+    // Playback prefs come from the modal's selectors via the URL.
+    const qualityPref = (searchParams.get("quality") as QualityPref | null) ?? "auto"
+    const audioPref = (searchParams.get("audio") as AudioPref | null) ?? "auto"
 
     const { data: detail, isLoading: detailLoading } = useTMDBDetail(
         typeParam,
@@ -82,6 +93,36 @@ export default function WatchPage() {
 
     const play = useTorBoxPlay()
 
+    // Apply the user's quality / audio prefs as a post-search filter. The
+    // backend score still drives the ranking; we just drop everything that
+    // doesn't match. If the filter wipes the list, we fall back to the
+    // unfiltered set with a non-blocking warning so the user can still play.
+    const filteredReleases = React.useMemo(() => {
+        const all = search.data ?? []
+        if (qualityPref === "auto" && audioPref === "auto") return all
+        const filtered = all.filter(
+            r =>
+                releaseMatchesQuality(r.quality, qualityPref) &&
+                releaseMatchesAudio(r.title, audioPref),
+        )
+        return filtered.length > 0 ? filtered : all
+    }, [search.data, qualityPref, audioPref])
+
+    // True when the user set a non-auto pref but nothing matched, so we
+    // relaxed it (filteredReleases = all). Surfaced as a small banner so
+    // the auto-launched release isn't surprising.
+    const prefsFellBack = React.useMemo(() => {
+        if (qualityPref === "auto" && audioPref === "auto") return false
+        const all = search.data ?? []
+        if (all.length === 0) return false
+        const strict = all.filter(
+            r =>
+                releaseMatchesQuality(r.quality, qualityPref) &&
+                releaseMatchesAudio(r.title, audioPref),
+        )
+        return strict.length === 0
+    }, [search.data, qualityPref, audioPref])
+
     // The actual launch — used both by the auto-pick effect and the manual
     // ReleasePicker. Kept as a stable callback so the auto-pick effect
     // doesn't re-fire spuriously.
@@ -118,8 +159,8 @@ export default function WatchPage() {
         [play, t],
     )
 
-    // Auto-pick: fire the top release as soon as the search resolves,
-    // unless the user has explicitly opted into manual picking.
+    // Auto-pick: fire the top (pref-filtered) release as soon as the search
+    // resolves, unless the user has explicitly opted into manual picking.
     React.useEffect(() => {
         if (phase !== "searching") return
         if (search.isFetching) return
@@ -128,8 +169,7 @@ export default function WatchPage() {
             setPhase("error")
             return
         }
-        const results = search.data ?? []
-        if (results.length === 0) {
+        if (filteredReleases.length === 0) {
             setErrorMsg(t("watch.no_release", "Aucune source trouvée pour ce titre."))
             setPhase("error")
             return
@@ -138,8 +178,8 @@ export default function WatchPage() {
             setPhase("picking")
             return
         }
-        void launchRelease(results[0])
-    }, [phase, search.isFetching, search.isError, search.data, autoPickDisabled, launchRelease, t])
+        void launchRelease(filteredReleases[0])
+    }, [phase, search.isFetching, search.isError, filteredReleases, autoPickDisabled, launchRelease, t])
 
     const handleChangeSource = React.useCallback(() => {
         setAutoPickDisabled(true)
@@ -248,9 +288,18 @@ export default function WatchPage() {
                     />
                 )}
 
+                {prefsFellBack && phase !== "searching" && phase !== "error" && (
+                    <div className="text-xs text-amber-300/90 bg-amber-500/10 border border-amber-500/30 rounded-md px-3 py-2 max-w-md">
+                        {t(
+                            "watch.prefs_fell_back",
+                            "Aucune source ne correspondait à vos préférences (qualité / langue). La meilleure source disponible a été utilisée.",
+                        )}
+                    </div>
+                )}
+
                 {phase === "picking" && (
                     <ReleasePicker
-                        releases={search.data ?? []}
+                        releases={filteredReleases}
                         onPick={handleManualPick}
                     />
                 )}
@@ -476,10 +525,9 @@ function LangBadge({ label }: { label: string }) {
     )
 }
 
-function hasFrenchAudio(title: string): boolean {
-    const t = title.toLowerCase()
-    return t.includes("french") || t.includes("multi") || t.includes("vff") || t.includes("truefrench")
-}
+// Re-exported helper from the shared preferences module so the badge logic
+// in this file stays in sync with the modal's audio filter.
+const hasFrenchAudio = releaseHasFrenchAudio
 
 function formatSize(bytes: number): string {
     if (!bytes) return ""

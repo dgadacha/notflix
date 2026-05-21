@@ -13,6 +13,12 @@ import { cn } from "@/components/ui/core/styling"
 import { Modal } from "@/components/ui/modal"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useRouter } from "@/lib/navigation"
+import {
+    AUDIO_OPTIONS,
+    QUALITY_OPTIONS,
+    useAudioPref,
+    useQualityPref,
+} from "@/lib/preferences"
 import { mediaTypeOf, titleOf, tmdbImage, useTMDBDetail, yearOf } from "@/lib/tmdb"
 import { atom, useAtom, useSetAtom } from "jotai"
 import React from "react"
@@ -72,6 +78,8 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
     const router = useRouter()
     const { closeDetail } = useNetflixDetailModal()
     const { data, isLoading } = useTMDBDetail(target.type, target.id)
+    const [quality, setQuality] = useQualityPref()
+    const [audio, setAudio] = useAudioPref()
 
     if (isLoading || !data) return <BodySkeleton />
 
@@ -83,13 +91,15 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
     const genres = data.genres?.map(g => g.name) ?? []
     const score = data.vote_average
 
-    // Navigate in the same tab + close the modal. The original behaviour
-    // (target="_blank") came from Kuro, where opening an episode in a new
-    // tab let the user keep browsing while the player took over. For Notflix
-    // the player IS the new view — no need for a second tab.
+    // Navigate in the same tab + close the modal. Pass the user's quality /
+    // audio prefs down as query params — /watch filters the Prowlarr release
+    // list with them before the auto-pick runs.
     const onPlay = () => {
+        const params = new URLSearchParams({ id: String(data.id), type })
+        if (quality !== "auto") params.set("quality", quality)
+        if (audio !== "auto") params.set("audio", audio)
         closeDetail()
-        router.push(`/watch?id=${data.id}&type=${type}`)
+        router.push(`/watch?${params.toString()}`)
     }
 
     return (
@@ -118,15 +128,22 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
                         >
                             {t("modal.play", "Lecture")}
                         </Button>
-                        <Button
-                            size="md"
-                            intent="gray-subtle"
-                            className="bg-white/20 hover:bg-white/30 !text-white font-semibold rounded-md px-4 lg:px-6 lg:!h-12 lg:!text-base backdrop-blur-sm"
-                            leftIcon={<BiInfoCircle className="text-xl sm:text-2xl" />}
-                            disabled
-                        >
-                            {t("modal.more_info", "Plus d'infos")}
-                        </Button>
+
+                        {/* Quality + audio prefs — persisted in localStorage so
+                            the choice survives between films. /watch reads
+                            them from the URL params. */}
+                        <PrefSelect
+                            label={t("modal.quality", "Qualité")}
+                            value={quality}
+                            options={QUALITY_OPTIONS}
+                            onChange={(v) => setQuality(v as typeof quality)}
+                        />
+                        <PrefSelect
+                            label={t("modal.audio", "Langue")}
+                            value={audio}
+                            options={AUDIO_OPTIONS}
+                            onChange={(v) => setAudio(v as typeof audio)}
+                        />
                     </div>
                 </div>
             </div>
@@ -166,6 +183,57 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
                 </div>
             </div>
         </div>
+    )
+}
+
+/**
+ * Compact label-on-top dropdown styled to sit next to the white Lecture
+ * button. We use a native <select> + overlay rather than a Radix component
+ * to keep the modal a11y story simple and the bundle lean.
+ */
+function PrefSelect<T extends string>({
+    label,
+    value,
+    options,
+    onChange,
+}: {
+    label: string
+    value: T
+    options: { value: T; label: string }[]
+    onChange: (v: T) => void
+}) {
+    const current = options.find(o => o.value === value)
+    return (
+        <label className="relative inline-flex flex-col gap-0.5 text-left">
+            <span className="text-[10px] uppercase tracking-wider text-[--muted] font-semibold">
+                {label}
+            </span>
+            <span
+                className={cn(
+                    "inline-flex items-center justify-between gap-2 min-w-[10rem]",
+                    "bg-white/20 hover:bg-white/30 backdrop-blur-sm rounded-md",
+                    "px-3 py-2 text-white text-sm font-semibold",
+                    "transition-colors",
+                )}
+            >
+                {current?.label ?? value}
+                <svg className="size-4 opacity-70" viewBox="0 0 20 20" fill="currentColor" aria-hidden>
+                    <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.06l3.71-3.83a.75.75 0 111.08 1.04l-4.25 4.39a.75.75 0 01-1.08 0L5.21 8.27a.75.75 0 01.02-1.06z" clipRule="evenodd" />
+                </svg>
+            </span>
+            <select
+                value={value}
+                onChange={(e) => onChange(e.target.value as T)}
+                className="absolute inset-0 opacity-0 cursor-pointer"
+                aria-label={label}
+            >
+                {options.map(o => (
+                    <option key={o.value} value={o.value}>
+                        {o.label}
+                    </option>
+                ))}
+            </select>
+        </label>
     )
 }
 
