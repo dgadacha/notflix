@@ -266,18 +266,68 @@ export async function pushProfileHistoryEntry(
     }
 }
 
-/** Hook exposing a stable upsert function bound to the active profile. */
+/** Hook exposing a stable upsert function bound to the active profile.
+ *  Performs an optimistic local update of the React Query cache before
+ *  the network call so the "Reprendre la lecture" rail reflects the
+ *  change instantly — no roundtrip needed before the UI re-renders. */
 export function useProfileHistoryUpsert() {
     const uid = useActiveProfileId()
     const queryClient = useQueryClient()
     return React.useCallback(
         async (entry: WatchHistoryUpsertBody) => {
             if (!uid) return
+            optimisticUpsertHistory(queryClient, uid, entry)
             await pushProfileHistoryEntry(uid, entry)
+            // Reconcile with the server (replaces our placeholder id /
+            // updatedAt with the real ones).
             queryClient.invalidateQueries({ queryKey: [...QK_HISTORY(uid)] })
         },
         [uid, queryClient],
     )
+}
+
+/**
+ * Mutate the cached history list in place — moves the matching row to
+ * the front (or inserts it) so the "Reprendre la lecture" rail re-sorts
+ * by recency immediately.
+ *
+ * Uses Date.now() as a placeholder id; the next invalidate will replace
+ * it with the server-assigned one.
+ */
+function optimisticUpsertHistory(
+    qc: ReturnType<typeof useQueryClient>,
+    uid: string,
+    entry: WatchHistoryUpsertBody,
+) {
+    qc.setQueryData<ProfileWatchEntry[]>([...QK_HISTORY(uid)], (prev = []) => {
+        const idx = prev.findIndex(
+            e =>
+                e.tmdbId === entry.tmdbId &&
+                e.mediaType === entry.mediaType &&
+                e.season === entry.season &&
+                e.episode === entry.episode,
+        )
+        const existing = idx >= 0 ? prev[idx] : null
+        const optimistic: ProfileWatchEntry = {
+            id: existing?.id ?? Date.now(),
+            profileUid: uid,
+            tmdbId: entry.tmdbId,
+            mediaType: entry.mediaType,
+            season: entry.season,
+            episode: entry.episode,
+            currentTime: entry.currentTime,
+            duration: entry.duration,
+            title: entry.title,
+            posterPath: entry.posterPath,
+            backdropUrl: entry.backdropUrl,
+            createdAt: existing?.createdAt ?? new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+        }
+        const without = idx >= 0 ? [...prev.slice(0, idx), ...prev.slice(idx + 1)] : prev
+        // Most-recent first — matches the backend's ORDER BY updatedAt
+        // DESC, so the rail re-sort happens locally without a refetch.
+        return [optimistic, ...without]
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -302,17 +352,25 @@ export function useProfileHistoryActions() {
     const deleteByMedia = React.useCallback(
         async (tmdbId: number, mediaType: "movie" | "tv") => {
             if (!uid) return
+            // Optimistic local removal — rail / lists page reflect the
+            // change without waiting for the DELETE.
+            queryClient.setQueryData<ProfileWatchEntry[]>(
+                [...QK_HISTORY(uid)],
+                (prev = []) =>
+                    prev.filter(e => !(e.tmdbId === tmdbId && e.mediaType === mediaType)),
+            )
             await fetch(`${EP_HISTORY(uid)}/${mediaType}/${tmdbId}`, { method: "DELETE" })
             invalidate()
         },
-        [uid, invalidate],
+        [uid, invalidate, queryClient],
     )
 
     const clearAll = React.useCallback(async () => {
         if (!uid) return
+        queryClient.setQueryData<ProfileWatchEntry[]>([...QK_HISTORY(uid)], [])
         await fetch(EP_HISTORY(uid), { method: "DELETE" })
         invalidate()
-    }, [uid, invalidate])
+    }, [uid, invalidate, queryClient])
 
     return { deleteByMedia, clearAll }
 }
@@ -369,6 +427,33 @@ export function useProfileListActions() {
             posterPath: string
         }): Promise<void> => {
             if (!uid) return
+            // Optimistic local upsert.
+            queryClient.setQueryData<ProfileListEntry[]>(
+                [...QK_PROFILE_LIST(uid)],
+                (prev = []) => {
+                    const idx = prev.findIndex(
+                        e => e.tmdbId === entry.tmdbId && e.mediaType === entry.mediaType,
+                    )
+                    const existing = idx >= 0 ? prev[idx] : null
+                    const optimistic: ProfileListEntry = {
+                        id: existing?.id ?? Date.now(),
+                        profileUid: uid,
+                        tmdbId: entry.tmdbId,
+                        mediaType: entry.mediaType,
+                        status: entry.status,
+                        title: entry.title,
+                        posterPath: entry.posterPath,
+                        createdAt: existing?.createdAt ?? new Date().toISOString(),
+                        updatedAt: new Date().toISOString(),
+                    }
+                    if (idx >= 0) {
+                        const next = [...prev]
+                        next[idx] = optimistic
+                        return next
+                    }
+                    return [optimistic, ...prev]
+                },
+            )
             await fetch(EP_PROFILE_LIST(uid), {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
@@ -376,18 +461,23 @@ export function useProfileListActions() {
             })
             invalidate()
         },
-        [uid, invalidate],
+        [uid, invalidate, queryClient],
     )
 
     const remove = React.useCallback(
         async (tmdbId: number, mediaType: "movie" | "tv"): Promise<void> => {
             if (!uid) return
+            queryClient.setQueryData<ProfileListEntry[]>(
+                [...QK_PROFILE_LIST(uid)],
+                (prev = []) =>
+                    prev.filter(e => !(e.tmdbId === tmdbId && e.mediaType === mediaType)),
+            )
             await fetch(`${EP_PROFILE_LIST(uid)}/${mediaType}/${tmdbId}`, {
                 method: "DELETE",
             })
             invalidate()
         },
-        [uid, invalidate],
+        [uid, invalidate, queryClient],
     )
 
     return { upsert, remove }

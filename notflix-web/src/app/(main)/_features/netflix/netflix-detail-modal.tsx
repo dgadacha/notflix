@@ -17,6 +17,12 @@ import {
     useQualityPref,
 } from "@/lib/preferences"
 import {
+    listEntryKey,
+    useActiveProfileId,
+    useActiveProfileListStatusMap,
+    useProfileListActions,
+} from "@/lib/profiles/profiles"
+import {
     mediaTypeOf,
     TMDBEpisode,
     titleOf,
@@ -28,7 +34,7 @@ import {
 import { atom, useAtom, useSetAtom } from "jotai"
 import React from "react"
 import { useTranslation } from "react-i18next"
-import { BiPlay, BiX } from "react-icons/bi"
+import { BiCheck, BiPlay, BiPlus, BiX } from "react-icons/bi"
 
 type ModalTarget = { id: number; type: "movie" | "tv" } | null
 
@@ -166,6 +172,17 @@ function Body({ target }: { target: { id: number; type: "movie" | "tv" } }) {
                                 ? `${t("modal.play", "Lecture")} · S${selectedSeason}E1`
                                 : t("modal.play", "Lecture")}
                         </Button>
+
+                        {/* "Ma liste" toggle — adds/removes from the active
+                            profile's list. Only rendered when a profile is
+                            selected; in single-user mode there's nothing
+                            to persist against. */}
+                        <ListToggleButton
+                            tmdbId={data.id}
+                            mediaType={type}
+                            title={title}
+                            posterPath={data.poster_path ?? ""}
+                        />
 
                         {/* Quality + audio prefs — persisted in localStorage so
                             the choice survives between films. /watch reads
@@ -485,6 +502,62 @@ function PrefSelect<T extends string>({
                 ))}
             </select>
         </label>
+    )
+}
+
+/**
+ * "Ma liste" toggle — Netflix's + / ✓ pill. Renders nothing when
+ * there's no active profile. Optimistic by design: useProfileListActions
+ * mutates the React Query cache before the network call so the icon
+ * flips instantly.
+ */
+function ListToggleButton({
+    tmdbId,
+    mediaType,
+    title,
+    posterPath,
+}: {
+    tmdbId: number
+    mediaType: "movie" | "tv"
+    title: string
+    posterPath: string
+}) {
+    const { t } = useTranslation()
+    const profileUid = useActiveProfileId()
+    const statusMap = useActiveProfileListStatusMap()
+    const { upsert, remove } = useProfileListActions()
+
+    if (!profileUid) return null
+
+    const inList = statusMap.has(listEntryKey(mediaType, tmdbId))
+
+    const onClick = () => {
+        if (inList) {
+            void remove(tmdbId, mediaType)
+        } else {
+            void upsert({
+                tmdbId,
+                mediaType,
+                status: "PLANNING",
+                title,
+                posterPath,
+            })
+        }
+    }
+
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            aria-label={inList ? t("modal.remove_from_list", "Retirer de ma liste") : t("modal.add_to_list", "Ajouter à ma liste")}
+            className={cn(
+                "inline-flex items-center justify-center size-10 lg:size-12 rounded-full",
+                "bg-white/20 hover:bg-white/30 backdrop-blur-sm text-white",
+                "transition-colors",
+            )}
+        >
+            {inList ? <BiCheck className="text-2xl" /> : <BiPlus className="text-2xl" />}
+        </button>
     )
 }
 
