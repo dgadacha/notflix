@@ -364,47 +364,58 @@ export default function WatchPage() {
 
     // Subtitle prep loop — fires when phase enters "preparing_subs".
     // Kicks off the backend's extract+translate pipeline, polls the
-    // status endpoint every second, and transitions to "playing" once
-    // the backend reports `ready` (or `failed`, in which case we still
-    // proceed — the player tolerates missing subs).
+    // status endpoint every 500 ms, and transitions to "playing" once
+    // the backend reports `ready` (success) or `failed` after we've
+    // shown the error message long enough for the user to read it.
     React.useEffect(() => {
         if (phase !== "preparing_subs") return
         if (!streamSessionId) return
         let cancelled = false
+
+        // Lets us pause before transitioning on "failed" so the user
+        // sees what went wrong instead of the overlay flicking past.
+        const advanceToPlaying = (delayMs: number) => {
+            window.setTimeout(() => {
+                if (!cancelled) setPhase("playing")
+            }, delayMs)
+        }
 
         const tick = async () => {
             try {
                 const status = await getSubPrepStatus(streamSessionId)
                 if (cancelled) return
                 setSubPrep(status)
-                if (status.state === "ready" || status.state === "failed") {
+                if (status.state === "ready") {
                     setPhase("playing")
+                    return
+                }
+                if (status.state === "failed") {
+                    // Hold for 3 s so the user sees the failure reason
+                    // before the video takes over.
+                    advanceToPlaying(3000)
                     return
                 }
             } catch (err) {
                 console.warn("[Notflix] sub prep status fetch failed:", err)
-                // Stop blocking on a flaky status endpoint — start
-                // playback, the on-demand sub extraction path is still
-                // available as a fallback.
                 if (!cancelled) setPhase("playing")
                 return
             }
             if (!cancelled) {
-                // 500 ms — fast enough that the 2-decimal readout
-                // visibly ticks during ffmpeg extraction, slow enough
-                // that we're not hammering the backend.
                 window.setTimeout(tick, 500)
             }
         }
 
-        // Kick off prep, then start polling.
         ;(async () => {
             try {
                 const initial = await startSubPrep(streamSessionId, subLangPref)
                 if (cancelled) return
                 setSubPrep(initial)
-                if (initial.state === "ready" || initial.state === "failed") {
+                if (initial.state === "ready") {
                     setPhase("playing")
+                    return
+                }
+                if (initial.state === "failed") {
+                    advanceToPlaying(3000)
                     return
                 }
             } catch (err) {
@@ -770,13 +781,19 @@ function SubPrepPanel({
                 </p>
             </div>
 
-            {status?.willTranslate && (
+            {status?.willTranslate && status.state !== "failed" && (
                 <p className="text-xs text-[--muted] text-center max-w-md leading-relaxed">
                     {t(
                         "watch.sub_prep_translate_note",
                         "Aucun sous-titre dans la langue choisie — Claude traduit depuis {{lang}}. La traduction est mise en cache, donc le prochain lancement sera instantané.",
                         { lang: status.chosenLang || "?" },
                     )}
+                </p>
+            )}
+
+            {status?.state === "failed" && status.error && (
+                <p className="text-xs text-red-300 text-center max-w-2xl leading-relaxed bg-red-500/10 border border-red-500/30 rounded-md px-3 py-2 font-mono break-all">
+                    {status.error}
                 </p>
             )}
 

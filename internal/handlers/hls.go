@@ -534,8 +534,20 @@ func (h *Handler) runSubPrep(sess *hlsSession, chosenIdx int, targetLang string,
 		}
 		cancel()
 		if err != nil || len(out) == 0 {
-			log.Printf("hls prep: extract failed: %v", err)
-			setState("failed", 0, fmt.Sprintf("extraction failed: %v", err))
+			// Log the FULL error so the operator can see whether
+			// it's a missing ffmpeg flag, a network drop, a
+			// 401/403 from TorBox, …
+			log.Printf("hls prep: extract failed for session %s (track %d, lang %q): %v",
+				sess.id, track.Index, track.Language, err)
+			msg := "extraction failed"
+			if err != nil {
+				msg = err.Error()
+				// Truncate to a sane length for the UI.
+				if len(msg) > 200 {
+					msg = msg[:200] + "…"
+				}
+			}
+			setState("failed", 0, msg)
 			return
 		}
 		h.writeCachedTranslation(sess.id, rawCacheIdx, "", out)
@@ -621,37 +633,22 @@ func (h *Handler) extractEmbeddedSubtitleWithProgress(
 		"-loglevel", "error",
 		// -progress writes K=V progress info to fd 2 (stderr). With
 		// -loglevel error nothing else writes there, so the scanner
-		// only sees progress lines.
+		// only sees progress lines and actual error messages — both
+		// of which we collect.
 		"-progress", "pipe:2",
-		// HTTP demuxer tuning — these MUST come before -i to apply
-		// to the input. The big ones:
-		//   - multiple_requests: keep the TCP connection open across
-		//     range requests, dramatically reducing handshake cost.
-		//   - http_seekable: tell ffmpeg the URL supports byte ranges
-		//     (TorBox does). Lets it skip past video/audio clusters
-		//     when only -map 0:s:N is requested.
-		//   - reconnect_*: TorBox's CDN sometimes drops idle
-		//     connections mid-extract. Auto-reconnect on transient
-		//     errors instead of bailing.
-		//   - rw_timeout: 30s read timeout in microseconds.
-		//   - probesize/analyzeduration: we already ffprobed; keep
-		//     ffmpeg's own probing minimal.
+		// HTTP demuxer tuning — input options, must come before -i.
+		// Kept to the flags supported by ffmpeg ≥ 4.4 since older
+		// ones (reconnect_on_network_error / on_http_error / at_eof)
+		// caused immediate crashes on the user's setup.
 		"-multiple_requests", "1",
 		"-http_seekable", "1",
 		"-reconnect", "1",
 		"-reconnect_streamed", "1",
-		"-reconnect_at_eof", "1",
-		"-reconnect_on_network_error", "1",
-		"-reconnect_on_http_error", "4xx,5xx",
 		"-reconnect_delay_max", "5",
-		"-rw_timeout", "30000000",
+		// Cap the format-probe scan since /torbox/play already
+		// ffprobed the source.
 		"-analyzeduration", "5M",
 		"-probesize", "10M",
-		// Lower the demuxer's per-stream buffer for the streams we
-		// drop. The `-discard nokey` for video is a hint that we
-		// don't need its full decoded packets — combined with -map
-		// (which doesn't select them) it lets the demuxer skim past
-		// video clusters fast.
 		"-i", sourceURL,
 		"-map", fmt.Sprintf("0:s:%d", streamIdx),
 		"-c:s", "webvtt",
@@ -672,54 +669,70 @@ func (h *Handler) extractEmbeddedSubtitleWithProgress(
 		return nil, err
 	}
 
-	// Parse progress lines from stderr in a background goroutine.
-	// Errors during scan are non-fatal — we just stop reporting
-	// progress and rely on the final cmd.Wait() result.
-	go parseFFmpegProgress(stderr, duration, progressCb)
+	// Read stderr in a background goroutine: route `out_time_ms=` lines
+	// to the progress callback, accumulate everything else as an error
+	// buffer (so failure messages survive to the caller).
+	var stderrMu sync.Mutex
+	var stderrBuf strings.Builder
+	go func() {
+		buf := bufio.NewScanner(stderr)
+		for buf.Scan() {
+			line := buf.Text()
+			if strings.HasPrefix(line, "out_time_ms=") && progressCb != nil {
+				msStr := strings.TrimPrefix(line, "out_time_ms=")
+				ms, perr := strconv.ParseFloat(strings.TrimSpace(msStr), 64)
+				if perr == nil && duration > 0 {
+					sec := ms / 1_000_000
+					pct := sec / duration * 100
+					if pct < 0 {
+						pct = 0
+					}
+					if pct > 100 {
+						pct = 100
+					}
+					progressCb(pct)
+				}
+				continue
+			}
+			// Skip the structured progress keys that aren't useful
+			// here (fps=, bitrate=, total_size=, …) — they'd swamp
+			// the error buffer otherwise.
+			if strings.ContainsRune(line, '=') {
+				continue
+			}
+			stderrMu.Lock()
+			stderrBuf.WriteString(line)
+			stderrBuf.WriteByte('\n')
+			stderrMu.Unlock()
+		}
+	}()
 
 	out, readErr := io.ReadAll(stdout)
 	waitErr := cmd.Wait()
+
+	stderrMu.Lock()
+	stderrMsg := strings.TrimSpace(stderrBuf.String())
+	stderrMu.Unlock()
+
 	if waitErr != nil {
-		return nil, fmt.Errorf("%v", waitErr)
+		// Surface BOTH the exit code AND whatever ffmpeg printed.
+		// Previously we returned just the exit code, which made
+		// "ffmpeg signal: killed" or "exit status 1" the only
+		// thing visible — no idea WHY it failed.
+		if stderrMsg != "" {
+			return nil, fmt.Errorf("ffmpeg: %v — %s", waitErr, stderrMsg)
+		}
+		return nil, fmt.Errorf("ffmpeg: %v", waitErr)
 	}
 	if readErr != nil {
 		return nil, readErr
 	}
+	if len(out) == 0 && stderrMsg != "" {
+		return nil, fmt.Errorf("ffmpeg produced no output: %s", stderrMsg)
+	}
 	return out, nil
 }
 
-func parseFFmpegProgress(r io.Reader, duration float64, cb func(pct float64)) {
-	if cb == nil {
-		_, _ = io.Copy(io.Discard, r)
-		return
-	}
-	buf := bufio.NewScanner(r)
-	for buf.Scan() {
-		line := buf.Text()
-		if !strings.HasPrefix(line, "out_time_ms=") {
-			continue
-		}
-		msStr := strings.TrimPrefix(line, "out_time_ms=")
-		ms, err := strconv.ParseFloat(strings.TrimSpace(msStr), 64)
-		if err != nil {
-			continue
-		}
-		// ffmpeg's out_time_ms is actually microseconds (the field name
-		// is misleading — see ffmpeg source / docs). Convert to seconds.
-		sec := ms / 1_000_000
-		if duration <= 0 {
-			continue
-		}
-		pct := sec / duration * 100
-		if pct < 0 {
-			pct = 0
-		}
-		if pct > 100 {
-			pct = 100
-		}
-		cb(pct)
-	}
-}
 
 // HandleSubPrepStart — POST /api/v1/stream/hls/:sessionId/prep
 // Body: {"lang": "fr"}
