@@ -34,56 +34,67 @@ type configFieldStatus struct {
 }
 
 // HandleGetServerConfig returns the masked status of each admin-mutable
-// credential. Prowlarr's base URL is special-cased: it's not a secret,
-// so we return it in full.
+// credential. URL + non-secret model fields are returned verbatim.
 func (h *Handler) HandleGetServerConfig(c echo.Context) error {
 	dbVals, err := h.App.Database.GetSettings([]string{
 		core.SettingTMDBAPIKey,
 		core.SettingTorBoxAPIKey,
 		core.SettingProwlarrURL,
 		core.SettingProwlarrAPIKey,
+		core.SettingAnthropicAPIKey,
+		core.SettingAnthropicModel,
 	})
 	if err != nil {
 		return RespondErr(c, err)
 	}
 
 	return RespondOK(c, map[string]any{
-		"tmdbApiKey":     mask(h.App.Config.TMDB.APIKey, dbVals[core.SettingTMDBAPIKey]),
-		"torboxApiKey":   mask(h.App.Config.TorBox.APIKey, dbVals[core.SettingTorBoxAPIKey]),
-		"prowlarrApiKey": mask(h.App.Config.Prowlarr.APIKey, dbVals[core.SettingProwlarrAPIKey]),
-		// URL is not a secret — return verbatim + source.
+		"tmdbApiKey":      mask(h.App.Config.TMDB.APIKey, dbVals[core.SettingTMDBAPIKey]),
+		"torboxApiKey":    mask(h.App.Config.TorBox.APIKey, dbVals[core.SettingTorBoxAPIKey]),
+		"prowlarrApiKey":  mask(h.App.Config.Prowlarr.APIKey, dbVals[core.SettingProwlarrAPIKey]),
+		"anthropicApiKey": mask(h.App.Config.Anthropic.APIKey, dbVals[core.SettingAnthropicAPIKey]),
+		// URL + model: not secrets, returned verbatim with the source pill.
 		"prowlarrUrl": map[string]any{
 			"value":  h.App.Config.Prowlarr.BaseURL,
 			"isSet":  h.App.Config.Prowlarr.BaseURL != "",
 			"source": sourceOf(dbVals[core.SettingProwlarrURL]),
 		},
+		"anthropicModel": map[string]any{
+			"value":  h.App.Config.Anthropic.Model,
+			"isSet":  h.App.Config.Anthropic.Model != "",
+			"source": sourceOf(dbVals[core.SettingAnthropicModel]),
+		},
 	})
 }
 
 // HandleUpdateServerConfig accepts a partial body (any subset of the
-// four keys), persists the non-nil values, and hot-applies them. Nil
+// six keys), persists the non-nil values, and hot-applies them. Nil
 // or absent keys leave the current value untouched; an empty string
 // explicitly clears the override (next boot falls back to env, or
 // becomes unset if no env value).
 func (h *Handler) HandleUpdateServerConfig(c echo.Context) error {
 	var body struct {
-		TMDBAPIKey     *string `json:"tmdbApiKey"`
-		TorBoxAPIKey   *string `json:"torboxApiKey"`
-		ProwlarrURL    *string `json:"prowlarrUrl"`
-		ProwlarrAPIKey *string `json:"prowlarrApiKey"`
+		TMDBAPIKey      *string `json:"tmdbApiKey"`
+		TorBoxAPIKey    *string `json:"torboxApiKey"`
+		ProwlarrURL     *string `json:"prowlarrUrl"`
+		ProwlarrAPIKey  *string `json:"prowlarrApiKey"`
+		AnthropicAPIKey *string `json:"anthropicApiKey"`
+		AnthropicModel  *string `json:"anthropicModel"`
 	}
 	if err := c.Bind(&body); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})
 	}
 
-	// Resolve each field to its target value: if the body explicitly
-	// sent a string (even ""), use it; otherwise keep the current.
+	// Resolve each field: explicit string from body → use it (even ""),
+	// nil/absent → keep current.
 	tmdb := pickString(body.TMDBAPIKey, h.App.Config.TMDB.APIKey)
 	torbox := pickString(body.TorBoxAPIKey, h.App.Config.TorBox.APIKey)
 	prowURL := pickString(body.ProwlarrURL, h.App.Config.Prowlarr.BaseURL)
 	prowKey := pickString(body.ProwlarrAPIKey, h.App.Config.Prowlarr.APIKey)
+	anthropicKey := pickString(body.AnthropicAPIKey, h.App.Config.Anthropic.APIKey)
+	anthropicModel := pickString(body.AnthropicModel, h.App.Config.Anthropic.Model)
 
-	if err := h.App.ApplyServerConfig(tmdb, torbox, prowURL, prowKey); err != nil {
+	if err := h.App.ApplyServerConfig(tmdb, torbox, prowURL, prowKey, anthropicKey, anthropicModel); err != nil {
 		return RespondErr(c, err)
 	}
 	return RespondOK(c, true)

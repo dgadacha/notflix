@@ -29,6 +29,18 @@ type Config struct {
 		// X-Api-Key value from Prowlarr's General settings.
 		APIKey string
 	}
+	Anthropic struct {
+		// API key from console.anthropic.com. Used by the subtitle
+		// translation service — Claude turns an English / Japanese /
+		// whatever VTT into French (or the user's pick) on the fly.
+		// Optional: when empty, the translate-to feature is disabled
+		// and the user only sees the natively-embedded subtitle tracks.
+		APIKey string
+		// Model id to use. Defaults to a Haiku since subtitle
+		// translation is short-context, latency-sensitive and we
+		// want it cheap.
+		Model string
+	}
 	Auth struct {
 		// Bootstrap credentials for the admin user. Only used on first
 		// boot — once the user exists in the DB the env vars are ignored.
@@ -74,6 +86,11 @@ func loadConfig() (*Config, error) {
 	cfg.TorBox.APIKey = os.Getenv("NOTFLIX_TORBOX_API_KEY")
 	cfg.Prowlarr.BaseURL = firstNonEmpty(os.Getenv("NOTFLIX_PROWLARR_URL"), "http://127.0.0.1:9696")
 	cfg.Prowlarr.APIKey = os.Getenv("NOTFLIX_PROWLARR_API_KEY")
+
+	// Anthropic — optional. Powers the on-the-fly subtitle translation
+	// when the user wants a language the source file doesn't embed.
+	cfg.Anthropic.APIKey = os.Getenv("NOTFLIX_ANTHROPIC_API_KEY")
+	cfg.Anthropic.Model = firstNonEmpty(os.Getenv("NOTFLIX_ANTHROPIC_MODEL"), "claude-haiku-4-5")
 
 	// Auth bootstrap — defaults are intentionally weak so a fresh
 	// install boots without setup; the README tells the user to set

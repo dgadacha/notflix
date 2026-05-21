@@ -4,6 +4,7 @@ import (
 	"log"
 	"path/filepath"
 
+	"notflix/internal/anthropic"
 	"notflix/internal/database/db"
 	"notflix/internal/database/models"
 	"notflix/internal/prowlarr"
@@ -16,21 +17,24 @@ import (
 // App is the singleton wiring container. Handlers get a *App so they can
 // reach everything without passing 5+ args around.
 type App struct {
-	Config   *Config
-	Database *db.Database
-	TMDB     *tmdb.Client
-	TorBox   *torbox.Client
-	Prowlarr *prowlarr.Client
+	Config    *Config
+	Database  *db.Database
+	TMDB      *tmdb.Client
+	TorBox    *torbox.Client
+	Prowlarr  *prowlarr.Client
+	Anthropic *anthropic.Client
 }
 
 // Setting keys used by the admin UI to override env-var defaults.
 // They live in the `settings` table; the env vars are still read at
 // boot so a fresh install works without touching the DB.
 const (
-	SettingTMDBAPIKey     = "tmdb_api_key"
-	SettingTorBoxAPIKey   = "torbox_api_key"
-	SettingProwlarrURL    = "prowlarr_url"
-	SettingProwlarrAPIKey = "prowlarr_api_key"
+	SettingTMDBAPIKey      = "tmdb_api_key"
+	SettingTorBoxAPIKey    = "torbox_api_key"
+	SettingProwlarrURL     = "prowlarr_url"
+	SettingProwlarrAPIKey  = "prowlarr_api_key"
+	SettingAnthropicAPIKey = "anthropic_api_key"
+	SettingAnthropicModel  = "anthropic_model"
 )
 
 func New() (*App, error) {
@@ -50,11 +54,12 @@ func New() (*App, error) {
 	overlaySettingsOnto(database, cfg)
 
 	app := &App{
-		Config:   cfg,
-		Database: database,
-		TMDB:     tmdb.NewClient(cfg.TMDB.APIKey),
-		TorBox:   torbox.NewClient(cfg.TorBox.APIKey),
-		Prowlarr: prowlarr.NewClient(cfg.Prowlarr.BaseURL, cfg.Prowlarr.APIKey),
+		Config:    cfg,
+		Database:  database,
+		TMDB:      tmdb.NewClient(cfg.TMDB.APIKey),
+		TorBox:    torbox.NewClient(cfg.TorBox.APIKey),
+		Prowlarr:  prowlarr.NewClient(cfg.Prowlarr.BaseURL, cfg.Prowlarr.APIKey),
+		Anthropic: anthropic.NewClient(cfg.Anthropic.APIKey, cfg.Anthropic.Model),
 	}
 
 	// Bootstrap the admin user on first boot. If the table is empty,
@@ -68,7 +73,7 @@ func New() (*App, error) {
 	return app, nil
 }
 
-// overlaySettingsOnto reads the four admin-mutable keys from the DB and
+// overlaySettingsOnto reads the admin-mutable keys from the DB and
 // patches them into the Config struct. Empty / missing rows leave the
 // env-var value untouched. Silent on DB errors — if the settings table
 // is unreadable the env values are still a working fallback.
@@ -78,6 +83,8 @@ func overlaySettingsOnto(database *db.Database, cfg *Config) {
 		SettingTorBoxAPIKey,
 		SettingProwlarrURL,
 		SettingProwlarrAPIKey,
+		SettingAnthropicAPIKey,
+		SettingAnthropicModel,
 	})
 	if err != nil {
 		return
@@ -94,9 +101,15 @@ func overlaySettingsOnto(database *db.Database, cfg *Config) {
 	if v := rows[SettingProwlarrAPIKey]; v != "" {
 		cfg.Prowlarr.APIKey = v
 	}
+	if v := rows[SettingAnthropicAPIKey]; v != "" {
+		cfg.Anthropic.APIKey = v
+	}
+	if v := rows[SettingAnthropicModel]; v != "" {
+		cfg.Anthropic.Model = v
+	}
 }
 
-// ApplyServerConfig writes the four admin-mutable keys to the settings
+// ApplyServerConfig writes the admin-mutable keys to the settings
 // table, updates the in-memory Config, and hot-swaps the credentials
 // inside each client. Empty strings clear the corresponding setting so
 // the next boot falls back to the env-var (or, if no env-var, an
@@ -104,7 +117,7 @@ func overlaySettingsOnto(database *db.Database, cfg *Config) {
 //
 // Caller must hold the admin role check — the App layer doesn't
 // re-check, it trusts handlers/auth.go's RequireAdmin.
-func (a *App) ApplyServerConfig(tmdbKey, torboxKey, prowlarrURL, prowlarrKey string) error {
+func (a *App) ApplyServerConfig(tmdbKey, torboxKey, prowlarrURL, prowlarrKey, anthropicKey, anthropicModel string) error {
 	pairs := []struct {
 		key, val string
 	}{
@@ -112,6 +125,8 @@ func (a *App) ApplyServerConfig(tmdbKey, torboxKey, prowlarrURL, prowlarrKey str
 		{SettingTorBoxAPIKey, torboxKey},
 		{SettingProwlarrURL, prowlarrURL},
 		{SettingProwlarrAPIKey, prowlarrKey},
+		{SettingAnthropicAPIKey, anthropicKey},
+		{SettingAnthropicModel, anthropicModel},
 	}
 	for _, p := range pairs {
 		if err := a.Database.SetSetting(p.key, p.val); err != nil {
@@ -122,9 +137,12 @@ func (a *App) ApplyServerConfig(tmdbKey, torboxKey, prowlarrURL, prowlarrKey str
 	a.Config.TorBox.APIKey = torboxKey
 	a.Config.Prowlarr.BaseURL = prowlarrURL
 	a.Config.Prowlarr.APIKey = prowlarrKey
+	a.Config.Anthropic.APIKey = anthropicKey
+	a.Config.Anthropic.Model = anthropicModel
 	a.TMDB.SetAPIKey(tmdbKey)
 	a.TorBox.SetAPIKey(torboxKey)
 	a.Prowlarr.SetConfig(prowlarrURL, prowlarrKey)
+	a.Anthropic.SetCredentials(anthropicKey, anthropicModel)
 	return nil
 }
 

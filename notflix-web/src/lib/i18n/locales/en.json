@@ -79,7 +79,8 @@
     "full_page": "More info",
     "episodes": "Episodes",
     "episodes_count": "episodes",
-    "genres": "Genres"
+    "genres": "Genres",
+    "subtitles": "Subtitles"
   },
   "lists": {
     "title": "My lists",
@@ -204,6 +205,10 @@
     "server_prowlarr_url_hint": "Address of your Prowlarr instance (e.g. http://127.0.0.1:9696).",
     "server_prowlarr_key": "Prowlarr API key",
     "server_prowlarr_key_hint": "Available in Prowlarr → Settings → General → API Key.",
+    "server_anthropic_key": "Anthropic API key",
+    "server_anthropic_key_hint": "Optional — enables on-the-fly subtitle translation via Claude. Without a key, only the natively-embedded subtitle tracks are shown.",
+    "server_anthropic_model": "Anthropic model",
+    "server_anthropic_model_hint": "Model used for translation (e.g. claude-haiku-4-5). Leave blank for the default.",
     "server_replace": "Edit",
     "server_set": "Set",
     "server_keep_blank": "Leave blank to clear",

@@ -79,7 +79,8 @@
     "full_page": "Plus d'infos",
     "episodes": "Épisodes",
     "episodes_count": "épisodes",
-    "genres": "Genres"
+    "genres": "Genres",
+    "subtitles": "Sous-titres"
   },
   "lists": {
     "title": "Mes listes",
@@ -204,6 +205,10 @@
     "server_prowlarr_url_hint": "Adresse de ton instance Prowlarr (ex: http://127.0.0.1:9696).",
     "server_prowlarr_key": "Clé API Prowlarr",
     "server_prowlarr_key_hint": "Visible dans Prowlarr → Settings → General → API Key.",
+    "server_anthropic_key": "Clé API Anthropic",
+    "server_anthropic_key_hint": "Optionnel — active la traduction de sous-titres en direct via Claude. Sans clé, seuls les sous-titres natifs du fichier sont disponibles.",
+    "server_anthropic_model": "Modèle Anthropic",
+    "server_anthropic_model_hint": "Modèle utilisé pour la traduction (ex: claude-haiku-4-5). Laisser vide pour le défaut.",
     "server_replace": "Modifier",
     "server_set": "Définir",
     "server_keep_blank": "Laisser vide pour effacer",

@@ -209,13 +209,15 @@ func (h *Handler) HandleStreamHLSFile(c echo.Context) error {
 
 // serveHLSSubtitle extracts a single subtitle stream from the source via
 // ffmpeg and converts it to WebVTT on the fly. The result is small
-// (typically 50-200 KB even for a full film) so we just stream the
-// pipe straight back — no caching layer yet.
+// (typically 50-200 KB even for a full film).
 //
-// URL shape: /api/v1/stream/hls/<sessionId>/sub_<idx>.vtt
-//   idx is the position in session.subtitles, NOT the absolute stream
-//   index. We translate via the session map so the frontend doesn't
-//   have to know about ffmpeg's stream numbering.
+// URL shape: /api/v1/stream/hls/<sessionId>/sub_<idx>.vtt[?translateTo=fr]
+//   idx          — position in session.subtitles, NOT the absolute
+//                  stream index in the source file.
+//   translateTo  — when present + Anthropic key is configured, the
+//                  extracted VTT is run through Claude to translate
+//                  dialogue lines into the target language. Result is
+//                  cached on disk under <datadir>/cache/subtitles/.
 func (h *Handler) serveHLSSubtitle(c echo.Context, sess *hlsSession, file string) error {
 	numPart := strings.TrimSuffix(strings.TrimPrefix(file, "sub_"), ".vtt")
 	n, err := strconv.Atoi(numPart)
@@ -229,11 +231,33 @@ func (h *Handler) serveHLSSubtitle(c echo.Context, sess *hlsSession, file string
 		})
 	}
 
+	targetLang := strings.ToLower(strings.TrimSpace(c.QueryParam("translateTo")))
+	// "Same language" → don't translate, just serve the original. Tests
+	// the user's normalised BCP-47 against both the source's language
+	// tag (often ISO-639-2) and the normalised version.
+	if targetLang != "" && (targetLang == strings.ToLower(track.Language) ||
+		translateLangName(targetLang) == translateLangName(track.Language)) {
+		targetLang = ""
+	}
+
+	// Cache lookup — translated VTT.
+	if targetLang != "" {
+		if cached := h.readCachedTranslation(sess.id, n, targetLang); cached != nil {
+			c.Response().Header().Set("Content-Type", "text/vtt; charset=utf-8")
+			c.Response().Header().Set("Cache-Control", "public, max-age=86400")
+			c.Response().Header().Set("X-Translation-Source", "cache")
+			c.Response().WriteHeader(http.StatusOK)
+			_, _ = c.Response().Writer.Write(cached)
+			return nil
+		}
+	}
+
+	// Pull the raw VTT from ffmpeg into a buffer. Done into memory
+	// instead of streamed because we either (a) translate it before
+	// emitting, or (b) write it both to the response and to disk —
+	// neither flow can stream linearly.
 	ctx, cancel := context.WithTimeout(c.Request().Context(), 30*time.Second)
 	defer cancel()
-
-	// `-map 0:s:N` picks the Nth subtitle stream specifically (not the
-	// Nth absolute stream). `-c:s webvtt` does the format conversion.
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-hide_banner",
 		"-loglevel", "warning",
@@ -243,27 +267,37 @@ func (h *Handler) serveHLSSubtitle(c echo.Context, sess *hlsSession, file string
 		"-f", "webvtt",
 		"pipe:1",
 	)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return RespondErr(c, err)
-	}
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return c.JSON(http.StatusBadGateway, map[string]any{
-			"error": "ffmpeg start: " + err.Error(),
-		})
+	raw, err := cmd.Output()
+	if err != nil {
+		log.Printf("hls sub %d: ffmpeg %v | %s", n, err, strings.TrimSpace(stderr.String()))
+		return c.JSON(http.StatusBadGateway, map[string]any{"error": "ffmpeg failed"})
+	}
+
+	body := raw
+	translationSource := "ffmpeg"
+	if targetLang != "" && h.App.Anthropic.HasKey() {
+		// Translation can take 10-30 s on a feature-length subtitle;
+		// give it its own headroom. The request context still wins if
+		// the client disconnects.
+		trCtx, cancelTr := context.WithTimeout(c.Request().Context(), 5*time.Minute)
+		defer cancelTr()
+		translated, err := translateVTT(trCtx, h.App.Anthropic, raw, targetLang)
+		if err == nil && len(translated) > 0 {
+			body = translated
+			translationSource = "claude"
+			h.writeCachedTranslation(sess.id, n, targetLang, body)
+		} else if err != nil {
+			log.Printf("hls sub %d: translation failed, serving original: %v", n, err)
+		}
 	}
 
 	c.Response().Header().Set("Content-Type", "text/vtt; charset=utf-8")
-	// Long-cache: the subtitle bytes are deterministic for (sourceURL, idx)
-	// and the session ID embeds a hash of the source URL.
 	c.Response().Header().Set("Cache-Control", "public, max-age=86400")
+	c.Response().Header().Set("X-Translation-Source", translationSource)
 	c.Response().WriteHeader(http.StatusOK)
-	_, _ = io.Copy(c.Response().Writer, stdout)
-	if werr := cmd.Wait(); werr != nil {
-		log.Printf("hls sub %d: ffmpeg %v | %s", n, werr, strings.TrimSpace(stderr.String()))
-	}
+	_, _ = c.Response().Writer.Write(body)
 	return nil
 }
 

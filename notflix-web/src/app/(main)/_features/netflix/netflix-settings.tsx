@@ -588,6 +588,25 @@ function ServerConfigEditor() {
                 field={data.prowlarrApiKey}
                 bodyKey="prowlarrApiKey"
             />
+            <ServerSecretRow
+                label={t("settings.server_anthropic_key", "Clé API Anthropic")}
+                description={t(
+                    "settings.server_anthropic_key_hint",
+                    "Optionnel — active la traduction de sous-titres en direct via Claude. Sans clé, seuls les sous-titres natifs du fichier sont disponibles.",
+                )}
+                field={data.anthropicApiKey}
+                bodyKey="anthropicApiKey"
+            />
+            <ServerUrlRow
+                label={t("settings.server_anthropic_model", "Modèle Anthropic")}
+                description={t(
+                    "settings.server_anthropic_model_hint",
+                    "Modèle utilisé pour la traduction (ex: claude-haiku-4-5). Laisser vide pour le défaut.",
+                )}
+                value={data.anthropicModel.value}
+                source={data.anthropicModel.source}
+                bodyKey="anthropicModel"
+            />
         </div>
     )
 }

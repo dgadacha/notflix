@@ -13,8 +13,10 @@ import { useRouter } from "@/lib/navigation"
 import {
     AUDIO_OPTIONS,
     QUALITY_OPTIONS,
+    SUBTITLE_LANG_OPTIONS,
     useAudioPref,
     useQualityPref,
+    useSubtitleLangPref,
 } from "@/lib/preferences"
 import {
     listEntryKey,
@@ -101,6 +103,7 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
     const { data, isLoading } = useTMDBDetail(target.type, target.id)
     const [quality, setQuality] = useQualityPref()
     const [audio, setAudio] = useAudioPref()
+    const [subLang, setSubLang] = useSubtitleLangPref()
 
     // TV series: track which season we're showing in the episode list.
     // Episode is no longer a separate piece of state — the user clicks an
@@ -139,6 +142,7 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
         const params = new URLSearchParams({ id: String(data.id), type })
         if (quality !== "auto") params.set("quality", quality)
         if (audio !== "auto") params.set("audio", audio)
+        if (subLang !== "fr") params.set("sub", subLang)
         if (type === "tv" && season != null && episode != null) {
             params.set("season", String(season))
             params.set("episode", String(episode))
@@ -214,6 +218,12 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
                             value={audio}
                             options={AUDIO_OPTIONS}
                             onChange={(v) => setAudio(v as typeof audio)}
+                        />
+                        <PrefSelect
+                            label={t("modal.subtitles", "Sous-titres")}
+                            value={subLang}
+                            options={SUBTITLE_LANG_OPTIONS}
+                            onChange={(v) => setSubLang(v as typeof subLang)}
                         />
                     </div>
                 </div>

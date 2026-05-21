@@ -25,12 +25,14 @@ import Hls from "hls.js"
 import {
     AudioPref,
     QualityPref,
+    SubtitleLangPref,
     releaseHasFrenchAudio,
     releaseHasIncompatibleAudio,
     releaseMatchesAudio,
     releaseMatchesQuality,
     releaseNeedsTransmux,
     useSourcePickMode,
+    useSubtitleLangPref,
 } from "@/lib/preferences"
 import { titleOf, tmdbImage, useTMDBDetail, yearOf } from "@/lib/tmdb"
 import { Button } from "@/components/ui/button"
@@ -75,6 +77,12 @@ export default function WatchPage() {
     // Playback prefs come from the modal's selectors via the URL.
     const qualityPref = (searchParams.get("quality") as QualityPref | null) ?? "auto"
     const audioPref = (searchParams.get("audio") as AudioPref | null) ?? "auto"
+    // Subtitles default to the persisted localStorage preference when no
+    // explicit URL param was set. Lets the player honour the user's
+    // pick even when arriving via "Reprendre la lecture" (which only
+    // forwards the resume position).
+    const [storedSubLang] = useSubtitleLangPref()
+    const subLangPref = (searchParams.get("sub") as SubtitleLangPref | null) ?? storedSubLang
 
     const { data: detail, isLoading: detailLoading } = useTMDBDetail(
         typeParam,
@@ -403,6 +411,7 @@ export default function WatchPage() {
                     durationSec={streamDurationSec}
                     subtitles={streamSubtitles}
                     sessionId={streamSessionId}
+                    subLangPref={subLangPref}
                     resumeSec={resumeSec}
                     onBack={handleClose}
                     onChangeSource={handleChangeSource}
@@ -733,6 +742,7 @@ function Player({
     durationSec,
     subtitles,
     sessionId,
+    subLangPref,
     resumeSec,
     onBack,
     onChangeSource,
@@ -744,6 +754,7 @@ function Player({
     durationSec: number
     subtitles: SubtitleTrack[]
     sessionId: string
+    subLangPref: SubtitleLangPref
     resumeSec: number
     onBack: () => void
     onChangeSource: () => void
@@ -934,19 +945,20 @@ function Player({
                     console.error("[Notflix] video error")
                 }}
             >
-                {sessionId && subtitles.filter(s => s.supported).map(track => {
-                    const lang = normaliseSubLang(track.language)
-                    return (
-                        <track
-                            key={track.index}
-                            kind="subtitles"
-                            src={`/api/v1/stream/hls/${sessionId}/sub_${track.index}.vtt`}
-                            srcLang={lang || "und"}
-                            label={subtitleLabel(track)}
-                            default={isPreferredSubLang(lang)}
-                        />
-                    )
-                })}
+                {sessionId && resolveSubtitleTracks(subtitles, subLangPref).map(track => (
+                    <track
+                        key={`${track.index}-${track.translateTo ?? ""}`}
+                        kind="subtitles"
+                        src={
+                            track.translateTo
+                                ? `/api/v1/stream/hls/${sessionId}/sub_${track.index}.vtt?translateTo=${track.translateTo}`
+                                : `/api/v1/stream/hls/${sessionId}/sub_${track.index}.vtt`
+                        }
+                        srcLang={track.srcLang}
+                        label={track.label}
+                        default={track.isDefault}
+                    />
+                ))}
             </video>
         </div>
     )
@@ -974,35 +986,109 @@ function normaliseSubLang(raw: string): string {
     return m[k] ?? k
 }
 
-/** True iff this language should be selected by default in the CC menu.
- *  Hard-coded to French for Notflix's audience — could later read from
- *  the audio preference atom. */
-function isPreferredSubLang(lang: string): boolean {
-    return lang === "fr"
+const subLangNames: Record<string, string> = {
+    fr: "Français",
+    en: "English",
+    ja: "日本語",
+    es: "Español",
+    de: "Deutsch",
+    it: "Italiano",
+    pt: "Português",
+    ar: "العربية",
+    zh: "中文",
+    ko: "한국어",
+    ru: "Русский",
+    nl: "Nederlands",
 }
 
-/** Human-readable label shown in the CC menu. Includes the title when
- *  the source set one ("Forced", "SDH"), falls back to the language
- *  name when not. */
-function subtitleLabel(track: SubtitleTrack): string {
-    const lang = normaliseSubLang(track.language)
-    const langName: Record<string, string> = {
-        fr: "Français",
-        en: "English",
-        ja: "日本語",
-        es: "Español",
-        de: "Deutsch",
-        it: "Italiano",
-        pt: "Português",
-        ar: "العربية",
-        zh: "中文",
-        ko: "한국어",
-        ru: "Русский",
-        nl: "Nederlands",
-    }
-    const base = langName[lang] || track.language || "?"
+/** Human-readable label shown in the CC menu. */
+function subtitleLabel(track: SubtitleTrack, override?: string): string {
+    const lang = override ?? normaliseSubLang(track.language)
+    const base = subLangNames[lang] || track.language || "?"
     if (track.title && track.title.toLowerCase() !== base.toLowerCase()) {
         return `${base} · ${track.title}`
     }
     return base
+}
+
+type ResolvedTrack = {
+    index: number
+    srcLang: string
+    label: string
+    isDefault: boolean
+    /** When set, the backend will run the source VTT through Claude
+     *  before serving it. Mounted as ?translateTo=<code>. */
+    translateTo?: string
+}
+
+/**
+ * resolveSubtitleTracks picks which subtitle entries the player exposes
+ * to the user, and decides whether to ask the backend for an on-the-fly
+ * translation.
+ *
+ * Strategy:
+ *   1. Build one <track> per supported native subtitle (no translation
+ *      query, plain srcLang from the source).
+ *   2. If the user picked a language pref (other than "off" / "auto")
+ *      and no native track already serves it, ADD one translated track:
+ *      pick the most useful native source (English first if available,
+ *      else the first supported track) and translate it via Claude.
+ *   3. Default selection: the user's preferred language if present (or
+ *      its translation), else French if present, else nothing.
+ *   4. "off" → no <track> rendered at all.
+ */
+function resolveSubtitleTracks(
+    subs: SubtitleTrack[],
+    pref: SubtitleLangPref,
+): ResolvedTrack[] {
+    if (pref === "off") return []
+
+    const supported = subs.filter(s => s.supported)
+    if (supported.length === 0) return []
+
+    // Native tracks first, no translation.
+    const native: ResolvedTrack[] = supported.map(s => {
+        const lang = normaliseSubLang(s.language)
+        return {
+            index: s.index,
+            srcLang: lang || "und",
+            label: subtitleLabel(s),
+            isDefault: false,
+        }
+    })
+
+    // Find the requested language in the existing native tracks.
+    const wantLang = pref === "auto" ? "fr" : pref
+    const nativeMatch = native.find(t => t.srcLang === wantLang)
+
+    const tracks: ResolvedTrack[] = [...native]
+
+    if (!nativeMatch && pref !== "auto") {
+        // No native track for the requested language — ask Claude.
+        // Pick English as the source if available (best translation
+        // input), else the first supported native track.
+        const sourceTrack =
+            supported.find(s => normaliseSubLang(s.language) === "en") ?? supported[0]
+        tracks.push({
+            index: sourceTrack.index,
+            srcLang: wantLang,
+            label: `${subLangNames[wantLang] || wantLang} (traduit)`,
+            isDefault: false,
+            translateTo: wantLang,
+        })
+    }
+
+    // Default-track selection.
+    const defaultLang = pref === "auto" ? "fr" : pref
+    const defaultTrack =
+        tracks.find(t => t.srcLang === defaultLang && !!t.translateTo) ??
+        tracks.find(t => t.srcLang === defaultLang) ??
+        // Fallback: first track (typically French if the user kept "auto"
+        // with a non-French source; better than nothing).
+        tracks[0]
+    if (defaultTrack) {
+        defaultTrack.isDefault = true
+    }
+
+    return tracks
 }

@@ -195,8 +195,14 @@ export type ServerConfig = {
     tmdbApiKey: ServerSecretField
     torboxApiKey: ServerSecretField
     prowlarrApiKey: ServerSecretField
-    /** Base URL isn't a secret — surfaced verbatim. */
+    anthropicApiKey: ServerSecretField
+    /** Base URL + model name aren't secrets — surfaced verbatim. */
     prowlarrUrl: {
+        value: string
+        isSet: boolean
+        source: "env" | "db"
+    }
+    anthropicModel: {
         value: string
         isSet: boolean
         source: "env" | "db"
@@ -230,6 +236,8 @@ export type UpdateServerConfigBody = {
     torboxApiKey?: string
     prowlarrUrl?: string
     prowlarrApiKey?: string
+    anthropicApiKey?: string
+    anthropicModel?: string
 }
 
 export function useUpdateServerConfig() {

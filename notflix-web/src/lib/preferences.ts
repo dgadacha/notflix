@@ -13,6 +13,14 @@ export type QualityPref = "auto" | "4k" | "1080p" | "720p" | "sd"
 export type AudioPref = "auto" | "fr" | "vo"
 
 /**
+ * Preferred subtitle language for the player. "auto" lets the player
+ * default to whatever the source brings; the lang codes pick a specific
+ * track when present and trigger Claude translation when the source
+ * doesn't embed that language but does embed another supported one.
+ */
+export type SubtitleLangPref = "off" | "auto" | "fr" | "en" | "es" | "de" | "it" | "pt" | "ja"
+
+/**
  * SourcePickMode controls what /watch does once Prowlarr returns the
  * release list:
  *
@@ -43,9 +51,22 @@ export const SOURCE_PICK_OPTIONS: { value: SourcePickMode; label: string }[] = [
     { value: "manual", label: "Choisir la source" },
 ]
 
+export const SUBTITLE_LANG_OPTIONS: { value: SubtitleLangPref; label: string }[] = [
+    { value: "auto", label: "Auto (langue native)" },
+    { value: "fr", label: "Français" },
+    { value: "en", label: "Anglais" },
+    { value: "es", label: "Espagnol" },
+    { value: "de", label: "Allemand" },
+    { value: "it", label: "Italien" },
+    { value: "pt", label: "Portugais" },
+    { value: "ja", label: "Japonais" },
+    { value: "off", label: "Désactivés" },
+]
+
 export const qualityPrefAtom = atomWithStorage<QualityPref>("notflix-pref-quality", "auto")
 export const audioPrefAtom = atomWithStorage<AudioPref>("notflix-pref-audio", "auto")
 export const sourcePickModeAtom = atomWithStorage<SourcePickMode>("notflix-pref-source-pick", "auto")
+export const subtitleLangPrefAtom = atomWithStorage<SubtitleLangPref>("notflix-pref-subtitle", "fr")
 
 export function useQualityPref() {
     return useAtom(qualityPrefAtom)
@@ -57,6 +78,10 @@ export function useAudioPref() {
 
 export function useSourcePickMode() {
     return useAtom(sourcePickModeAtom)
+}
+
+export function useSubtitleLangPref() {
+    return useAtom(subtitleLangPrefAtom)
 }
 
 /**
