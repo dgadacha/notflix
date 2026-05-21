@@ -15,10 +15,11 @@ import { NetflixCard } from "@/app/(main)/_features/netflix/netflix-card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { cn } from "@/components/ui/core/styling"
 import { useRouter, useSearchParams } from "@/lib/navigation"
-import { useDiscover, useTMDBGenres } from "@/lib/tmdb"
+import { TMDBMedia, useInfiniteDiscover, useTMDBGenres } from "@/lib/tmdb"
 import * as React from "react"
 import { useTranslation } from "react-i18next"
 import { BiArrowBack } from "react-icons/bi"
+import { FiLoader } from "react-icons/fi"
 
 // Curated six-gradient palette — picked to feel Netflix-y without
 // fighting the brand red.
@@ -133,8 +134,46 @@ function GenreResults({
     const { t } = useTranslation()
     // TMDB sort by popularity desc covers ~95% of the "browse a genre"
     // use case; we can add a sort selector later if needed.
-    const discover = useDiscover(`/discover/${type}?with_genres=${genreId}&sort_by=popularity.desc`)
-    const items = discover.data?.results ?? []
+    const discover = useInfiniteDiscover(
+        `/discover/${type}?with_genres=${genreId}&sort_by=popularity.desc`,
+    )
+
+    // Flatten pages into a single list, deduped on id (TMDB occasionally
+    // returns the same title across page boundaries).
+    const items = React.useMemo<TMDBMedia[]>(() => {
+        const out: TMDBMedia[] = []
+        const seen = new Set<number>()
+        for (const page of discover.data?.pages ?? []) {
+            for (const m of page.results ?? []) {
+                if (!seen.has(m.id)) {
+                    seen.add(m.id)
+                    out.push(m)
+                }
+            }
+        }
+        return out
+    }, [discover.data])
+
+    // Intersection observer on a sentinel at the bottom of the grid —
+    // pre-fetches the next page when the user is ~one screen away from
+    // the end. Cleaned up on unmount / dep changes.
+    const sentinelRef = React.useRef<HTMLDivElement>(null)
+    React.useEffect(() => {
+        const el = sentinelRef.current
+        if (!el) return
+        if (!discover.hasNextPage) return
+        const obs = new IntersectionObserver(
+            entries => {
+                if (entries[0].isIntersecting && !discover.isFetchingNextPage) {
+                    void discover.fetchNextPage()
+                }
+            },
+            { rootMargin: "400px" },
+        )
+        obs.observe(el)
+        return () => obs.disconnect()
+    }, [discover.hasNextPage, discover.isFetchingNextPage, discover.fetchNextPage])
+
     const currentGenre = genres.find(g => g.id === genreId)
 
     return (
@@ -156,23 +195,42 @@ function GenreResults({
                 </span>
             </div>
 
-            {discover.isLoading ? (
+            {discover.isLoading && items.length === 0 ? (
                 <ResultGridSkeleton />
             ) : items.length === 0 ? (
                 <p className="text-center py-12 text-[--muted]">
                     {t("categories.empty", "Aucun titre trouvé pour ce genre.")}
                 </p>
             ) : (
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-x-4 gap-y-6 py-2">
-                    {items.map(m => (
-                        <NetflixCard
-                            key={m.id}
-                            media={m}
-                            variant="grid"
-                            fallbackType={type}
-                        />
-                    ))}
-                </div>
+                <>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-x-4 gap-y-6 py-2">
+                        {items.map(m => (
+                            <NetflixCard
+                                key={m.id}
+                                media={m}
+                                variant="grid"
+                                fallbackType={type}
+                            />
+                        ))}
+                    </div>
+
+                    {/* Sentinel — invisible div that, when scrolled into
+                        view (rootMargin 400px = ~one screen), triggers
+                        fetchNextPage. The spinner is shown while the
+                        next page is in flight. */}
+                    {discover.hasNextPage && (
+                        <div ref={sentinelRef} className="py-8 flex items-center justify-center gap-2 text-[--muted]">
+                            {discover.isFetchingNextPage && (
+                                <>
+                                    <FiLoader className="size-5 animate-spin" />
+                                    <span className="text-sm">
+                                        {t("categories.loading_more", "Chargement…")}
+                                    </span>
+                                </>
+                            )}
+                        </div>
+                    )}
+                </>
             )}
         </div>
     )

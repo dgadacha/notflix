@@ -5,7 +5,7 @@
  * forwards them to TMDB with the API key attached server-side. The frontend
  * never sees the key.
  */
-import { useQuery } from "@tanstack/react-query"
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query"
 
 // --------------------------------------------------------------------------
 // Types — the subset of TMDB's schema Notflix actually uses
@@ -137,6 +137,32 @@ export function useDiscover(path: string) {
     return useQuery<TMDBPaged>({
         queryKey: ["tmdb", "discover", path],
         queryFn: () => tmdbFetch(path),
+    })
+}
+
+/**
+ * Paginated variant of useDiscover for the /categories grid — fetches
+ * the first page on mount and lets the caller pull more via fetchNextPage().
+ *
+ * `path` should be the TMDB endpoint without a `page` param; we append
+ * `?page=N` (or `&page=N`) per page. Stops paging when TMDB reports
+ * page >= total_pages (TMDB hard-caps total_pages at 500 even when the
+ * real result count is higher).
+ */
+export function useInfiniteDiscover(path: string) {
+    return useInfiniteQuery<TMDBPaged>({
+        queryKey: ["tmdb", "discover-infinite", path],
+        queryFn: ({ pageParam = 1 }) => {
+            const sep = path.includes("?") ? "&" : "?"
+            return tmdbFetch<TMDBPaged>(`${path}${sep}page=${pageParam}`)
+        },
+        initialPageParam: 1,
+        getNextPageParam: (lastPage) => {
+            if (!lastPage) return undefined
+            if (lastPage.page >= lastPage.total_pages) return undefined
+            return lastPage.page + 1
+        },
+        enabled: !!path,
     })
 }
 
