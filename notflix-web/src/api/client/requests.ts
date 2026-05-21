@@ -101,21 +101,11 @@ export async function buildSeaQuery<T, D extends any = any>(
         params,
         password,
     }: SeaQuery<D>): Promise<T | undefined> {
+    // Notflix's Go backend doesn't use any of Seanime's custom auth headers
+    // (X-Seanime-Token / -Client-Id / -Client-Platform). Skipping them avoids
+    // a CORS preflight rejection — every custom header here would otherwise
+    // need to be explicitly listed in the server's Access-Control-Allow-Headers.
     const headers: Record<string, string> = {}
-
-    if (password) {
-        headers["X-Seanime-Token"] = password
-    }
-
-    const clientId = getClientId()
-    const clientIdProof = getClientIdProof()
-    if (clientId && clientIdProof) {
-        headers["X-Seanime-Client-Id"] = clientId
-        headers["X-Seanime-Client-Id-Proof"] = clientIdProof
-    }
-    if (__clientPlatform__) {
-        headers["X-Seanime-Client-Platform"] = __clientPlatform__
-    }
 
     let res
     try {
