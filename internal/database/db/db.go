@@ -1,138 +1,189 @@
 package db
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
-	"notflix/internal/database/models"
-	"time"
+	"errors"
 
-	"github.com/glebarez/sqlite"
-	"github.com/rs/zerolog"
-	"github.com/samber/mo"
+	"notflix/internal/database/models"
+
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	gormlogger "gorm.io/gorm/logger"
+	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
 )
 
 type Database struct {
-	gormdb           *gorm.DB
-	Logger           *zerolog.Logger
-	CurrMediaFillers mo.Option[map[int]*MediaFillerItem]
-	cleanupManager   *CleanupManager
+	gormdb *gorm.DB
 }
 
-func (db *Database) Gorm() *gorm.DB {
-	return db.gormdb
-}
-
-func NewDatabase(appDataDir, dbName string, logger *zerolog.Logger) (*Database, error) {
-
-	// Set the SQLite database path
-	var sqlitePath string
-	if os.Getenv("TEST_ENV") == "true" || appDataDir == "" {
-		sqlitePath = ":memory:"
-	} else {
-		sqlitePath = filepath.Join(appDataDir, dbName+".db")
-	}
-
-	// Connect to the SQLite database with optimized settings
-	db, err := gorm.Open(sqlite.Open(sqlitePath+"?_busy_timeout=30000&_journal_mode=WAL&_synchronous=NORMAL&_cache_size=1000&_foreign_keys=on"), &gorm.Config{
-		Logger: gormlogger.New(
-			logger,
-			gormlogger.Config{
-				SlowThreshold:             time.Second,
-				LogLevel:                  gormlogger.Error,
-				IgnoreRecordNotFoundError: true,
-				ParameterizedQueries:      false,
-				Colorful:                  true,
-			},
-		),
+func Open(path string) (*Database, error) {
+	g, err := gorm.Open(sqlite.Open(path+"?_journal_mode=WAL&_foreign_keys=on"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Warn),
 	})
 	if err != nil {
 		return nil, err
 	}
-
-	// Configure connection pool
-	sqlDB, err := db.DB()
-	if err != nil {
+	if err := g.AutoMigrate(
+		&models.Profile{},
+		&models.ProfileWatchHistory{},
+		&models.ProfileListEntry{},
+	); err != nil {
 		return nil, err
 	}
-
-	sqlDB.SetMaxOpenConns(3)
-	sqlDB.SetMaxIdleConns(2)
-	sqlDB.SetConnMaxLifetime(time.Hour)
-
-	// Migrate tables
-	err = migrateTables(db)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("db: Failed to perform auto migration")
-		return nil, err
-	}
-
-	logger.Info().Str("name", fmt.Sprintf("%s.db", dbName)).Msg("db: Database instantiated")
-
-	database := &Database{
-		gormdb:           db,
-		Logger:           logger,
-		CurrMediaFillers: mo.None[map[int]*MediaFillerItem](),
-	}
-
-	// Initialize cleanup manager
-	database.cleanupManager = NewCleanupManager(database.gormdb, database.Logger)
-
-	return database, nil
+	return &Database{gormdb: g}, nil
 }
 
-// MigrateTables performs auto migration on the database
-func migrateTables(db *gorm.DB) error {
-	// Notflix: legacy (profile_uid, media_id) unique index → upgraded to
-	// (profile_uid, media_id, episode_number). AutoMigrate doesn't drop
-	// existing indexes so we drop the old one explicitly. No-op when missing.
-	_ = db.Exec("DROP INDEX IF EXISTS idx_notflix_profile_media").Error
-
-	err := db.AutoMigrate(
-		&models.LocalFiles{},
-		&models.ShelvedLocalFiles{},
-		&models.Settings{},
-		&models.Account{},
-		&models.Mal{},
-		&models.ScanSummary{},
-		&models.AutoSelectProfile{},
-		&models.AutoDownloaderRule{},
-		&models.AutoDownloaderProfile{},
-		&models.AutoDownloaderItem{},
-		&models.SilencedMediaEntry{},
-		&models.Theme{},
-		&models.PlaylistEntry{}, // Legacy playlists
-		&models.Playlist{},
-		&models.ChapterDownloadQueueItem{},
-		&models.TorrentstreamSettings{},
-		&models.TorrentstreamHistory{},
-		&models.MediastreamSettings{},
-		&models.MediaFiller{},
-		&models.MangaMapping{},
-		&models.OnlinestreamMapping{},
-		&models.DebridSettings{},
-		&models.DebridTorrentItem{},
-		&models.PluginData{},
-		&models.CustomSourceCollection{},
-		&models.CustomSourceIdentifier{},
-		&models.MediaMetadataParent{},
-		// Notflix: Netflix-style profiles + per-profile watch history + per-profile list view
-		&models.NotflixProfile{},
-		&models.NotflixProfileWatchHistory{},
-		&models.NotflixProfileListEntry{},
-		//&models.MangaChapterContainer{},
-	)
+func (db *Database) Close() error {
+	sqlDB, err := db.gormdb.DB()
 	if err != nil {
-
 		return err
 	}
-
-	return nil
+	return sqlDB.Close()
 }
 
-// RunDatabaseCleanup runs all database cleanup operations
-func (db *Database) RunDatabaseCleanup() {
-	db.cleanupManager.RunAllCleanupOperations()
+// -----------------------------------------------------------------------------
+// Profile CRUD
+// -----------------------------------------------------------------------------
+
+func (db *Database) ListProfiles() ([]*models.Profile, error) {
+	var res []*models.Profile
+	err := db.gormdb.Order("created_at ASC").Find(&res).Error
+	return res, err
+}
+
+func (db *Database) GetProfile(uid string) (*models.Profile, error) {
+	if uid == "" {
+		return nil, errors.New("profile uid required")
+	}
+	var p models.Profile
+	if err := db.gormdb.Where("uid = ?", uid).First(&p).Error; err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func (db *Database) CreateProfile(p *models.Profile) (*models.Profile, error) {
+	if err := db.gormdb.Create(p).Error; err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (db *Database) UpdateProfile(uid, name, avatar, color string) (*models.Profile, error) {
+	p, err := db.GetProfile(uid)
+	if err != nil {
+		return nil, err
+	}
+	updates := map[string]any{}
+	if name != "" {
+		updates["name"] = name
+	}
+	if avatar != "" {
+		updates["avatar"] = avatar
+	}
+	if color != "" {
+		updates["color"] = color
+	}
+	if len(updates) == 0 {
+		return p, nil
+	}
+	if err := db.gormdb.Model(p).Updates(updates).Error; err != nil {
+		return nil, err
+	}
+	return db.GetProfile(uid)
+}
+
+func (db *Database) DeleteProfile(uid string) error {
+	return db.gormdb.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("profile_uid = ?", uid).Delete(&models.ProfileWatchHistory{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("profile_uid = ?", uid).Delete(&models.ProfileListEntry{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("uid = ?", uid).Delete(&models.Profile{}).Error
+	})
+}
+
+// -----------------------------------------------------------------------------
+// Watch history (per profile)
+// -----------------------------------------------------------------------------
+
+func (db *Database) ListWatchHistory(profileUID string) ([]*models.ProfileWatchHistory, error) {
+	var res []*models.ProfileWatchHistory
+	err := db.gormdb.Where("profile_uid = ?", profileUID).Order("updated_at DESC").Find(&res).Error
+	return res, err
+}
+
+func (db *Database) UpsertWatchHistory(item *models.ProfileWatchHistory) (*models.ProfileWatchHistory, error) {
+	err := db.gormdb.
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "profile_uid"}, {Name: "tmdb_id"}, {Name: "media_type"},
+				{Name: "season"}, {Name: "episode"},
+			},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"current_time", "duration", "title", "poster_path", "backdrop_url", "updated_at",
+			}),
+		}).
+		Create(item).Error
+	if err != nil {
+		return nil, err
+	}
+	var refreshed models.ProfileWatchHistory
+	if err := db.gormdb.
+		Where("profile_uid = ? AND tmdb_id = ? AND media_type = ? AND season = ? AND episode = ?",
+			item.ProfileUID, item.TMDBID, item.MediaType, item.Season, item.Episode).
+		First(&refreshed).Error; err != nil {
+		return nil, err
+	}
+	return &refreshed, nil
+}
+
+func (db *Database) DeleteWatchHistoryByMedia(profileUID string, tmdbID int, mediaType string) error {
+	return db.gormdb.
+		Where("profile_uid = ? AND tmdb_id = ? AND media_type = ?", profileUID, tmdbID, mediaType).
+		Delete(&models.ProfileWatchHistory{}).Error
+}
+
+func (db *Database) ClearWatchHistory(profileUID string) error {
+	return db.gormdb.Where("profile_uid = ?", profileUID).Delete(&models.ProfileWatchHistory{}).Error
+}
+
+// -----------------------------------------------------------------------------
+// Profile list (per-profile "Mes listes")
+// -----------------------------------------------------------------------------
+
+func (db *Database) ListProfileList(profileUID string) ([]*models.ProfileListEntry, error) {
+	var res []*models.ProfileListEntry
+	err := db.gormdb.Where("profile_uid = ?", profileUID).Order("updated_at DESC").Find(&res).Error
+	return res, err
+}
+
+func (db *Database) UpsertProfileList(item *models.ProfileListEntry) (*models.ProfileListEntry, error) {
+	err := db.gormdb.
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "profile_uid"}, {Name: "tmdb_id"}, {Name: "media_type"},
+			},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"status", "title", "poster_path", "updated_at",
+			}),
+		}).
+		Create(item).Error
+	if err != nil {
+		return nil, err
+	}
+	var refreshed models.ProfileListEntry
+	if err := db.gormdb.
+		Where("profile_uid = ? AND tmdb_id = ? AND media_type = ?", item.ProfileUID, item.TMDBID, item.MediaType).
+		First(&refreshed).Error; err != nil {
+		return nil, err
+	}
+	return &refreshed, nil
+}
+
+func (db *Database) DeleteProfileListEntry(profileUID string, tmdbID int, mediaType string) error {
+	return db.gormdb.
+		Where("profile_uid = ? AND tmdb_id = ? AND media_type = ?", profileUID, tmdbID, mediaType).
+		Delete(&models.ProfileListEntry{}).Error
 }
