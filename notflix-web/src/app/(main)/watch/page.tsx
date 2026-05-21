@@ -57,6 +57,20 @@ export default function WatchPage() {
     // source" we stop trying to launch the top result behind their back.
     const [autoPickDisabled, setAutoPickDisabled] = React.useState(false)
 
+    // Reset everything when the URL's media changes. TanStack Router reuses
+    // the same component instance across /watch?id=X → /watch?id=Y (the
+    // route file is the same), so without an explicit reset the previously
+    // picked release / stream URL / phase would leak across — we saw it
+    // hand "Le Réveil de la Momie" to the player while the title above
+    // already said "Super Mario Galaxy".
+    React.useEffect(() => {
+        setPhase("searching")
+        setPickedRelease(null)
+        setStreamUrl(null)
+        setErrorMsg(null)
+        setAutoPickDisabled(false)
+    }, [mediaId, typeParam, season, episode])
+
     // Prowlarr searches as soon as we know the title. No splash step — the
     // user's click on "Lecture" upstream IS the user gesture; we just keep
     // moving.
