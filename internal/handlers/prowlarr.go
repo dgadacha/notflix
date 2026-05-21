@@ -143,66 +143,182 @@ func (h *Handler) HandleSearchTV(c echo.Context) error {
 	return RespondOK(c, h.annotateAndSort(c, results))
 }
 
-// filterByTitleRelevance drops Prowlarr results whose title doesn't match
-// the searched title closely enough. Prowlarr's Torznab search is fuzzy
-// and indexer-dependent; without this filter we've seen "Le Réveil de la
-// Momie" leak into Super Mario results (same year, cached on TorBox),
-// and "Haibaras Teenage New Game ... The Gray Boys Plan ..." leak into
-// "The Boys" results (because the single significant word "boys" matched).
+// filterByTitleRelevance drops Prowlarr results whose series title doesn't
+// match the searched title exactly. Prowlarr's Torznab search is fuzzy
+// and indexer-dependent — without this filter we've seen
 //
-// Two strategies depending on how distinctive the title is:
+//   - "Le Réveil de la Momie" leak into Super Mario Galaxy results
+//     (because both happen to be cached on TorBox in the same year),
+//   - "Haibara's Teenage New Game ... The Gray Boys Plan ..." leak into
+//     "The Boys" (the single needle "boys" was enough to match),
+//   - "Boruto - Naruto Next Generations" leak into Naruto (Naruto is
+//     a literal substring of the longer compound name),
+//   - "Spider-Man: Across the Spider-Verse" leak into Spider-Man (same
+//     pattern — the sequel's full name starts with the original).
 //
-//  - SHORT title (≤ 2 significant words after stripping stopwords like
-//    "the"/"le"/"of"): we require the full NORMALISED phrase (stopwords
-//    kept) to appear as a contiguous substring of the release title.
-//    "The Boys" → needle "the boys" — only matches releases that contain
-//    "the boys" literally, not "the gray boys" or "beach boys".
+// The fix is to compare the SERIES PORTION of each release — the prefix
+// before the first format marker (SxxExx, 1080p, 2023, bluray, …) — to
+// the searched title, both reduced to their significant tokens (no
+// stopwords, no format markers). Same number of tokens, in the same
+// order, or the release is rejected. This is strict on purpose:
 //
-//  - LONG title (3+ significant words): 60% of those significant words
-//    must appear anywhere in the release title. This is robust to
-//    word-order variation ("Movie" vs "le film") and missing tokens.
+//   "Naruto"                     → ["naruto"]
+//   "Boruto - Naruto Next Gens"  → ["boruto", "naruto", "next", "gens"]
+//      → 1 ≠ 4 → REJECTED
+//
+//   "Spider-Man"                 → ["spider", "man"]
+//   "Spider-Man Across the SV"   → ["spider", "man", "across", "sv"]
+//      → 2 ≠ 4 → REJECTED
+//
+//   "Naruto Shippuden"           → ["naruto", "shippuden"]
+//   "Naruto S01E01" series       → ["naruto"]
+//      → 2 ≠ 1 → REJECTED (Shippuden release stays out of plain Naruto)
 //
 // Empty needles → pass-through (don't filter on a title we can't reason
-// about).
+// about, e.g. the user typed a single stopword).
 func filterByTitleRelevance(results []prowlarr.SearchResult, searched string) []prowlarr.SearchResult {
-	phrase := strings.TrimSpace(collapseSpaces(normalizeTitle(searched)))
-	if phrase == "" {
-		return results
-	}
-	needles := significantWords(phrase)
+	needles := significantTitleTokens(searched)
 	if len(needles) == 0 {
 		return results
 	}
-
 	out := make([]prowlarr.SearchResult, 0, len(results))
-
-	if len(needles) <= 2 {
-		// Short title — phrase match required.
-		for _, r := range results {
-			hay := collapseSpaces(normalizeTitle(r.Title))
-			if strings.Contains(hay, phrase) {
-				out = append(out, r)
-			}
-		}
-		return out
-	}
-
-	// Long title — word-coverage match.
-	const threshold = 0.6
 	for _, r := range results {
-		hay := normalizeTitle(r.Title)
-		matched := 0
-		for _, w := range needles {
-			if strings.Contains(hay, w) {
-				matched++
-			}
-		}
-		ratio := float64(matched) / float64(len(needles))
-		if ratio >= threshold {
+		releaseToks := significantTitleTokens(stripLeadingBrackets(r.Title))
+		if matchesTitlePrefix(releaseToks, needles) {
 			out = append(out, r)
 		}
 	}
 	return out
+}
+
+// matchesTitlePrefix returns true iff the first len(needles) significant
+// tokens of `releaseToks` equal `needles` AND the release has no extra
+// significant tokens after them — i.e. the series portion is exactly
+// the searched title. Anything that pads more words onto the front
+// ("Boruto Naruto …") or the back ("Naruto Shippuden") is rejected.
+func matchesTitlePrefix(releaseToks, needles []string) bool {
+	if len(releaseToks) != len(needles) {
+		return false
+	}
+	for i, w := range needles {
+		if releaseToks[i] != w {
+			return false
+		}
+	}
+	return true
+}
+
+// significantTitleTokens normalises a string and returns its
+// "significant" tokens — i.e. tokens that aren't stopwords ("the", "of",
+// "le", …) and aren't release-format markers (SxxExx, 1080p, BluRay,
+// years, languages, codecs, …). This is the canonical representation
+// used for title comparison.
+//
+// Used for both sides of the comparison: the search query is reduced
+// to its needles, and each release title is reduced to its series
+// portion (because the format markers naturally cut off everything
+// from SxxExx / year / quality onwards).
+func significantTitleTokens(s string) []string {
+	normed := normalizeTitle(s)
+	out := make([]string, 0, 8)
+	for _, w := range strings.Fields(normed) {
+		if titleStopwords[w] {
+			continue
+		}
+		if isFormatMarkerToken(w) {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// stripLeadingBrackets removes leading [Group] / (Year) / {Tag} markers
+// from a release title before tokenisation, so the actual series name
+// surfaces as the first significant token. Anime releases are the
+// usual culprit ("[HorribleSubs] Naruto - 001 [1080p].mkv") but western
+// scene releases use it too.
+var leadingBracketsPattern = regexp.MustCompile(`^(\s*[\[({][^\])}]*[\])}]\s*)+`)
+
+func stripLeadingBrackets(s string) string {
+	return leadingBracketsPattern.ReplaceAllString(s, "")
+}
+
+// isFormatMarkerToken reports whether a normalised token is a release
+// metadata fragment (quality, codec, language, season/episode marker,
+// year, source) rather than a part of the title. Used to find where
+// the series portion ends.
+//
+// The map covers the well-known scene tags; the regexes catch
+// season/episode markers (s01, e01, s01e01) and standalone 3-4 digit
+// numbers (years, anime absolute episode numbers).
+func isFormatMarkerToken(t string) bool {
+	if formatMarkerTokens[t] {
+		return true
+	}
+	if sxxExxPattern.MatchString(t) || exxPattern.MatchString(t) {
+		return true
+	}
+	// 3-4 digit standalone number: year (1990-2039) or anime absolute
+	// episode (001-9999). 1-2 digit numbers are kept because they can
+	// be part of the title ("Apollo 13", "Die Hard 2").
+	if len(t) >= 3 && len(t) <= 4 && allDigits(t) {
+		return true
+	}
+	return false
+}
+
+var (
+	sxxExxPattern = regexp.MustCompile(`^s\d{1,3}(e\d{1,4})?$`)
+	exxPattern    = regexp.MustCompile(`^e\d{1,4}$`)
+)
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// formatMarkerTokens — known scene / fansub release tags. The list is
+// not exhaustive but covers everything we've seen in the wild that
+// would otherwise pollute the series-portion extraction.
+var formatMarkerTokens = map[string]bool{
+	// Resolution
+	"360p": true, "480p": true, "720p": true, "1080p": true, "1440p": true,
+	"2160p": true, "4320p": true, "4k": true, "uhd": true, "hd": true,
+	"fhd": true, "qhd": true, "sd": true,
+	// Source
+	"bluray": true, "bdrip": true, "brrip": true, "bdremux": true,
+	"dvdrip": true, "dvdscr": true, "dvd": true,
+	"webdl": true, "webrip": true, "web": true,
+	"hdtv": true, "hdrip": true, "pdtv": true, "sdtv": true,
+	"remux": true, "screener": true, "cam": true, "ts": true,
+	"telesync": true, "telecine": true, "tc": true, "r5": true,
+	// Codec
+	"x264": true, "x265": true, "h264": true, "h265": true, "hevc": true,
+	"avc": true, "xvid": true, "divx": true, "vp9": true, "av1": true,
+	// Audio
+	"aac": true, "ac3": true, "dts": true, "ddp": true, "eac3": true,
+	"truehd": true, "atmos": true, "flac": true, "opus": true,
+	"mp3": true, "dd": true, "dd5": true, "dd7": true,
+	// Language
+	"multi": true, "french": true, "vff": true, "vfq": true, "vostfr": true,
+	"truefrench": true, "subbed": true, "dubbed": true, "vo": true,
+	"vost": true, "subfrench": true, "english": true, "japanese": true,
+	"fastsub": true, "engsub": true, "raw": true,
+	// Labels
+	"season": true, "episode": true, "ep": true, "pack": true,
+	"complete": true, "proper": true, "repack": true, "rerip": true,
+	"extended": true, "uncut": true, "imax": true, "criterion": true,
+	"remastered": true, "anime": true, "ova": true, "ona": true,
+	"special": true, "specials": true, "movie": true, "film": true,
+	"hdr": true, "hdr10": true, "dv": true, "10bit": true, "8bit": true,
 }
 
 // filterByReleaseYear drops releases whose year, as advertised in the
@@ -251,26 +367,6 @@ func extractReleaseYear(title string) int {
 	return n
 }
 
-// collapseSpaces turns runs of whitespace into single spaces. Needed so
-// the SHORT-title phrase match isn't tripped up by double spaces left
-// behind when normalizeTitle replaces punctuation with spaces.
-func collapseSpaces(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	prevSpace := false
-	for _, r := range s {
-		if r == ' ' {
-			if !prevSpace {
-				b.WriteByte(' ')
-			}
-			prevSpace = true
-		} else {
-			b.WriteRune(r)
-			prevSpace = false
-		}
-	}
-	return b.String()
-}
 
 // normalizeTitle lowercases, strips accents and collapses every
 // non-alphanumeric character to a space — so "Le Réveil de la Momie" and
@@ -315,20 +411,6 @@ var titleStopwords = map[string]bool{
 	"le": true, "la": true, "les": true, "un": true, "une": true,
 	"des": true, "de": true, "du": true, "et": true, "au": true,
 	"aux": true, "ou": true, "il": true, "elle": true,
-}
-
-func significantWords(normalized string) []string {
-	out := make([]string, 0, 8)
-	for _, w := range strings.Fields(normalized) {
-		if len(w) < 2 {
-			continue
-		}
-		if titleStopwords[w] {
-			continue
-		}
-		out = append(out, w)
-	}
-	return out
 }
 
 // annotateAndSort decorates each search result with cache state and a
