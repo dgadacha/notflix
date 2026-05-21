@@ -29,6 +29,7 @@ import {
     releaseMatchesAudio,
     releaseMatchesQuality,
     releaseNeedsTransmux,
+    useSourcePickMode,
 } from "@/lib/preferences"
 import { titleOf, tmdbImage, useTMDBDetail, yearOf } from "@/lib/tmdb"
 import { Button } from "@/components/ui/button"
@@ -79,6 +80,10 @@ export default function WatchPage() {
         Number.isNaN(mediaId) ? null : mediaId,
     )
 
+    // "auto" = fire the top release as soon as the search resolves.
+    // "manual" = stop at the picker so the user always chooses.
+    const [sourcePickMode] = useSourcePickMode()
+
     const [phase, setPhase] = React.useState<Phase>("searching")
     const [pickedRelease, setPickedRelease] = React.useState<Release | null>(null)
     const [streamUrl, setStreamUrl] = React.useState<string | null>(null)
@@ -87,7 +92,11 @@ export default function WatchPage() {
     const [errorMsg, setErrorMsg] = React.useState<string | null>(null)
     // Lets the user opt out of the auto-pick: once they click "Changer de
     // source" we stop trying to launch the top result behind their back.
-    const [autoPickDisabled, setAutoPickDisabled] = React.useState(false)
+    // Initialised from sourcePickMode so the settings preference takes
+    // effect on the very first /watch open without an extra click.
+    const [autoPickDisabled, setAutoPickDisabled] = React.useState(
+        sourcePickMode === "manual",
+    )
 
     // Reset everything when the URL's media changes. TanStack Router reuses
     // the same component instance across /watch?id=X → /watch?id=Y (the
@@ -102,10 +111,12 @@ export default function WatchPage() {
         setStreamAudioCodec("")
         setStreamDurationSec(0)
         setErrorMsg(null)
-        setAutoPickDisabled(false)
+        // Honour the settings preference on the reset too — manual mode
+        // means "always stop at the picker", not "stop the first time".
+        setAutoPickDisabled(sourcePickMode === "manual")
         setSkipKeys(new Set())
         setFallbackAttempt(0)
-    }, [mediaId, typeParam, season, episode])
+    }, [mediaId, typeParam, season, episode, sourcePickMode])
 
     // Prowlarr searches as soon as we know the title. No splash step — the
     // user's click on "Lecture" upstream IS the user gesture; we just keep
@@ -315,11 +326,13 @@ export default function WatchPage() {
         setStreamUrl(null)
         setStreamAudioCodec("")
         setStreamDurationSec(0)
-        setAutoPickDisabled(false)
+        // Re-apply the preference: in manual mode "Réessayer" still lands
+        // back on the picker, not on an auto-launch.
+        setAutoPickDisabled(sourcePickMode === "manual")
         setSkipKeys(new Set())
         setFallbackAttempt(0)
         setPhase("searching")
-    }, [])
+    }, [sourcePickMode])
 
     const handleClose = React.useCallback(() => {
         // Go back to the previous page (typically the home or the lists

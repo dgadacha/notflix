@@ -31,8 +31,10 @@ import {
     AUDIO_OPTIONS,
     QualityPref,
     QUALITY_OPTIONS,
+    SourcePickMode,
     useAudioPref,
     useQualityPref,
+    useSourcePickMode,
 } from "@/lib/preferences"
 import { useProfilesQuery } from "@/lib/profiles/profiles"
 import { useRouter } from "@/lib/navigation"
@@ -78,6 +80,7 @@ export function NetflixSettings() {
             <Section icon={<LuPlay className="size-5" />} title={t("settings.playback", "Préférences de lecture")}>
                 <QualityPicker />
                 <AudioPicker />
+                <SourcePicker />
                 <p className="text-[10px] text-[--muted]/70 leading-relaxed pt-1">
                     {t(
                         "settings.playback_note",
@@ -431,6 +434,39 @@ function AudioPicker() {
             value={value}
             onChange={setValue}
         />
+    )
+}
+
+function SourcePicker() {
+    const { t } = useTranslation()
+    const [value, setValue] = useSourcePickMode()
+    // Localise the labels at render time — the constant module uses raw
+    // French strings as a fallback so the picker still works if i18n
+    // ever fails to initialise.
+    const localized = [
+        { value: "auto" as SourcePickMode, label: t("settings.source_auto", "Lecture automatique") },
+        { value: "manual" as SourcePickMode, label: t("settings.source_manual", "Choisir la source") },
+    ]
+    return (
+        <div className="space-y-1">
+            <PrefPills<SourcePickMode>
+                label={t("settings.source_pick", "Lecture des sources")}
+                options={localized}
+                value={value}
+                onChange={setValue}
+            />
+            <p className="text-[10px] text-[--muted]/70 leading-relaxed">
+                {value === "auto"
+                    ? t(
+                        "settings.source_auto_hint",
+                        "Notflix lance directement la meilleure source (cache TorBox + seeders + qualité). Tu peux toujours changer en cours de lecture.",
+                    )
+                    : t(
+                        "settings.source_manual_hint",
+                        "À chaque film/épisode, la liste complète des sources s'affiche et tu choisis celle à lancer.",
+                    )}
+            </p>
+        </div>
     )
 }
 

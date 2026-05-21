@@ -12,6 +12,18 @@ import { atomWithStorage } from "jotai/utils"
 export type QualityPref = "auto" | "4k" | "1080p" | "720p" | "sd"
 export type AudioPref = "auto" | "fr" | "vo"
 
+/**
+ * SourcePickMode controls what /watch does once Prowlarr returns the
+ * release list:
+ *
+ *   "auto"   — fire the top-ranked release immediately (current behaviour).
+ *              The user can still override via "Changer de source".
+ *   "manual" — always show the picker so the user chooses every time.
+ *              Useful when you care which version plays (right group,
+ *              right subs, right encode).
+ */
+export type SourcePickMode = "auto" | "manual"
+
 export const QUALITY_OPTIONS: { value: QualityPref; label: string }[] = [
     { value: "auto", label: "Auto (meilleure dispo)" },
     { value: "4k", label: "4K / 2160p" },
@@ -26,8 +38,14 @@ export const AUDIO_OPTIONS: { value: AudioPref; label: string }[] = [
     { value: "vo", label: "Version originale" },
 ]
 
+export const SOURCE_PICK_OPTIONS: { value: SourcePickMode; label: string }[] = [
+    { value: "auto", label: "Lecture automatique" },
+    { value: "manual", label: "Choisir la source" },
+]
+
 export const qualityPrefAtom = atomWithStorage<QualityPref>("notflix-pref-quality", "auto")
 export const audioPrefAtom = atomWithStorage<AudioPref>("notflix-pref-audio", "auto")
+export const sourcePickModeAtom = atomWithStorage<SourcePickMode>("notflix-pref-source-pick", "auto")
 
 export function useQualityPref() {
     return useAtom(qualityPrefAtom)
@@ -35,6 +53,10 @@ export function useQualityPref() {
 
 export function useAudioPref() {
     return useAtom(audioPrefAtom)
+}
+
+export function useSourcePickMode() {
+    return useAtom(sourcePickModeAtom)
 }
 
 /**
