@@ -677,12 +677,32 @@ function SubPrepPanel({
     onSkip: () => void
 }) {
     const { t } = useTranslation()
+    // Friendly label for the source language being extracted (e.g.
+    // "français", "anglais") — pulled from status.chosenLang which is
+    // an ISO-639 tag like "fre" / "eng".
+    const chosenLangName = React.useMemo(() => {
+        if (!status?.chosenLang) return ""
+        const code = normaliseSubLang(status.chosenLang)
+        return subLangNames[code] || status.chosenLang
+    }, [status?.chosenLang])
+
     const label = React.useMemo(() => {
         if (!status) return t("watch.sub_prep_starting", "Préparation des sous-titres...")
         switch (status.state) {
             case "picking":
                 return t("watch.sub_prep_picking", "Choix de la meilleure source de sous-titres...")
             case "extracting":
+                // Make the user-selected language explicit so it's
+                // visible we're only extracting ONE track, not all of
+                // them. Falls back to the generic label when chosenLang
+                // hasn't been set yet (race during the initial poll).
+                if (chosenLangName) {
+                    return t(
+                        "watch.sub_prep_extracting_lang",
+                        "Extraction de la piste {{lang}} depuis la vidéo…",
+                        { lang: chosenLangName },
+                    )
+                }
                 return t("watch.sub_prep_extracting", "Extraction des sous-titres depuis la vidéo...")
             case "translating":
                 return t(
@@ -699,7 +719,7 @@ function SubPrepPanel({
             default:
                 return t("watch.sub_prep_starting", "Préparation des sous-titres...")
         }
-    }, [status, t])
+    }, [status, t, chosenLangName])
 
     const rawProgress = status?.progress ?? 0
     const progress = Math.max(0, Math.min(100, rawProgress))

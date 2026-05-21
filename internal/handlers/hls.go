@@ -623,8 +623,35 @@ func (h *Handler) extractEmbeddedSubtitleWithProgress(
 		// -loglevel error nothing else writes there, so the scanner
 		// only sees progress lines.
 		"-progress", "pipe:2",
-		"-vn",
-		"-an",
+		// HTTP demuxer tuning — these MUST come before -i to apply
+		// to the input. The big ones:
+		//   - multiple_requests: keep the TCP connection open across
+		//     range requests, dramatically reducing handshake cost.
+		//   - http_seekable: tell ffmpeg the URL supports byte ranges
+		//     (TorBox does). Lets it skip past video/audio clusters
+		//     when only -map 0:s:N is requested.
+		//   - reconnect_*: TorBox's CDN sometimes drops idle
+		//     connections mid-extract. Auto-reconnect on transient
+		//     errors instead of bailing.
+		//   - rw_timeout: 30s read timeout in microseconds.
+		//   - probesize/analyzeduration: we already ffprobed; keep
+		//     ffmpeg's own probing minimal.
+		"-multiple_requests", "1",
+		"-http_seekable", "1",
+		"-reconnect", "1",
+		"-reconnect_streamed", "1",
+		"-reconnect_at_eof", "1",
+		"-reconnect_on_network_error", "1",
+		"-reconnect_on_http_error", "4xx,5xx",
+		"-reconnect_delay_max", "5",
+		"-rw_timeout", "30000000",
+		"-analyzeduration", "5M",
+		"-probesize", "10M",
+		// Lower the demuxer's per-stream buffer for the streams we
+		// drop. The `-discard nokey` for video is a hint that we
+		// don't need its full decoded packets — combined with -map
+		// (which doesn't select them) it lets the demuxer skim past
+		// video clusters fast.
 		"-i", sourceURL,
 		"-map", fmt.Sprintf("0:s:%d", streamIdx),
 		"-c:s", "webvtt",

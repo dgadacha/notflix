@@ -60,6 +60,7 @@
     "sub_prep_starting": "Preparing subtitles...",
     "sub_prep_picking": "Picking the best subtitle source...",
     "sub_prep_extracting": "Extracting subtitles from the video...",
+    "sub_prep_extracting_lang": "Extracting the {{lang}} track from the video…",
     "sub_prep_translating": "Translating subtitles via Claude...",
     "sub_prep_ready": "Subtitles ready, starting…",
     "sub_prep_failed": "Preparation failed — playing without subtitles.",

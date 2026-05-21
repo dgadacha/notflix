@@ -60,6 +60,7 @@
     "sub_prep_starting": "Préparation des sous-titres...",
     "sub_prep_picking": "Choix de la meilleure source de sous-titres...",
     "sub_prep_extracting": "Extraction des sous-titres depuis la vidéo...",
+    "sub_prep_extracting_lang": "Extraction de la piste {{lang}} depuis la vidéo…",
     "sub_prep_translating": "Traduction des sous-titres via Claude...",
     "sub_prep_ready": "Sous-titres prêts, lancement…",
     "sub_prep_failed": "Préparation échouée — lecture sans sous-titres.",
