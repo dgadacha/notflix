@@ -28,7 +28,8 @@ dev: setup ## Run frontend (43210) + backend ($(PORT)) together
 	  wait
 
 backend: ## Run only the Go backend
-	@$(GO) run main.go --datadir="$(DATADIR)"
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	  $(GO) run main.go --datadir="$(DATADIR)"
 
 frontend: ## Run only the web dev server
 	@cd notflix-web && $(NPM) run dev

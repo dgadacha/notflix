@@ -7,6 +7,10 @@ testdata/
 */.DS_Store
 .todo/
 
+# Local secrets (TMDB / TorBox / Prowlarr keys). Sourced by `make dev`
+# via the .env auto-load in the backend target.
+.env
+
 # Kuro tracks its own Dockerfile + .dockerignore (multi-stage build for the
 # k8s deploy on registry.gitlab.com/kidnar/kuro). Upstream seanime ignored
 # these — we re-add them here.
