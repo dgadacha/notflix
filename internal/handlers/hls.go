@@ -515,23 +515,75 @@ func (h *Handler) runSubPrep(sess *hlsSession, chosenIdx int, targetLang string,
 			out []byte
 			err error
 		)
-		// Live-update ffmpeg's reported position so the bar moves
-		// linearly with the source media.
-		onExtractProgress := func(pct float64) {
-			// ffmpeg reports out_time as a percentage of the source
-			// duration. Map [0,100] → [0, extractMax].
-			scaled := pct * extractMax / 100
+
+		// Two progress sources:
+		//   1. ffmpeg's `-progress pipe:2` out_time_ms — accurate but
+		//      doesn't tick until the first subtitle cue is emitted,
+		//      which for a remote MKV can take 30-90 s of scanning.
+		//   2. Elapsed-time heartbeat — synthetic linear progress
+		//      based on how long ffmpeg has been running, capped at
+		//      40% so it never overtakes a real ffmpeg report.
+		// They share the state, taking max(real, heartbeat).
+		extractStart := time.Now()
+		var (
+			lastReal      float64
+			extractProgMu sync.Mutex
+		)
+		// Expected extraction time for the synthetic estimate.
+		// 90 s is the median for a ~25 min anime episode on a fast
+		// LAN-to-CDN connection — close enough to feel "moving"
+		// without lying too hard.
+		const expectedExtractSec = 90.0
+
+		applyExtractProgress := func(real float64) {
+			extractProgMu.Lock()
+			if real > lastReal {
+				lastReal = real
+			}
+			elapsed := time.Since(extractStart).Seconds()
+			synthetic := (elapsed / expectedExtractSec) * 40 // cap at 40%
+			if synthetic > 40 {
+				synthetic = 40
+			}
+			combined := lastReal
+			if synthetic > combined {
+				combined = synthetic
+			}
+			extractProgMu.Unlock()
+			scaled := combined * extractMax / 100
 			if scaled > extractMax {
 				scaled = extractMax
 			}
 			setState("extracting", scaled, "")
 		}
+
+		// Heartbeat ticker — drives synthetic progress between
+		// ffmpeg's actual progress emits.
+		heartbeat := time.NewTicker(500 * time.Millisecond)
+		hbDone := make(chan struct{})
+		go func() {
+			for {
+				select {
+				case <-hbDone:
+					return
+				case <-heartbeat.C:
+					applyExtractProgress(0) // 0 ⇒ keep lastReal, only synthetic moves
+				}
+			}
+		}()
+
+		onExtractProgress := func(pct float64) {
+			applyExtractProgress(pct)
+		}
+
 		if track.Source == "external" {
 			ext := sess.externalSubs[track.Index]
 			out, err = h.extractExternalSubtitleVTT(ctx, ext.URL)
 		} else {
 			out, err = h.extractEmbeddedSubtitleWithProgress(ctx, sess.url, track.Index, sess.duration, onExtractProgress)
 		}
+		heartbeat.Stop()
+		close(hbDone)
 		cancel()
 		if err != nil || len(out) == 0 {
 			// Log the FULL error so the operator can see whether
