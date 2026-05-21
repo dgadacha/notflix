@@ -34,6 +34,16 @@ type Session struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// Setting is a single key/value pair used to store admin-mutable server
+// configuration (TMDB / TorBox / Prowlarr keys). Env vars are still the
+// initial fallback; if a setting is written from the admin UI the DB
+// value overrides the env on subsequent boots.
+type Setting struct {
+	Key       string    `gorm:"primarykey;size:64" json:"key"`
+	Value     string    `gorm:"column:value;type:text" json:"value"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
 // +---------------------+
 // |     Profiles        |
 // +---------------------+

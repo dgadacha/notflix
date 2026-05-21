@@ -17,7 +17,15 @@
  */
 import { LanguageSwitcher } from "@/components/shared/language-switcher"
 import { cn } from "@/components/ui/core/styling"
-import { useChangeOwnPassword, useCurrentUser, useLogout } from "@/lib/auth"
+import {
+    ServerConfig,
+    UpdateServerConfigBody,
+    useChangeOwnPassword,
+    useCurrentUser,
+    useLogout,
+    useServerConfig,
+    useUpdateServerConfig,
+} from "@/lib/auth"
 import {
     AudioPref,
     AUDIO_OPTIONS,
@@ -37,7 +45,7 @@ import {
     BiShield,
     BiUser,
 } from "react-icons/bi"
-import { LuArrowRight, LuGlobe, LuPlay, LuUsers } from "react-icons/lu"
+import { LuArrowRight, LuGlobe, LuKey, LuPlay, LuServer, LuUsers } from "react-icons/lu"
 
 export function NetflixSettings() {
     const { t } = useTranslation()
@@ -118,6 +126,12 @@ export function NetflixSettings() {
                         cta={t("settings.admin_open", "Ouvrir")}
                         onClick={() => router.push("/admin/users")}
                     />
+                </Section>
+            )}
+
+            {me?.isAdmin && (
+                <Section icon={<LuServer className="size-5" />} title={t("settings.server", "Configuration serveur")}>
+                    <ServerConfigEditor />
                 </Section>
             )}
 
@@ -457,6 +471,346 @@ function PrefPills<T extends string>({
                 })}
             </div>
         </div>
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Configuration serveur (admin-only) — TMDB / TorBox / Prowlarr credentials
+// ---------------------------------------------------------------------------
+//
+// Each field is rendered as a row showing the masked tail (****abcd) plus
+// "env" or "DB" pill telling the admin where the value currently comes from.
+// Editing replaces the row with an input + Save/Cancel. The save sends only
+// the field being edited so other rows aren't disturbed (the PUT endpoint
+// supports partial bodies). An empty save deliberately CLEARS the override.
+
+function ServerConfigEditor() {
+    const { t } = useTranslation()
+    const { data, isLoading, error } = useServerConfig()
+
+    if (isLoading) {
+        return <p className="text-[--muted] text-sm">{t("common.loading", "Chargement…")}</p>
+    }
+    if (error || !data) {
+        return (
+            <p className="text-red-300 text-xs bg-red-500/10 border border-red-500/30 rounded-md px-3 py-2">
+                {error?.message || t("settings.server_load_error", "Impossible de charger la configuration.")}
+            </p>
+        )
+    }
+
+    return (
+        <div className="space-y-3">
+            <p className="text-[10px] text-[--muted]/70 leading-relaxed">
+                {t(
+                    "settings.server_hint",
+                    "Modifie ici les clés API utilisées par le backend. La valeur est appliquée à chaud — pas besoin de redémarrer. Les variables d'environnement (NOTFLIX_*) restent le fallback initial.",
+                )}
+            </p>
+
+            <ServerSecretRow
+                label="TMDB"
+                description={t("settings.server_tmdb", "Clé API pour le catalogue (themoviedb.org).")}
+                field={data.tmdbApiKey}
+                bodyKey="tmdbApiKey"
+            />
+            <ServerSecretRow
+                label="TorBox"
+                description={t("settings.server_torbox", "Clé API debrid (torbox.app).")}
+                field={data.torboxApiKey}
+                bodyKey="torboxApiKey"
+            />
+            <ServerUrlRow
+                label={t("settings.server_prowlarr_url", "URL Prowlarr")}
+                description={t(
+                    "settings.server_prowlarr_url_hint",
+                    "Adresse de ton instance Prowlarr (ex: http://127.0.0.1:9696).",
+                )}
+                value={data.prowlarrUrl.value}
+                source={data.prowlarrUrl.source}
+                bodyKey="prowlarrUrl"
+            />
+            <ServerSecretRow
+                label={t("settings.server_prowlarr_key", "Clé API Prowlarr")}
+                description={t(
+                    "settings.server_prowlarr_key_hint",
+                    "Visible dans Prowlarr → Settings → General → API Key.",
+                )}
+                field={data.prowlarrApiKey}
+                bodyKey="prowlarrApiKey"
+            />
+        </div>
+    )
+}
+
+function ServerSecretRow({
+    label,
+    description,
+    field,
+    bodyKey,
+}: {
+    label: string
+    description: string
+    field: ServerConfig["tmdbApiKey"]
+    bodyKey: keyof UpdateServerConfigBody
+}) {
+    const { t } = useTranslation()
+    const [editing, setEditing] = React.useState(false)
+    const [draft, setDraft] = React.useState("")
+    const [reveal, setReveal] = React.useState(false)
+    const update = useUpdateServerConfig()
+
+    const onSave = () => {
+        if (update.isPending) return
+        update.mutate(
+            { [bodyKey]: draft } as UpdateServerConfigBody,
+            {
+                onSuccess: () => {
+                    setEditing(false)
+                    setDraft("")
+                    setReveal(false)
+                },
+            },
+        )
+    }
+
+    const onCancel = () => {
+        setEditing(false)
+        setDraft("")
+        setReveal(false)
+        update.reset()
+    }
+
+    return (
+        <div className="bg-black/30 border border-white/10 rounded-md p-3 lg:p-3.5 space-y-2">
+            <div className="flex items-start justify-between gap-3">
+                <div className="flex-1 min-w-0">
+                    <p className="text-sm text-white font-semibold flex items-center gap-2">
+                        <LuKey className="size-3.5 text-[--muted]" />
+                        {label}
+                        <SourcePill field={field} />
+                    </p>
+                    <p className="text-[--muted] text-xs leading-relaxed">{description}</p>
+                </div>
+                {!editing && (
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setEditing(true)
+                            update.reset()
+                        }}
+                        className="px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider rounded-md bg-white/10 hover:bg-white/15 text-white shrink-0 transition-colors"
+                    >
+                        {field.isSet
+                            ? t("settings.server_replace", "Modifier")
+                            : t("settings.server_set", "Définir")}
+                    </button>
+                )}
+            </div>
+
+            {!editing && field.isSet && (
+                <p className="font-mono text-[11px] text-[--muted]">{field.masked}</p>
+            )}
+
+            {editing && (
+                <div className="space-y-2 pt-1">
+                    <div className="flex items-center gap-2 px-3 py-2 bg-white/5 border border-white/10 rounded-md focus-within:border-brand-500/60 transition-colors">
+                        <LuKey className="size-4 text-[--muted] shrink-0" />
+                        <input
+                            type={reveal ? "text" : "password"}
+                            value={draft}
+                            onChange={(e) => setDraft(e.target.value)}
+                            autoFocus
+                            spellCheck={false}
+                            autoComplete="off"
+                            placeholder={
+                                field.isSet
+                                    ? t("settings.server_keep_blank", "Laisser vide pour effacer")
+                                    : t("settings.server_paste", "Coller la nouvelle clé…")
+                            }
+                            className="w-full bg-transparent text-white outline-none text-sm font-mono"
+                        />
+                        <button
+                            type="button"
+                            onClick={() => setReveal((v) => !v)}
+                            className="text-[--muted] hover:text-white text-[10px] uppercase tracking-wider font-bold shrink-0"
+                        >
+                            {reveal ? t("settings.server_hide", "Masquer") : t("settings.server_show", "Afficher")}
+                        </button>
+                    </div>
+
+                    {update.error && (
+                        <p className="text-red-300 text-xs bg-red-500/10 border border-red-500/30 rounded-md px-3 py-2">
+                            {update.error.message}
+                        </p>
+                    )}
+
+                    <div className="flex justify-end gap-2">
+                        <button
+                            type="button"
+                            onClick={onCancel}
+                            className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider rounded-md bg-white/5 hover:bg-white/10 text-white transition-colors"
+                        >
+                            {t("common.cancel", "Annuler")}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={onSave}
+                            disabled={update.isPending}
+                            className={cn(
+                                "px-3 py-1.5 text-xs font-bold uppercase tracking-wider rounded-md transition-colors",
+                                "bg-brand-500 hover:bg-brand-600 text-white",
+                                "disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-brand-500",
+                            )}
+                        >
+                            {update.isPending
+                                ? t("common.saving", "Enregistrement…")
+                                : t("settings.password_save", "Enregistrer")}
+                        </button>
+                    </div>
+                </div>
+            )}
+        </div>
+    )
+}
+
+function ServerUrlRow({
+    label,
+    description,
+    value,
+    source,
+    bodyKey,
+}: {
+    label: string
+    description: string
+    value: string
+    source: "env" | "db"
+    bodyKey: keyof UpdateServerConfigBody
+}) {
+    const { t } = useTranslation()
+    const [editing, setEditing] = React.useState(false)
+    const [draft, setDraft] = React.useState("")
+    const update = useUpdateServerConfig()
+
+    const onStart = () => {
+        setDraft(value)
+        setEditing(true)
+        update.reset()
+    }
+
+    const onSave = () => {
+        if (update.isPending) return
+        update.mutate(
+            { [bodyKey]: draft.trim() } as UpdateServerConfigBody,
+            {
+                onSuccess: () => {
+                    setEditing(false)
+                    setDraft("")
+                },
+            },
+        )
+    }
+
+    return (
+        <div className="bg-black/30 border border-white/10 rounded-md p-3 lg:p-3.5 space-y-2">
+            <div className="flex items-start justify-between gap-3">
+                <div className="flex-1 min-w-0">
+                    <p className="text-sm text-white font-semibold flex items-center gap-2">
+                        <LuServer className="size-3.5 text-[--muted]" />
+                        {label}
+                        <SourcePill field={{ isSet: value !== "", source }} />
+                    </p>
+                    <p className="text-[--muted] text-xs leading-relaxed">{description}</p>
+                </div>
+                {!editing && (
+                    <button
+                        type="button"
+                        onClick={onStart}
+                        className="px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider rounded-md bg-white/10 hover:bg-white/15 text-white shrink-0 transition-colors"
+                    >
+                        {value ? t("settings.server_replace", "Modifier") : t("settings.server_set", "Définir")}
+                    </button>
+                )}
+            </div>
+
+            {!editing && value && (
+                <p className="font-mono text-[11px] text-[--muted] break-all">{value}</p>
+            )}
+
+            {editing && (
+                <div className="space-y-2 pt-1">
+                    <div className="flex items-center gap-2 px-3 py-2 bg-white/5 border border-white/10 rounded-md focus-within:border-brand-500/60 transition-colors">
+                        <input
+                            type="text"
+                            value={draft}
+                            onChange={(e) => setDraft(e.target.value)}
+                            autoFocus
+                            spellCheck={false}
+                            autoComplete="off"
+                            placeholder="http://127.0.0.1:9696"
+                            className="w-full bg-transparent text-white outline-none text-sm font-mono"
+                        />
+                    </div>
+
+                    {update.error && (
+                        <p className="text-red-300 text-xs bg-red-500/10 border border-red-500/30 rounded-md px-3 py-2">
+                            {update.error.message}
+                        </p>
+                    )}
+
+                    <div className="flex justify-end gap-2">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setEditing(false)
+                                setDraft("")
+                                update.reset()
+                            }}
+                            className="px-3 py-1.5 text-xs font-bold uppercase tracking-wider rounded-md bg-white/5 hover:bg-white/10 text-white transition-colors"
+                        >
+                            {t("common.cancel", "Annuler")}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={onSave}
+                            disabled={update.isPending}
+                            className={cn(
+                                "px-3 py-1.5 text-xs font-bold uppercase tracking-wider rounded-md transition-colors",
+                                "bg-brand-500 hover:bg-brand-600 text-white",
+                                "disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-brand-500",
+                            )}
+                        >
+                            {update.isPending
+                                ? t("common.saving", "Enregistrement…")
+                                : t("settings.password_save", "Enregistrer")}
+                        </button>
+                    </div>
+                </div>
+            )}
+        </div>
+    )
+}
+
+function SourcePill({ field }: { field: { isSet: boolean; source: "env" | "db" } }) {
+    const { t } = useTranslation()
+    if (!field.isSet) {
+        return (
+            <span className="text-[9px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-300">
+                {t("settings.server_source_unset", "non défini")}
+            </span>
+        )
+    }
+    if (field.source === "db") {
+        return (
+            <span className="text-[9px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-brand-500/20 text-brand-300">
+                {t("settings.server_source_db", "UI")}
+            </span>
+        )
+    }
+    return (
+        <span className="text-[9px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-white/10 text-[--muted]">
+            {t("settings.server_source_env", "env")}
+        </span>
     )
 }
 

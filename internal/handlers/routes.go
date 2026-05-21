@@ -44,6 +44,11 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	users.DELETE("/:id", h.HandleDeleteUser)
 	users.POST("/:id/password", h.HandleResetUserPassword)
 
+	// Admin — server config (TMDB / TorBox / Prowlarr credentials).
+	admin := v1.Group("/admin", h.RequireAdmin)
+	admin.GET("/config", h.HandleGetServerConfig)
+	admin.PUT("/config", h.HandleUpdateServerConfig)
+
 	// TMDB image cache — disk-backed proxy for image.tmdb.org so posters,
 	// backdrops and stills are served at LAN speed and survive browser
 	// cache evictions. Registered BEFORE the catch-all /tmdb/* so the

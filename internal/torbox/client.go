@@ -27,14 +27,17 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const baseURL = "https://api.torbox.app/v1/api"
 
 type Client struct {
+	http *http.Client
+
+	mu     sync.RWMutex
 	apiKey string
-	http   *http.Client
 }
 
 func NewClient(apiKey string) *Client {
@@ -44,7 +47,26 @@ func NewClient(apiKey string) *Client {
 	}
 }
 
-func (c *Client) HasKey() bool { return c.apiKey != "" }
+func (c *Client) HasKey() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.apiKey != ""
+}
+
+// SetAPIKey swaps the bearer token at runtime. Subsequent requests use
+// the new key; no in-flight request is canceled (they'll complete with
+// the value they captured at do() entry).
+func (c *Client) SetAPIKey(apiKey string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.apiKey = apiKey
+}
+
+func (c *Client) currentKey() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.apiKey
+}
 
 // -----------------------------------------------------------------------------
 // Response envelope — TorBox wraps every response in {"success":bool,"data":...}
@@ -58,14 +80,15 @@ type envelope struct {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body io.Reader, contentType string) (json.RawMessage, error) {
-	if c.apiKey == "" {
+	apiKey := c.currentKey()
+	if apiKey == "" {
 		return nil, errors.New("torbox: API key not configured")
 	}
 	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, body)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -292,7 +315,7 @@ func (c *Client) ListTorrents(ctx context.Context) ([]Torrent, error) {
 // failing.
 func (c *Client) RequestDownloadURL(ctx context.Context, torrentID, fileID int) (string, error) {
 	q := url.Values{}
-	q.Set("token", c.apiKey)
+	q.Set("token", c.currentKey())
 	q.Set("torrent_id", strconv.Itoa(torrentID))
 	if fileID >= 0 {
 		q.Set("file_id", strconv.Itoa(fileID))

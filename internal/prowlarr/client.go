@@ -16,13 +16,16 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
 type Client struct {
+	http *http.Client
+
+	mu      sync.RWMutex
 	baseURL string
 	apiKey  string
-	http    *http.Client
 }
 
 // NewClient — baseURL is Prowlarr's root (e.g. http://127.0.0.1:9696),
@@ -35,15 +38,34 @@ func NewClient(baseURL, apiKey string) *Client {
 	}
 }
 
+// SetConfig hot-swaps both the base URL and the API key. Used by the
+// settings UI to apply changes without restarting the binary; the
+// release-cache (in handlers/prowlarr.go) keys responses by search
+// terms, not by Prowlarr endpoint, so old entries remain coherent.
+func (c *Client) SetConfig(baseURL, apiKey string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.baseURL = strings.TrimRight(baseURL, "/")
+	c.apiKey = apiKey
+}
+
+func (c *Client) currentConfig() (string, string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.baseURL, c.apiKey
+}
+
 func (c *Client) Configured() bool {
-	return c.baseURL != "" && c.apiKey != ""
+	baseURL, apiKey := c.currentConfig()
+	return baseURL != "" && apiKey != ""
 }
 
 func (c *Client) do(ctx context.Context, method, path string, q url.Values, out any) error {
-	if !c.Configured() {
+	baseURL, apiKey := c.currentConfig()
+	if baseURL == "" || apiKey == "" {
 		return fmt.Errorf("prowlarr: not configured (NOTFLIX_PROWLARR_URL + NOTFLIX_PROWLARR_API_KEY)")
 	}
-	u := c.baseURL + path
+	u := baseURL + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
@@ -51,7 +73,7 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, out 
 	if err != nil {
 		return err
 	}
-	req.Header.Set("X-Api-Key", c.apiKey)
+	req.Header.Set("X-Api-Key", apiKey)
 	req.Header.Set("Accept", "application/json")
 
 	res, err := c.http.Do(req)

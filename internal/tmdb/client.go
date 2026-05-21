@@ -25,11 +25,13 @@ const (
 )
 
 type Client struct {
-	apiKey string
-	http   *http.Client
+	http *http.Client
 
-	mu    sync.RWMutex
-	cache map[string]cachedResponse
+	// mu protects apiKey + cache. apiKey is mutable so the admin can
+	// rotate it from the settings UI without restarting the binary.
+	mu     sync.RWMutex
+	apiKey string
+	cache  map[string]cachedResponse
 }
 
 type cachedResponse struct {
@@ -47,14 +49,31 @@ func NewClient(apiKey string) *Client {
 	}
 }
 
-func (c *Client) HasKey() bool { return c.apiKey != "" }
+func (c *Client) HasKey() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.apiKey != ""
+}
+
+// SetAPIKey rotates the credential at runtime and drops the response
+// cache so subsequent requests don't return a response baked with the
+// old key in its URL fingerprint.
+func (c *Client) SetAPIKey(apiKey string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.apiKey = apiKey
+	c.cache = make(map[string]cachedResponse)
+}
 
 // Get hits TMDB with the given path + extra query params, returns the raw
 // JSON body. 30 s TTL cache keyed by full URL — discover endpoints get hit
 // multiple times per session (one per row on the home page) and they
 // barely change, so caching is a huge net win.
 func (c *Client) Get(ctx context.Context, path string, params url.Values) ([]byte, error) {
-	if c.apiKey == "" {
+	c.mu.RLock()
+	apiKey := c.apiKey
+	c.mu.RUnlock()
+	if apiKey == "" {
 		return nil, fmt.Errorf("tmdb: API key not configured (NOTFLIX_TMDB_API_KEY)")
 	}
 
@@ -62,7 +81,7 @@ func (c *Client) Get(ctx context.Context, path string, params url.Values) ([]byt
 	for k, v := range params {
 		q[k] = v
 	}
-	q.Set("api_key", c.apiKey)
+	q.Set("api_key", apiKey)
 	if q.Get("language") == "" {
 		q.Set("language", defaultLang)
 	}

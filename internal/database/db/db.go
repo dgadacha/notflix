@@ -26,6 +26,7 @@ func Open(path string) (*Database, error) {
 	if err := g.AutoMigrate(
 		&models.User{},
 		&models.Session{},
+		&models.Setting{},
 		&models.Profile{},
 		&models.ProfileWatchHistory{},
 		&models.ProfileListEntry{},
@@ -279,4 +280,56 @@ func (db *Database) DeleteSession(token string) error {
 
 func (db *Database) ReapExpiredSessions() error {
 	return db.gormdb.Where("expires_at <= ?", time.Now()).Delete(&models.Session{}).Error
+}
+
+// -----------------------------------------------------------------------------
+// Settings (server-side admin config, key/value)
+// -----------------------------------------------------------------------------
+
+// GetSetting returns the value for the given key, or empty string + nil
+// error if the key has never been written. Callers can treat absence and
+// "" identically (the empty string is itself a valid "unset" value).
+func (db *Database) GetSetting(key string) (string, error) {
+	var s models.Setting
+	err := db.gormdb.Where("key = ?", key).First(&s).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return s.Value, nil
+}
+
+// SetSetting upserts a value. An empty value is stored as-is so the admin
+// can explicitly "clear" a key from the UI; the get path treats both
+// missing rows and empty rows as unset.
+func (db *Database) SetSetting(key, value string) error {
+	return db.gormdb.
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "key"}},
+			DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
+		}).
+		Create(&models.Setting{Key: key, Value: value, UpdatedAt: time.Now()}).Error
+}
+
+// GetSettings reads several keys in one query. Returns a map; keys that
+// aren't in the DB get an empty string entry so callers can iterate
+// safely without nil checks.
+func (db *Database) GetSettings(keys []string) (map[string]string, error) {
+	out := make(map[string]string, len(keys))
+	for _, k := range keys {
+		out[k] = ""
+	}
+	if len(keys) == 0 {
+		return out, nil
+	}
+	var rows []models.Setting
+	if err := db.gormdb.Where("key IN ?", keys).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.Key] = r.Value
+	}
+	return out, nil
 }

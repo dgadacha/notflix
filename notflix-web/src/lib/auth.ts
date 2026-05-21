@@ -177,3 +177,78 @@ export function useResetUserPassword() {
         },
     })
 }
+
+// --------------------------------------------------------------------------
+// Admin: server config (TMDB / TorBox / Prowlarr credentials)
+// --------------------------------------------------------------------------
+
+/** What the GET endpoint returns for each secret field. */
+export type ServerSecretField = {
+    isSet: boolean
+    /** Last 4 chars revealed; rest stubbed out. Empty when not set. */
+    masked: string
+    /** "env" = still reading the NOTFLIX_* env var, "db" = admin saved an override. */
+    source: "env" | "db"
+}
+
+export type ServerConfig = {
+    tmdbApiKey: ServerSecretField
+    torboxApiKey: ServerSecretField
+    prowlarrApiKey: ServerSecretField
+    /** Base URL isn't a secret — surfaced verbatim. */
+    prowlarrUrl: {
+        value: string
+        isSet: boolean
+        source: "env" | "db"
+    }
+}
+
+const QK_SERVER_CONFIG = ["admin", "config"] as const
+
+export function useServerConfig() {
+    return useQuery<ServerConfig>({
+        queryKey: [...QK_SERVER_CONFIG],
+        queryFn: async () => {
+            const r = await fetch("/api/v1/admin/config")
+            if (!r.ok) throw new Error(`config ${r.status}`)
+            const j = await r.json()
+            return j.data as ServerConfig
+        },
+        // The keys rarely change — re-read on demand only.
+        staleTime: 60_000,
+    })
+}
+
+/**
+ * Partial update — only the fields present in `body` are touched.
+ * Passing an empty string explicitly CLEARS that key (the next boot
+ * falls back to the env var, or becomes unset). Passing `undefined`
+ * leaves the current value untouched.
+ */
+export type UpdateServerConfigBody = {
+    tmdbApiKey?: string
+    torboxApiKey?: string
+    prowlarrUrl?: string
+    prowlarrApiKey?: string
+}
+
+export function useUpdateServerConfig() {
+    const qc = useQueryClient()
+    return useMutation<boolean, Error, UpdateServerConfigBody>({
+        mutationFn: async (body) => {
+            const r = await fetch("/api/v1/admin/config", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            })
+            if (!r.ok) {
+                const j = (await r.json().catch(() => ({}))) as { error?: string }
+                throw new Error(j.error || "Sauvegarde impossible")
+            }
+            return true
+        },
+        onSuccess: () => {
+            qc.invalidateQueries({ queryKey: [...QK_SERVER_CONFIG] })
+        },
+    })
+}
