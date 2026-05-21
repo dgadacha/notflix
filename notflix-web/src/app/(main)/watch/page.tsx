@@ -631,20 +631,31 @@ function Player({
 
     // Decide whether to route through the ffmpeg transmux. Priority:
     //
-    //   1. If the backend's ffprobe identified the actual audio codec,
-    //      trust it. "aac" + AAC variants (audio file may say "aac_he"
-    //      etc.) → direct stream → full seek. Anything else → transmux.
+    //   1. ffprobe identified the codec → trust it. "aac" / "aac_he"
+    //      etc. → direct stream → full seek. Anything else → transmux.
     //
-    //   2. If probing failed (empty string), fall back to the release-
-    //      name heuristic: assume non-AAC unless the title says AAC.
-    //      This is the conservative path — we'd rather double-stream
-    //      than play muted.
+    //   2. ffprobe failed (empty string) → prefer the direct URL so
+    //      seek works. If the audio turns out to be silent, the user's
+    //      "Changer de source" escape hatch lets them switch to a
+    //      different release. (Previously we defaulted to transmux on
+    //      probe failure — Dylan rightly noted that costs seek for
+    //      every probe failure, even on AAC files where probe just
+    //      didn't manage to talk to the CDN in time.)
     const needsTransmux = audioCodec
         ? !audioCodec.startsWith("aac")
-        : releaseNeedsTransmux(releaseTitle)
+        : false
     const videoSrc = needsTransmux
         ? `/api/v1/stream/transmux?url=${encodeURIComponent(src)}`
         : src
+
+    // One-line console hint so debugging "why no seek?" / "why no
+    // audio?" is a Cmd-Shift-I away.
+    React.useEffect(() => {
+        console.info(
+            `[Notflix] audioCodec=${audioCodec || "(probe failed)"} → ` +
+            `${needsTransmux ? "TRANSMUX (no seek)" : "DIRECT (full seek)"}`,
+        )
+    }, [audioCodec, needsTransmux])
 
     // Picture-in-Picture on tab blur — Netflix-style "keep playing while I
     // check Slack". Restored when the user comes back.

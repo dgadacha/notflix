@@ -276,6 +276,10 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 // We only need the audio side — the video stream is always copied
 // verbatim downstream — so we limit ffprobe to audio streams to keep
 // the output minimal.
+//
+// stderr is captured separately so a 404 / 403 / range-not-satisfiable
+// from the CDN shows up in the server log explicitly, not just as
+// "exit status 1".
 func probeAudioCodec(parent context.Context, url string) string {
 	ctx, cancel := context.WithTimeout(parent, 6*time.Second)
 	defer cancel()
@@ -286,12 +290,16 @@ func probeAudioCodec(parent context.Context, url string) string {
 		"-of", "default=noprint_wrappers=1:nokey=1",
 		url,
 	)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		log.Printf("ffprobe: %v", err)
+		log.Printf("ffprobe FAIL: %v | stderr: %s", err, strings.TrimSpace(stderr.String()))
 		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(string(out)))
+	codec := strings.ToLower(strings.TrimSpace(string(out)))
+	log.Printf("ffprobe OK: audio codec = %q", codec)
+	return codec
 }
 
 // HandleTorBoxList — for an admin "manage my queue" view.
