@@ -509,47 +509,30 @@ func (h *Handler) runSubPrep(sess *hlsSession, chosenIdx int, targetLang string,
 		raw = cached
 		setState("extracting", extractMax, "")
 	} else {
+		// Phase A: parallel-download the source to local disk (0-45%).
+		// Phase B: ffmpeg-extract from the local file (45-50%).
+		//
+		// This replaces the previous "ffmpeg over HTTP" path which was
+		// bandwidth-bound by a single TCP connection (2-3 min on
+		// TorBox). Eight concurrent range requests saturate the LAN
+		// pipe and bring the same download to 15-45 s; the local
+		// ffmpeg extract that follows is disk-speed (~2-5 s).
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		setState("extracting", 1, "")
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		var (
-			out []byte
-			err error
-		)
 
-		// Two progress sources:
-		//   1. ffmpeg's `-progress pipe:2` out_time_ms — accurate but
-		//      doesn't tick until the first subtitle cue is emitted,
-		//      which for a remote MKV can take 30-90 s of scanning.
-		//   2. Elapsed-time heartbeat — synthetic linear progress
-		//      based on how long ffmpeg has been running, capped at
-		//      40% so it never overtakes a real ffmpeg report.
-		// They share the state, taking max(real, heartbeat).
-		extractStart := time.Now()
 		var (
-			lastReal      float64
-			extractProgMu sync.Mutex
+			out      []byte
+			err      error
+			progMu   sync.Mutex
+			progress float64
 		)
-		// Expected extraction time for the synthetic estimate.
-		// 90 s is the median for a ~25 min anime episode on a fast
-		// LAN-to-CDN connection — close enough to feel "moving"
-		// without lying too hard.
-		const expectedExtractSec = 90.0
-
-		applyExtractProgress := func(real float64) {
-			extractProgMu.Lock()
-			if real > lastReal {
-				lastReal = real
+		applyProgress := func(p float64) {
+			progMu.Lock()
+			if p > progress {
+				progress = p
 			}
-			elapsed := time.Since(extractStart).Seconds()
-			synthetic := (elapsed / expectedExtractSec) * 40 // cap at 40%
-			if synthetic > 40 {
-				synthetic = 40
-			}
-			combined := lastReal
-			if synthetic > combined {
-				combined = synthetic
-			}
-			extractProgMu.Unlock()
+			combined := progress
+			progMu.Unlock()
 			scaled := combined * extractMax / 100
 			if scaled > extractMax {
 				scaled = extractMax
@@ -557,44 +540,45 @@ func (h *Handler) runSubPrep(sess *hlsSession, chosenIdx int, targetLang string,
 			setState("extracting", scaled, "")
 		}
 
-		// Heartbeat ticker — drives synthetic progress between
-		// ffmpeg's actual progress emits.
-		heartbeat := time.NewTicker(500 * time.Millisecond)
-		hbDone := make(chan struct{})
-		go func() {
-			for {
-				select {
-				case <-hbDone:
-					return
-				case <-heartbeat.C:
-					applyExtractProgress(0) // 0 ⇒ keep lastReal, only synthetic moves
-				}
-			}
-		}()
-
-		onExtractProgress := func(pct float64) {
-			applyExtractProgress(pct)
-		}
-
 		if track.Source == "external" {
+			// Sidecar files are tiny (KB-MB) — no need for the
+			// parallel-download path, the single-stream ffmpeg-over-HTTP
+			// completes in seconds.
 			ext := sess.externalSubs[track.Index]
 			out, err = h.extractExternalSubtitleVTT(ctx, ext.URL)
 		} else {
-			out, err = h.extractEmbeddedSubtitleWithProgress(ctx, sess.url, track.Index, sess.duration, onExtractProgress)
+			// Local-file extraction path.
+			//   Stage 1 (0-90% of "extract"): download source in parallel.
+			//   Stage 2 (90-100%): ffmpeg extract from local file.
+			localPath, dlErr := h.ensureLocalSource(ctx, sess.url, func(downloaded, total int64) {
+				if total <= 0 {
+					return
+				}
+				pct := float64(downloaded) / float64(total) * 100 * 0.9 // map to 0-90
+				applyProgress(pct)
+			})
+			if dlErr != nil {
+				log.Printf("hls prep: parallel download failed, falling back to ffmpeg-over-http: %v", dlErr)
+				// Fall back to the remote ffmpeg path so we still
+				// produce SOMETHING. Slower but works without local
+				// disk space / when the CDN refuses ranges.
+				out, err = h.extractEmbeddedSubtitleWithProgress(ctx, sess.url, track.Index, sess.duration, func(pct float64) {
+					applyProgress(pct * 0.95)
+				})
+			} else {
+				applyProgress(90)
+				out, err = h.extractEmbeddedSubtitleWithProgress(ctx, localPath, track.Index, sess.duration, func(pct float64) {
+					applyProgress(90 + pct*0.10) // map 0-100% → 90-100%
+				})
+			}
 		}
-		heartbeat.Stop()
-		close(hbDone)
 		cancel()
 		if err != nil || len(out) == 0 {
-			// Log the FULL error so the operator can see whether
-			// it's a missing ffmpeg flag, a network drop, a
-			// 401/403 from TorBox, …
 			log.Printf("hls prep: extract failed for session %s (track %d, lang %q): %v",
 				sess.id, track.Index, track.Language, err)
 			msg := "extraction failed"
 			if err != nil {
 				msg = err.Error()
-				// Truncate to a sane length for the UI.
 				if len(msg) > 200 {
 					msg = msg[:200] + "…"
 				}
