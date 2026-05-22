@@ -1,14 +1,20 @@
 /**
  * Generic error panel — used by AppErrorBoundary, NotFound, etc.
  *
- * Kept under the legacy `luffy-error` name (lots of importers) but the
- * Luffy / One Piece mascot was retired with Phase 3g rebrand. The panel
- * is now a sober Notflix-N logo with a red glow, matching the rest of
- * the app's visual language.
+ * Kept under the legacy `luffy-error` name (lots of importers). The
+ * iconography has gone through phases:
+ *   - originally a Luffy / One Piece mascot (Seanime upstream)
+ *   - then a Notflix-N logo with red glow (Phase 3g rebrand)
+ *   - now a sober exclamation icon — the N here was flashing during
+ *     route transitions when a query throws transiently, which the
+ *     user experienced as the "gros N qui apparait des fois". Error
+ *     panels shouldn't reuse the brand mark anyway; an error icon is
+ *     the standard affordance.
  */
 import { Button } from "@/components/ui/button/button"
 import { cn } from "@/components/ui/core/styling"
 import React from "react"
+import { BiErrorCircle } from "react-icons/bi"
 
 interface LuffyErrorProps {
     children?: React.ReactNode
@@ -27,22 +33,13 @@ export const LuffyError: React.FC<LuffyErrorProps> = (props) => {
             <div
                 data-luffy-error-image-container
                 className={cn(
-                    "relative size-24 lg:size-28 rounded-2xl",
-                    "bg-[#0a0a0a] border border-white/5",
-                    "shadow-[0_0_60px_-15px_rgba(229,9,20,0.6)]",
-                    "flex items-center justify-center overflow-hidden",
+                    "relative size-20 lg:size-24 rounded-2xl",
+                    "bg-[#0a0a0a] border border-red-500/30",
+                    "flex items-center justify-center",
                     imageContainerClass,
                 )}
             >
-                {/* Notflix N mark — same shape as public/notflix-logo.svg
-                    but inlined here so the error panel renders even if
-                    the static asset can't be loaded. */}
-                <svg viewBox="0 0 100 100" className="size-16 lg:size-20" role="img" aria-label="Notflix">
-                    <path
-                        fill="#E50914"
-                        d="M22 16 L38 16 L62 68 L62 16 L78 16 L78 84 L62 84 L38 32 L38 84 L22 84 Z"
-                    />
-                </svg>
+                <BiErrorCircle className="size-10 lg:size-12 text-red-400" aria-hidden />
             </div>
 
             <div data-luffy-error-content className="text-center space-y-3 max-w-md">
