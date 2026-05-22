@@ -306,30 +306,14 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 	if sess, err := openHLSSession(ctx, streamURL, durationSec, audioCodec, embeddedSubs, externals); err == nil {
 		sessionID = sess.id
 		allSubs = sess.subtitles
-		// Prebake the first N source-variant chunks in background.
-		// These are `-c copy` so it's fast (< 1 s for 10 chunks).
+		// Prebake the first N source-variant chunks straight from the
+		// TorBox URL. `-c copy` so it's cheap (~1 s per chunk) and
+		// gives the player an instant-start window without any disk
+		// cache of the full source.
 		go h.prebakeHLSChunks(sess, hlsPrebakeChunkCount)
-		// Once the source has fully landed locally (parallel
-		// downloader, ~30-60 s on LAN), fire a full background encode
-		// of every LOWER variant (720p / 480p / 360p). One ffmpeg per
-		// variant via the HLS muxer, emitting all chunks in a single
-		// pass — ~2.5 min for 720p of a 2 h movie. By the time ABR
-		// needs to downshift (cellular handoff, weak wifi), every
-		// chunk of every lower variant is on disk → instant switch,
-		// never a rebuffer.
-		go h.backgroundFullEncodeVariants(sess)
 	}
-	// Sub extraction stays on-demand via /stream/hls/:sessionId/prep.
-	// But we ALWAYS pre-warm the source download in the background
-	// because both HLS chunks AND subtitle extraction benefit from
-	// reading from the local cache. The user pays nothing if it's
-	// already cached (fast no-op). When ffmpeg is about to transcode
-	// HLS chunks on a non-AAC release, the source being local means
-	// each chunk completes in <1 s instead of fighting TorBox CDN
-	// latency 4+ times per minute.
-	if streamURL != "" {
-		go h.warmLocalSource(streamURL)
-	}
+	// Sub extraction stays on-demand via /stream/hls/:sessionId/prep,
+	// reading the subtitle track directly from the TorBox URL.
 
 	return RespondOK(c, map[string]any{
 		"streamUrl":   streamURL,
