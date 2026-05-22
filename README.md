@@ -140,13 +140,27 @@ Une fois Prowlarr lancé sur <http://127.0.0.1:9696> :
 À la racine du projet :
 
 ```env
+# Catalogue / debrid / recherche — requis pour que les fonctionnalités marchent.
 NOTFLIX_TMDB_API_KEY=<votre clé v3 TMDB>
 NOTFLIX_TORBOX_API_KEY=<votre clé TorBox>
 NOTFLIX_PROWLARR_URL=http://127.0.0.1:9696
 NOTFLIX_PROWLARR_API_KEY=<votre API key Prowlarr>
+
+# Compte admin créé au PREMIER boot (quand la table users est vide).
+# Après ça, change le mot de passe depuis l'UI — modifier ces vars n'a
+# plus d'effet une fois la base initialisée.
+NOTFLIX_ADMIN_USERNAME=<nom d'utilisateur, ex: dylan>
+NOTFLIX_ADMIN_PASSWORD=<mot de passe fort — pas "admin">
+
+# Optionnel — active la traduction de sous-titres via Claude.
+# Sans clé, Notflix sert juste les pistes natives du fichier vidéo.
+NOTFLIX_ANTHROPIC_API_KEY=<votre clé Anthropic, optionnel>
+NOTFLIX_ANTHROPIC_MODEL=claude-haiku-4-5
 ```
 
-`.env` est gitignored. Le `Makefile` le source automatiquement quand vous lancez `make dev`.
+`.env` est gitignored. Le `Makefile` le source automatiquement quand vous lancez `make dev`. Les clés peuvent aussi être pilotées plus tard depuis l'UI (`/settings` → Configuration serveur), la DB prend le dessus une fois remplie.
+
+> ⚠️ **Sécurité** : sans `NOTFLIX_ADMIN_PASSWORD`, le compte par défaut est `admin / admin`. Si Notflix est exposé au-delà de ton LAN (Cloudflare Tunnel, VPN partagé, etc.), choisis un vrai mot de passe **avant** le premier `make dev` — l'admin est créé à ce moment-là et seules les routes d'API authentifiées peuvent ensuite le changer.
 
 ### 4. Lancer
 
@@ -168,6 +182,14 @@ curl http://127.0.0.1:43212/api/v1/prowlarr/status   # { configured, version, en
 ```
 
 Les trois doivent renvoyer `configured: true` ou la clé correspondante non vide.
+
+### 6. Premier login
+
+Ouvre <http://127.0.0.1:43210> et connecte-toi avec les identifiants du `.env` (`NOTFLIX_ADMIN_USERNAME` / `NOTFLIX_ADMIN_PASSWORD`). Tu peux ensuite :
+
+- Changer le mot de passe depuis `/settings` → *Compte* → *Mot de passe*
+- Créer des comptes secondaires (admin only) depuis `/settings` → *Administration*
+- Tester chaque clé API (TMDB / TorBox / Prowlarr / Anthropic) depuis `/settings` → *Tester les connexions*
 
 ## Build production
 
@@ -291,6 +313,10 @@ Le pipe one-way ne permet pas le seek backward (le serveur ne peut pas répondre
 | `NOTFLIX_TORBOX_API_KEY` | — | Requis pour la lecture |
 | `NOTFLIX_PROWLARR_URL` | `http://127.0.0.1:9696` | Base URL Prowlarr |
 | `NOTFLIX_PROWLARR_API_KEY` | — | Requis pour la recherche |
+| `NOTFLIX_ADMIN_USERNAME` | `admin` | Nom du compte admin créé **au premier boot uniquement** |
+| `NOTFLIX_ADMIN_PASSWORD` | `admin` | Mot de passe initial — **change-le avant le premier `make dev`** si tu exposes l'app |
+| `NOTFLIX_ANTHROPIC_API_KEY` | — | Optionnel — active la traduction de sous-titres via Claude |
+| `NOTFLIX_ANTHROPIC_MODEL` | `claude-haiku-4-5` | Modèle utilisé pour la traduction |
 
 ## Crédits
 
