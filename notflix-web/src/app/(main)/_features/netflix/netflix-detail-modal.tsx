@@ -27,6 +27,7 @@ import {
 } from "@/lib/profiles/profiles"
 import {
     mediaTypeOf,
+    TMDBCastMember,
     TMDBEpisode,
     titleOf,
     tmdbImage,
@@ -35,6 +36,7 @@ import {
     yearOf,
 } from "@/lib/tmdb"
 import { useSearchMovie, type Release } from "@/lib/notflix-api"
+import { useNetflixPersonModal } from "@/app/(main)/_features/netflix/netflix-person-modal"
 import { atom, useAtom, useSetAtom } from "jotai"
 import React from "react"
 import { useTranslation } from "react-i18next"
@@ -305,7 +307,69 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
                     onPickEpisode={onPlayEpisode}
                 />
             )}
+
+            {/* Cast carousel — TMDB credits.cast surfaced as a horizontal
+                row of photos + names + characters. Click → open the
+                NetflixPersonModal with the actor's filmography. */}
+            {data.credits?.cast && data.credits.cast.length > 0 && (
+                <CastCarousel cast={data.credits.cast} />
+            )}
         </div>
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Cast carousel
+// ---------------------------------------------------------------------------
+
+function CastCarousel({ cast }: { cast: TMDBCastMember[] }) {
+    const { t } = useTranslation()
+    const { openPerson } = useNetflixPersonModal()
+    // Cap at 30 — anything more is overwhelming in a horizontal row.
+    const visible = cast.slice(0, 30)
+    if (visible.length === 0) return null
+    return (
+        <section className="px-5 sm:px-8 lg:px-12 pb-6 space-y-3">
+            <h3 className="text-base lg:text-lg font-bold text-white tracking-tight">
+                {t("modal.cast", "Casting")}
+            </h3>
+            <div className="flex gap-3 overflow-x-auto scrollbar-hide pb-2 -mx-1 px-1">
+                {visible.map(member => {
+                    const img = tmdbImage("w185", member.profile_path)
+                    return (
+                        <button
+                            key={member.id}
+                            type="button"
+                            onClick={() => openPerson(member.id)}
+                            className={cn(
+                                "shrink-0 w-24 lg:w-28 text-left",
+                                "focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-500 rounded-md",
+                                "group",
+                            )}
+                            aria-label={member.name}
+                        >
+                            <div className="w-24 h-24 lg:w-28 lg:h-28 rounded-full overflow-hidden bg-white/5 border border-white/10 mx-auto transition-transform group-hover:scale-105">
+                                {img ? (
+                                    <img src={img} alt={member.name} loading="lazy" className="w-full h-full object-cover" />
+                                ) : (
+                                    <div className="w-full h-full flex items-center justify-center text-white/40 text-xs font-bold">
+                                        {member.name.split(" ").map(s => s[0]).join("").slice(0, 2)}
+                                    </div>
+                                )}
+                            </div>
+                            <p className="mt-1.5 text-[11px] text-white font-semibold text-center line-clamp-1">
+                                {member.name}
+                            </p>
+                            {member.character && (
+                                <p className="text-[10px] text-[--muted] text-center line-clamp-1">
+                                    {member.character}
+                                </p>
+                            )}
+                        </button>
+                    )
+                })}
+            </div>
+        </section>
     )
 }
 

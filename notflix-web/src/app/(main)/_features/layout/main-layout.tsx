@@ -15,6 +15,7 @@
 import { NetflixBottomTab } from "@/app/(main)/_features/netflix/netflix-bottom-tab"
 import { NetflixDetailModal } from "@/app/(main)/_features/netflix/netflix-detail-modal"
 import { NetflixLogin } from "@/app/(main)/_features/netflix/netflix-login"
+import { NetflixPersonModal } from "@/app/(main)/_features/netflix/netflix-person-modal"
 import { NetflixTopBar } from "@/app/(main)/_features/netflix/netflix-top-bar"
 import { RouteFallback } from "@/components/shared/loading-overlay-with-logo"
 import { AppLayout, AppLayoutContent, AppSidebarProvider } from "@/components/ui/app-layout"
@@ -53,6 +54,11 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
     return (
         <>
             <NetflixDetailModal />
+            {/* Person modal — opened from a cast member click inside the
+                detail modal. Sits one z-layer above DetailModal so a
+                second click on a cast card in the filmography pushes
+                back through both seamlessly. */}
+            <NetflixPersonModal />
 
             <AppSidebarProvider>
                 <NetflixTopBar />

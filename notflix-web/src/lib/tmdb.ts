@@ -45,6 +45,46 @@ export type TMDBMedia = {
             published_at?: string
         }>
     }
+    /** append_to_response=credits → cast + crew. Populated only on
+     *  detail endpoints. We surface the cast in the detail modal. */
+    credits?: {
+        cast: TMDBCastMember[]
+        crew?: Array<{ id: number; name: string; job: string }>
+    }
+}
+
+export type TMDBCastMember = {
+    id: number
+    name: string
+    character?: string
+    profile_path?: string | null
+    order?: number
+    /** TMDB occasionally returns the same person twice when they play
+     *  multiple roles. We dedupe by `id` on render. */
+}
+
+export type TMDBPersonDetail = {
+    id: number
+    name: string
+    biography?: string
+    profile_path?: string | null
+    known_for_department?: string
+    birthday?: string | null
+    deathday?: string | null
+    place_of_birth?: string | null
+}
+
+export type TMDBPersonCredit = {
+    id: number
+    media_type: "movie" | "tv"
+    title?: string
+    name?: string
+    character?: string
+    poster_path?: string | null
+    release_date?: string
+    first_air_date?: string
+    vote_average?: number
+    popularity?: number
 }
 
 export type TMDBSeason = {
@@ -167,6 +207,21 @@ export function useTMDBRecommendations(type: "movie" | "tv" | null, id: number |
         // Recommendations rarely change — keep the response warm for an
         // hour to avoid re-fetching as the user toggles between rows.
         staleTime: 60 * 60_000,
+    })
+}
+
+/**
+ * TMDB /person/:id with their combined credits appended. Returns
+ * everything the person modal needs in a single round trip.
+ */
+export function useTMDBPerson(personId: number | null) {
+    return useQuery<TMDBPersonDetail & { combined_credits?: { cast: TMDBPersonCredit[] } }>({
+        queryKey: ["tmdb", "person", personId],
+        queryFn: () => tmdbFetch(`/person/${personId}`, { append_to_response: "combined_credits" }),
+        enabled: !!personId,
+        // Person bios change very rarely — long stale-time keeps the
+        // modal snappy on reopen.
+        staleTime: 24 * 60 * 60_000,
     })
 }
 
