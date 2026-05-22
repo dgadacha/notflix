@@ -1111,9 +1111,25 @@ func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string)
 		return c.NoContent(http.StatusBadRequest)
 	}
 
-	// Cache hit fast path.
+	key := ramCacheKey(sess.id, variant, n)
+	ram := getHLSRAMCache()
+
+	// Tier 1 — RAM cache. Sub-ms hit, no syscall, ideal for re-seek
+	// inside the playback window.
+	if data, ok := ram.Get(key); ok {
+		c.Response().Header().Set("Content-Type", "video/mp2t")
+		c.Response().Header().Set("Cache-Control", "public, max-age=3600")
+		c.Response().Header().Set("X-Hls-Source", "ram")
+		return c.Blob(http.StatusOK, "video/mp2t", data)
+	}
+
+	// Tier 2 — disk cache.
 	cachePath := h.hlsChunkCacheVariantPath(sess.id, variant, n)
 	if info, statErr := os.Stat(cachePath); statErr == nil && info.Size() > 0 {
+		// Promote into RAM on the way out — next re-seek is free.
+		if data, rerr := os.ReadFile(cachePath); rerr == nil {
+			ram.Put(key, data)
+		}
 		c.Response().Header().Set("Content-Type", "video/mp2t")
 		c.Response().Header().Set("Cache-Control", "public, max-age=3600")
 		c.Response().Header().Set("X-Hls-Source", "cache")
@@ -1124,9 +1140,16 @@ func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string)
 		return c.NoContent(http.StatusNotFound)
 	}
 
+	// Tier 3 — bake. bakeOneHLSChunk populates BOTH disk + RAM.
 	if err := h.bakeOneHLSChunk(sess, variant, n); err != nil {
 		log.Printf("hls seg %s/%d: bake failed: %v", variant, n, err)
 		return c.JSON(http.StatusBadGateway, map[string]any{"error": "ffmpeg failed"})
+	}
+	if data, ok := ram.Get(key); ok {
+		c.Response().Header().Set("Content-Type", "video/mp2t")
+		c.Response().Header().Set("Cache-Control", "public, max-age=3600")
+		c.Response().Header().Set("X-Hls-Source", "ffmpeg")
+		return c.Blob(http.StatusOK, "video/mp2t", data)
 	}
 	c.Response().Header().Set("Content-Type", "video/mp2t")
 	c.Response().Header().Set("Cache-Control", "public, max-age=3600")
@@ -1281,7 +1304,15 @@ func (h *Handler) bakeOneHLSChunk(sess *hlsSession, variantName string, n int) e
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("%v | %s", err, strings.TrimSpace(stderr.String()))
 	}
-	return os.Rename(tmpPath, cachePath)
+	if err := os.Rename(tmpPath, cachePath); err != nil {
+		return err
+	}
+	// Promote into RAM cache. Read errors are non-fatal — the disk
+	// file is still good and the next serve will re-attempt the load.
+	if data, err := os.ReadFile(cachePath); err == nil {
+		getHLSRAMCache().Put(ramCacheKey(sess.id, variantName, n), data)
+	}
+	return nil
 }
 
 // ProbeResult is the full set of facts we extract from a single ffprobe
@@ -1476,6 +1507,9 @@ func startHLSCleanup() {
 				if now.Sub(sess.lastUsed) > 15*time.Minute {
 					log.Printf("hls: reaping idle session %s", id)
 					delete(hlsSessions, id)
+					// Drop the RAM cache entries for this session so the
+					// LRU isn't kept warm by long-dead chunks.
+					getHLSRAMCache().DropSession(id)
 					// rm -rf the per-session chunk cache.
 					if hlsCleanupDataDir != "" {
 						chunkDir := filepath.Join(hlsCleanupDataDir, "cache", "hls-chunks", id)
