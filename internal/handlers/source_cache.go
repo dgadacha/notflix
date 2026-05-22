@@ -37,9 +37,11 @@ import (
 )
 
 const (
-	// 8 parallel connections — saturates most TorBox CDN sessions
-	// without triggering rate-limits.
-	sourceDownloadConcurrency = 8
+	// 16 parallel connections. Empirically TorBox doesn't rate-limit
+	// per-IP, so doubling from 8 → 16 nets a measurable speedup on
+	// fat pipes (LAN-to-CDN > 100 Mbps). Drop back to 8 if you're
+	// on a slow / metered link.
+	sourceDownloadConcurrency = 16
 	// 8 MB chunks balance overhead vs adaptive parallelism. Too small
 	// and we pay per-request handshake repeatedly; too big and a
 	// single slow chunk holds up the others.

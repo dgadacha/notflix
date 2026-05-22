@@ -290,11 +290,21 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 	//    If the session can't be opened (probe failure) we still serve
 	//    the direct stream — subtitles won't be available, but playback
 	//    itself works.
+	// Same data-dir capture as the standalone /hls/start path — needed
+	// by the chunk-cache reaper that lives in startHLSCleanup.
+	hlsCleanupDataDir = h.App.Config.Data.Dir
 	var sessionID string
 	var allSubs []SubtitleTrack
 	if sess, err := openHLSSession(ctx, streamURL, durationSec, audioCodec, embeddedSubs, externals); err == nil {
 		sessionID = sess.id
 		allSubs = sess.subtitles
+		// Prebake the first few HLS chunks in the background. If the
+		// frontend ends up taking the HLS path (non-AAC audio) these
+		// will be on disk by the time hls.js requests them → instant
+		// cold start. For AAC releases the prebake is wasted work but
+		// cheap (5 × ~500 KB chunks ≈ 2.5 MB on disk, single ffmpeg
+		// run pipelined with the source download).
+		go h.prebakeHLSChunks(sess, hlsPrebakeChunkCount)
 	}
 	// Sub extraction stays on-demand via /stream/hls/:sessionId/prep.
 	// But we ALWAYS pre-warm the source download in the background
