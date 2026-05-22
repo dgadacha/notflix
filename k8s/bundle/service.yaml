@@ -1,0 +1,28 @@
+# Two-port service for the bundle.
+#
+# Port 80   → Notflix UI + API     (target 43212)
+# Port 9696 → Prowlarr UI + API    (target 9696)
+#
+# Ingress (see ingress.yaml) only routes to the Notflix port. Prowlarr
+# stays on the cluster network — reach its UI via port-forward:
+#   kubectl -n notflix-bundle port-forward svc/notflix-bundle 9696:9696
+# then open http://localhost:9696. Or expose it via a separate
+# internal Ingress hostname if you want Traefik in front.
+apiVersion: v1
+kind: Service
+metadata:
+  name: notflix-bundle
+  namespace: notflix-bundle
+spec:
+  selector:
+    app: notflix-bundle
+  ports:
+    - name: http
+      port: 80
+      targetPort: 43212
+      protocol: TCP
+    - name: prowlarr
+      port: 9696
+      targetPort: 9696
+      protocol: TCP
+  type: ClusterIP

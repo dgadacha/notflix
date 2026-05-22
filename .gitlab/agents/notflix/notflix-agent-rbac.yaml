@@ -1,0 +1,69 @@
+# Namespace-scoped RBAC for the GitLab agent. Applied separately when
+# installing the agent (see README → "Kubernetes integration" section).
+#
+# This is the SAFETY NET: even if a CI job tries to nuke a node or
+# touch another namespace, the agent's ServiceAccount has zero
+# cluster-wide permissions and can only act on resources INSIDE the
+# `notflix` namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gitlab-agent
+  namespace: notflix
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gitlab-agent-notflix
+  namespace: notflix
+rules:
+  # Standard deploy verbs on the things `kubectl apply -f k8s/` touches.
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - pods/exec
+      - services
+      - configmaps
+      - secrets
+      - persistentvolumeclaims
+      - serviceaccounts
+      - events
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - deployments/scale
+      - deployments/status
+      - replicasets
+      - statefulsets
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Required by the agent's HA leader-election when running with 2+ replicas.
+  - apiGroups: ["coordination.k8s.io"]
+    resources:
+      - leases
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gitlab-agent-notflix
+  namespace: notflix
+subjects:
+  - kind: ServiceAccount
+    name: gitlab-agent
+    namespace: notflix
+roleRef:
+  kind: Role
+  name: gitlab-agent-notflix
+  apiGroup: rbac.authorization.k8s.io

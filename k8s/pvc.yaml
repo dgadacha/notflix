@@ -1,0 +1,15 @@
+# Notflix datadir — SQLite DB, image cache (~1-2 GB), subtitle cache,
+# source cache (parallel-downloaded MKVs, up to 20 GB by default).
+# Bumped to 30 Gi to give the source cache headroom; configurable via
+# the source_cache.go sourceCacheMaxBytes constant.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: notflix-data
+  namespace: notflix
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 30Gi

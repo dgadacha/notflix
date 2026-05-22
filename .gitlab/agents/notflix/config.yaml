@@ -1,0 +1,20 @@
+# GitLab Agent for Kubernetes — Notflix deployment surface.
+#
+# The agent runs IN the cluster and exposes kubectl access to GitLab CI/CD
+# jobs. Declared here so collaborators can deploy via `git push` without
+# needing SSH access to the salon node.
+#
+# Scope: only the `notflix` namespace. The agent install on the cluster is
+# pinned to a ServiceAccount with a namespace-scoped Role (see
+# `notflix-agent-rbac.yaml` in this directory) — even cluster-admin commands
+# from CI can't escape the notflix namespace.
+ci_access:
+  projects:
+    - id: kidnar/notflix
+      default_namespace: notflix
+
+# Observability — the agent surfaces basic cluster events into the GitLab
+# Operate → Kubernetes view so you can see deploy state from the web UI.
+observability:
+  logging:
+    level: info

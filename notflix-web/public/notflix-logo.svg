@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Notflix">
+  <rect width="100" height="100" rx="22" fill="#0a0a0a"/>
+  <!-- Stylized "N" in Netflix red — left column, diagonal stroke, right column -->
+  <path
+    fill="#E50914"
+    d="M22 16 L38 16 L62 68 L62 16 L78 16 L78 84 L62 84 L38 32 L38 84 L22 84 Z"
+  />
+</svg>

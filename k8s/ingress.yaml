@@ -1,0 +1,22 @@
+# Internal Traefik ingress for in-LAN access (notflix.maiz.local).
+# Public access goes through Cloudflare Tunnel — see deployment notes in README.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: notflix-ingress
+  namespace: notflix
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: notflix.maiz.lan
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: notflix
+                port:
+                  number: 80

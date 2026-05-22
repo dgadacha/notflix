@@ -1,0 +1,29 @@
+# Internal Traefik ingress for the bundle — Notflix port only.
+#
+# Public traffic still goes through the Cloudflare Tunnel (kuro
+# subdomain on nc-maiz.org); the tunnel forwards to the same in-LAN
+# host name resolved by this ingress.
+#
+# Prowlarr is INTENTIONALLY NOT exposed via Ingress — admins reach it
+# via port-forward when needed. Reduces the public surface and keeps
+# the indexer config behind kubectl auth.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: notflix-bundle-ingress
+  namespace: notflix-bundle
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: notflix-bundle.maiz.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: notflix-bundle
+                port:
+                  number: 80

@@ -1,0 +1,138 @@
+# Bundle deployment — one pod, one container, three processes
+# (Notflix + Prowlarr + Flaresolverr supervised by a bash entrypoint).
+#
+# Single PVC carries:
+#   /data/             Notflix datadir
+#   /data/prowlarr/    Prowlarr config + db
+#   /data/flaresolverr-cache/  (reserved)
+#
+# Resource budget is bigger than the single-service deployment:
+#   - Chromium (Flaresolverr) holds ~250 MB at idle
+#   - Prowlarr .NET runtime adds ~100 MB
+#   - Notflix + ffmpeg ~50-100 MB at idle, peaks during transcode
+# → request 768 Mi, limit 2 Gi to absorb a hot translate + stream.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notflix-bundle
+  namespace: notflix-bundle
+  labels:
+    app: notflix-bundle
+spec:
+  replicas: 1
+  # SQLite on a RWO PVC — one pod at a time. Recreate avoids the
+  # "rolling update tries to bind the PVC twice" race during deploys.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: notflix-bundle
+  template:
+    metadata:
+      labels:
+        app: notflix-bundle
+    spec:
+      imagePullSecrets:
+        - name: gitlab-registry
+      # PVC ownership fix — runtime container is uid 999. Without
+      # chowning the mount root, sqlite/cache writes 500 with EACCES.
+      # Cover the sub-directories too so Prowlarr + Flaresolverr can
+      # write under /data/prowlarr and /data/flaresolverr-cache.
+      initContainers:
+        - name: chown-data
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /data /data/prowlarr /data/flaresolverr-cache
+              chown -R 999:999 /data
+              chmod 0755 /data
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: notflix-bundle
+          image: registry.gitlab.com/kidnar/notflix-bundle:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 43212
+              name: http-notflix
+            - containerPort: 9696
+              name: http-prowlarr
+            # Flaresolverr stays INTERNAL — listening on 127.0.0.1
+            # inside the container, Prowlarr reaches it via loopback.
+            # Not exposed to the cluster network.
+          envFrom:
+            - configMapRef:
+                name: notflix-bundle-config
+            - secretRef:
+                name: notflix-bundle-secrets
+          env:
+            - name: NOTFLIX_DATA_DIR
+              value: /data
+            # Bundle is self-contained — Notflix calls Prowlarr on
+            # localhost. Override the per-cluster value baked into
+            # the regular deployment.
+            - name: NOTFLIX_PROWLARR_URL
+              value: http://127.0.0.1:9696
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          # TCP probes — accept on 43212 means the supervisor has
+          # started Notflix at minimum. We don't probe Prowlarr or
+          # Flaresolverr separately: if Notflix is up but the others
+          # aren't, the supervisor exits and the pod restarts anyway.
+          readinessProbe:
+            tcpSocket:
+              port: 43212
+            initialDelaySeconds: 30 # Chromium boot adds ~5-10 s
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 43212
+            initialDelaySeconds: 120
+            periodSeconds: 30
+          resources:
+            requests:
+              memory: "768Mi"
+              cpu: "200m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: notflix-bundle-data
+---
+# ConfigMap — non-sensitive runtime config.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notflix-bundle-config
+  namespace: notflix-bundle
+data:
+  NOTFLIX_SERVER_HOST: "0.0.0.0"
+  NOTFLIX_SERVER_PORT: "43212"
+  NOTFLIX_ANTHROPIC_MODEL: "claude-haiku-4-5"
+  # Flaresolverr listens on the loopback inside the pod — no env
+  # override needed, the supervisor sets HOST=127.0.0.1 + PORT=8191.
+---
+# Secret — same shape as the single-service deployment's secret. Edit
+# on the cluster:
+#   kubectl edit secret notflix-bundle-secrets -n notflix-bundle
+apiVersion: v1
+kind: Secret
+metadata:
+  name: notflix-bundle-secrets
+  namespace: notflix-bundle
+type: Opaque
+stringData:
+  NOTFLIX_TMDB_API_KEY: ""
+  NOTFLIX_TORBOX_API_KEY: ""
+  # Prowlarr API key — populated from Prowlarr's UI on first boot
+  # (Settings → General → API Key).
+  NOTFLIX_PROWLARR_API_KEY: ""
+  NOTFLIX_ANTHROPIC_API_KEY: ""
+  NOTFLIX_ADMIN_USERNAME: "admin"
+  NOTFLIX_ADMIN_PASSWORD: "change-me-after-first-login"
