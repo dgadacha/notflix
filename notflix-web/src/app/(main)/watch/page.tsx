@@ -50,6 +50,7 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/components/ui/core/styling"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useRouter, useSearchParams } from "@/lib/navigation"
+import { toast } from "sonner"
 import React from "react"
 import { useTranslation } from "react-i18next"
 import { BiArrowBack, BiPlay, BiRefresh, BiSolidCheckCircle } from "react-icons/bi"
@@ -209,6 +210,11 @@ export default function WatchPage() {
         (r: Release) => r.guid || r.infoHash || r.title,
         [],
     )
+
+    // Hoisted up here because handleFatalPlaybackError (which lives a
+    // few hundred lines down) references it. Cheap hook, no work done
+    // beyond returning the jotai setter pair.
+    const { openDetail } = useNetflixDetailModal()
 
     // Track which releases we've already tried in this session so the
     // auto-fallback doesn't loop on the same one.
@@ -502,20 +508,41 @@ export default function WatchPage() {
         newSkip.add(key)
         setSkipKeys(newSkip)
 
+        // When we run out of fallbacks (or the picker would be empty),
+        // navigate back to the detail modal — that's where the user
+        // came from, and where they can pick a different release by
+        // hand. A sonner toast carries the reason so they don't have
+        // to dig into devtools.
+        const bailToModal = (msg: string) => {
+            toast.error(msg)
+            if (!Number.isNaN(mediaId)) {
+                openDetail(mediaId, typeParam, typeParam === "tv" ? season : undefined)
+            }
+            if (window.history.length > 1) {
+                router.back()
+            } else {
+                router.push("/")
+            }
+        }
+
         if (newSkip.size >= 3) {
-            setErrorMsg(t("watch.no_compatible_source", "Aucune source compatible avec ton navigateur."))
-            setPhase("error")
+            bailToModal(t("watch.no_compatible_source", "Aucune source compatible avec ton navigateur. Essaie une autre release."))
             return
         }
 
         const next = filteredReleases.find(r => !newSkip.has(releaseKey(r)))
         if (!next) {
-            setErrorMsg(t("watch.no_release", "Plus aucune source à essayer."))
-            setPhase("error")
+            bailToModal(t("watch.no_release", "Plus aucune source à essayer. Choisis une autre release."))
             return
         }
+
+        // Still have a candidate — surface a quieter toast so the user
+        // knows we're switching, then launch it.
+        toast(t("watch.fallback_trying_next", "Source incompatible, essai d'une autre…"), {
+            duration: 2500,
+        })
         void launchRelease(next, newSkip)
-    }, [pickedRelease, releaseKey, skipKeys, filteredReleases, launchRelease, t])
+    }, [pickedRelease, releaseKey, skipKeys, filteredReleases, launchRelease, t, mediaId, typeParam, season, openDetail, router])
 
     const handleManualPick = React.useCallback(
         (release: Release) => {
@@ -542,8 +569,6 @@ export default function WatchPage() {
         setFallbackAttempt(0)
         setPhase("searching")
     }, [sourcePickMode])
-
-    const { openDetail } = useNetflixDetailModal()
 
     const handleClose = React.useCallback(() => {
         // Re-open the detail modal for the media we were watching, so the
@@ -1227,9 +1252,17 @@ function Player({
                     hls.loadSource(playlistUrl)
                     hls.attachMedia(video)
                     hls.on(Hls.Events.ERROR, (_, data) => {
-                        if (data.fatal) {
-                            console.error("[Notflix] hls fatal error", data)
-                        }
+                        if (!data.fatal) return
+                        console.error("[Notflix] hls fatal error", data)
+                        // Trip the same fallback machinery the <video>
+                        // onError uses. The most common causes here:
+                        //   - HEVC in MPEG-TS (hls.js can't demux)
+                        //   - fragLoadTimeOut on cold-start
+                        //   - internalException after a parse error
+                        // Skipping to the next ranked release is
+                        // almost always the right move — the current
+                        // one is unrecoverable.
+                        onFatalError()
                     })
                 } else {
                     // Safari + iOS Chrome have native HLS.

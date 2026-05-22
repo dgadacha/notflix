@@ -70,6 +70,7 @@
     "sub_prep_corner_ready": "Sous-titres activés",
     "next_episode_label": "Prochain épisode",
     "next_play_now": "Lancer",
+    "fallback_trying_next": "Source incompatible, essai d'une autre…",
     "no_compatible_source": "Aucune source compatible avec ton navigateur (XviD / DivX non supportés)."
   },
   "profiles": {
