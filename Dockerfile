@@ -40,8 +40,8 @@ RUN go mod download
 
 COPY . .
 # main.go uses //go:embed all:web — needs the web/ dir to exist at compile time.
-# rsbuild defaults its outDir to dist/.
-COPY --from=web-builder /app/notflix-web/dist ./web
+# rsbuild.config.ts overrides the default outDir to "out" (not "dist").
+COPY --from=web-builder /app/notflix-web/out ./web
 
 # CGO is required for mattn/go-sqlite3. Strip symbols/DWARF for a smaller binary.
 RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/notflix ./
