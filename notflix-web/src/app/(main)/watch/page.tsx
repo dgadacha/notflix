@@ -1144,6 +1144,10 @@ function Player({
 }) {
     const { t } = useTranslation()
     const videoRef = React.useRef<HTMLVideoElement>(null)
+    // hlsRef gives the stats overlay access to the live hls.js instance
+    // without restructuring the load effect. null when the player is on
+    // the DIRECT path (no HLS) or before the HLS init has resolved.
+    const hlsRef = React.useRef<Hls | null>(null)
 
     // Resume position from the URL. We consume it once on the first
     // loadedmetadata event so the player jumps there. Stored in a ref
@@ -1261,7 +1265,7 @@ function Player({
                 const playlistUrl = j.data.playlistUrl
 
                 if (Hls.isSupported()) {
-                    hls = new Hls({
+                    hls = hlsRef.current = new Hls({
                         // Buffer 120 s of media ahead of the playhead.
                         // Lets the player ride out 30-60 s connection
                         // dips without rebuffering — the classic
@@ -1332,6 +1336,7 @@ function Player({
                 hls.destroy()
                 hls = null
             }
+            hlsRef.current = null
             video.removeAttribute("src")
             video.load()
         }
@@ -1622,6 +1627,144 @@ function Player({
                     )
                 })}
             </video>
+
+            {/* Diagnostic stats overlay — toggle with Ctrl+Alt+S. Reads
+                live state from videoRef + hlsRef refs so it doesn't
+                trigger Player re-renders. */}
+            <StatsOverlay videoRef={videoRef} hlsRef={hlsRef} sessionId={sessionId}
+                audioCodec={audioCodec} videoCodec={videoCodec} container={container} />
+        </div>
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Stats overlay
+// ---------------------------------------------------------------------------
+
+/** Diagnostic panel showing live decode/network metrics. Toggle with
+ *  Ctrl+Alt+S (or Cmd+Alt+S on macOS — keyup matches either). Designed
+ *  for spot-checking "is this DIRECT or HLS", "what bitrate is ABR on",
+ *  "are we dropping frames", "is the chunk cache warm". */
+function StatsOverlay({
+    videoRef,
+    hlsRef,
+    sessionId,
+    audioCodec,
+    videoCodec,
+    container,
+}: {
+    videoRef: React.RefObject<HTMLVideoElement | null>
+    hlsRef: React.RefObject<Hls | null>
+    sessionId: string
+    audioCodec: string
+    videoCodec: string
+    container: string
+}) {
+    const [visible, setVisible] = React.useState(false)
+    const [tick, setTick] = React.useState(0)
+
+    // Toggle on Ctrl+Alt+S (Windows/Linux) or Cmd+Option+S (macOS).
+    React.useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === "s" || e.key === "S")) {
+                e.preventDefault()
+                setVisible(v => !v)
+            }
+        }
+        window.addEventListener("keydown", onKey)
+        return () => window.removeEventListener("keydown", onKey)
+    }, [])
+
+    // 2 Hz refresh while visible.
+    React.useEffect(() => {
+        if (!visible) return
+        const id = window.setInterval(() => setTick(x => x + 1), 500)
+        return () => window.clearInterval(id)
+    }, [visible])
+
+    if (!visible) return null
+    const video = videoRef.current
+    const hls = hlsRef.current
+
+    // Use tick to force re-read on each interval; refs themselves don't
+    // trigger React updates.
+    void tick
+
+    const quality = video?.getVideoPlaybackQuality?.()
+    const droppedRatio = quality && quality.totalVideoFrames > 0
+        ? (quality.droppedVideoFrames / quality.totalVideoFrames) * 100
+        : 0
+
+    const currentLevel = hls?.currentLevel ?? -1
+    const level = currentLevel >= 0 && hls?.levels?.[currentLevel]
+        ? hls.levels[currentLevel]
+        : null
+
+    // Network bandwidth estimate (hls.js EWMA, bits/s).
+    const ewma = (hls as unknown as { bandwidthEstimate?: number })?.bandwidthEstimate
+    const bandwidthMbps = ewma ? (ewma / 1_000_000).toFixed(1) : "?"
+
+    // Buffer-ahead of the playhead — useful to see if we're rebuffering.
+    let bufferAhead = 0
+    if (video && video.buffered.length > 0) {
+        for (let i = 0; i < video.buffered.length; i++) {
+            if (video.buffered.start(i) <= video.currentTime && video.buffered.end(i) >= video.currentTime) {
+                bufferAhead = video.buffered.end(i) - video.currentTime
+                break
+            }
+        }
+    }
+
+    const path = hls ? "HLS (fMP4)" : "DIRECT"
+
+    return (
+        <div
+            className={cn(
+                "absolute top-4 left-4 z-[120] pointer-events-none",
+                "px-3 py-2 rounded-md text-[11px] font-mono leading-relaxed",
+                "bg-black/80 backdrop-blur-sm text-white/90 border border-white/10",
+                "max-w-xs",
+            )}
+            aria-hidden
+        >
+            <div className="flex items-center gap-1.5 pb-1 border-b border-white/10 mb-1">
+                <span className="size-1.5 rounded-full bg-emerald-400" />
+                <span className="font-semibold tracking-wide uppercase text-[10px] text-white/70">
+                    notflix · stats
+                </span>
+            </div>
+            <Row k="path"   v={path} />
+            <Row k="codec"  v={`${videoCodec || "?"} / ${audioCodec || "?"}`} />
+            <Row k="container" v={container || "?"} />
+            {video && (
+                <Row k="frame" v={`${video.videoWidth}×${video.videoHeight}`} />
+            )}
+            {level && (
+                <Row k="level" v={`${level.width}×${level.height} @ ${(level.bitrate / 1_000_000).toFixed(1)} Mb/s`} />
+            )}
+            {hls && (
+                <Row k="ewma" v={`${bandwidthMbps} Mb/s`} />
+            )}
+            {video && (
+                <Row k="buffer" v={`${bufferAhead.toFixed(1)}s ahead`} />
+            )}
+            {quality && (
+                <Row k="frames"
+                    v={`${quality.totalVideoFrames} (${quality.droppedVideoFrames} dropped${droppedRatio > 0.1 ? `, ${droppedRatio.toFixed(1)}%` : ""})`} />
+            )}
+            <Row k="session" v={sessionId ? sessionId.slice(0, 8) + "…" : "—"} />
+            <div className="text-[9px] text-white/40 pt-1 mt-1 border-t border-white/10">
+                Ctrl+Alt+S to hide
+            </div>
+        </div>
+    )
+}
+
+function Row({ k, v }: { k: string; v: string }) {
+    return (
+        <div className="flex items-baseline gap-2">
+            <span className="text-white/50 w-14 shrink-0">{k}</span>
+            <span className="text-white tabular-nums break-all">{v}</span>
         </div>
     )
 }
