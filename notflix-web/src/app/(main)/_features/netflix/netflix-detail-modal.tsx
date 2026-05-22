@@ -664,32 +664,80 @@ type TMDBVideo = {
     official?: boolean
 }
 
-/** Pick the best YouTube trailer from TMDB's videos.results.
- *  Preference order: official Trailer → any Trailer → official Teaser
- *  → first YouTube video. */
-function pickBestTrailer(videos: TMDBVideo[]): TMDBVideo | null {
+/** Build the ranked list of YouTube trailer candidates from TMDB's
+ *  videos.results. Tried first → last. */
+function rankTrailerCandidates(videos: TMDBVideo[]): TMDBVideo[] {
     const yt = videos.filter(v => v.site === "YouTube" && v.key)
-    if (yt.length === 0) return null
-    return (
-        yt.find(v => v.type === "Trailer" && v.official) ||
-        yt.find(v => v.type === "Trailer") ||
-        yt.find(v => v.type === "Teaser" && v.official) ||
-        yt.find(v => v.type === "Teaser") ||
-        yt[0]
-    )
+    if (yt.length === 0) return []
+    // Stable score: lower is better.
+    const scoreOf = (v: TMDBVideo) => {
+        if (v.type === "Trailer" && v.official) return 0
+        if (v.type === "Trailer") return 1
+        if (v.type === "Teaser" && v.official) return 2
+        if (v.type === "Teaser") return 3
+        return 4
+    }
+    return [...yt].sort((a, b) => scoreOf(a) - scoreOf(b))
+}
+
+async function checkYouTubeAvailable(videoID: string): Promise<boolean> {
+    try {
+        const r = await fetch(`/api/v1/youtube/check?id=${encodeURIComponent(videoID)}`)
+        if (!r.ok) return true // backend down → assume available (fail-open)
+        const j = await r.json()
+        return Boolean(j.data?.available ?? j.available)
+    } catch {
+        return true // network error → assume available, the iframe will surface the real failure
+    }
 }
 
 function TrailerButton({ videos }: { videos: TMDBVideo[] }) {
     const { t } = useTranslation()
     const [open, setOpen] = React.useState(false)
-    const trailer = React.useMemo(() => pickBestTrailer(videos), [videos])
-    if (!trailer) return null
+    const [picked, setPicked] = React.useState<TMDBVideo | null>(null)
+    const [loading, setLoading] = React.useState(false)
+    const [allUnavailable, setAllUnavailable] = React.useState(false)
+    const candidates = React.useMemo(() => rankTrailerCandidates(videos), [videos])
+    if (candidates.length === 0) return null
+
+    const openTrailer = async () => {
+        setOpen(true)
+        setLoading(true)
+        setAllUnavailable(false)
+        setPicked(null)
+        // Walk the ranked list, take the first one YouTube accepts to
+        // embed. The backend memoises so repeat clicks are instant.
+        for (const candidate of candidates) {
+            const ok = await checkYouTubeAvailable(candidate.key)
+            if (ok) {
+                setPicked(candidate)
+                setLoading(false)
+                return
+            }
+        }
+        // Nothing embeddable. Show the fallback panel.
+        setAllUnavailable(true)
+        setLoading(false)
+    }
+
+    const close = () => {
+        setOpen(false)
+        setPicked(null)
+        setAllUnavailable(false)
+    }
+
+    // For the fallback panel: link to YouTube search if no candidate
+    // was embeddable; link directly to the top candidate otherwise.
+    const fallbackVideoID = candidates[0]?.key
+    const fallbackURL = fallbackVideoID
+        ? `https://www.youtube.com/watch?v=${fallbackVideoID}`
+        : ""
 
     return (
         <>
             <button
                 type="button"
-                onClick={() => setOpen(true)}
+                onClick={openTrailer}
                 aria-label={t("modal.trailer", "Bande-annonce")}
                 className={cn(
                     "inline-flex items-center justify-center gap-2",
@@ -707,7 +755,7 @@ function TrailerButton({ videos }: { videos: TMDBVideo[] }) {
             {open && (
                 <Modal
                     open={open}
-                    onOpenChange={(v) => { if (!v) setOpen(false) }}
+                    onOpenChange={(v) => { if (!v) close() }}
                     overlayClass="!z-[90]"
                     contentClass="!max-w-4xl !p-0 !bg-black border-white/5"
                     hideCloseButton
@@ -720,17 +768,68 @@ function TrailerButton({ videos }: { videos: TMDBVideo[] }) {
                             "right-3 top-3 size-10",
                         )}
                         icon={<BiX className="text-2xl" />}
-                        onClick={() => setOpen(false)}
+                        onClick={close}
                         aria-label="Close"
                     />
-                    <div className="aspect-video w-full">
-                        <iframe
-                            src={`https://www.youtube.com/embed/${trailer.key}?autoplay=1&rel=0`}
-                            title={trailer.name}
-                            className="w-full h-full"
-                            allow="autoplay; encrypted-media; picture-in-picture"
-                            allowFullScreen
-                        />
+                    <div className="aspect-video w-full relative">
+                        {loading && (
+                            <div className="absolute inset-0 flex items-center justify-center text-white/70 text-sm">
+                                {t("modal.trailer_checking", "Vérification de la bande-annonce…")}
+                            </div>
+                        )}
+                        {!loading && picked && (
+                            <>
+                                <iframe
+                                    src={`https://www.youtube.com/embed/${picked.key}?autoplay=1&rel=0`}
+                                    title={picked.name}
+                                    className="w-full h-full"
+                                    allow="autoplay; encrypted-media; picture-in-picture"
+                                    allowFullScreen
+                                />
+                                {/* Always-visible escape hatch under the iframe — if
+                                    the embed loads but playback then fails (very
+                                    rare with the pre-check, but it happens on age-
+                                    gated videos that pass oEmbed but block playback),
+                                    the user has a way out. */}
+                                <a
+                                    href={`https://www.youtube.com/watch?v=${picked.key}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className={cn(
+                                        "absolute left-3 bottom-3 z-[110]",
+                                        "px-2.5 py-1 rounded-md text-[11px] font-semibold",
+                                        "bg-black/70 hover:bg-black/90 text-white/90",
+                                        "backdrop-blur-sm transition-colors",
+                                    )}
+                                >
+                                    {t("modal.trailer_open_external", "Ouvrir sur YouTube ↗")}
+                                </a>
+                            </>
+                        )}
+                        {!loading && allUnavailable && (
+                            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
+                                <p className="text-white text-sm lg:text-base">
+                                    {t(
+                                        "modal.trailer_unavailable",
+                                        "Aucune bande-annonce embarquable (geoblock, restriction d'âge, ou retrait par l'éditeur).",
+                                    )}
+                                </p>
+                                {fallbackURL && (
+                                    <a
+                                        href={fallbackURL}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className={cn(
+                                            "px-4 py-2 rounded-md text-sm font-semibold",
+                                            "bg-white/15 hover:bg-white/25 text-white",
+                                            "transition-colors",
+                                        )}
+                                    >
+                                        {t("modal.trailer_open_external", "Ouvrir sur YouTube ↗")}
+                                    </a>
+                                )}
+                            </div>
+                        )}
                     </div>
                 </Modal>
             )}
