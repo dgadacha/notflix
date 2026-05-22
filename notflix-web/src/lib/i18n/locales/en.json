@@ -68,6 +68,8 @@
     "sub_prep_skip": "Play without waiting",
     "sub_prep_corner": "Subtitles loading",
     "sub_prep_corner_ready": "Subtitles enabled",
+    "next_episode_label": "Next episode",
+    "next_play_now": "Play now",
     "no_compatible_source": "No browser-compatible source (XviD / DivX not supported)."
   },
   "profiles": {
@@ -93,6 +95,7 @@
     "episodes_count": "episodes",
     "genres": "Genres",
     "subtitles": "Subtitles",
+    "trailer": "Trailer",
     "sub_prep_mode": "Prep",
     "sub_prep_wait": "Wait for subtitles",
     "sub_prep_background": "Play immediately"

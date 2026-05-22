@@ -33,6 +33,18 @@ export type TMDBMedia = {
     number_of_episodes?: number
     seasons?: TMDBSeason[]
     external_ids?: { imdb_id?: string }
+    /** append_to_response=videos → list of trailers / teasers / clips
+     *  attached to this media. Populated only on detail endpoints. */
+    videos?: {
+        results: Array<{
+            key: string
+            site: string       // "YouTube" / "Vimeo"
+            type: string       // "Trailer" / "Teaser" / "Clip" / …
+            name: string
+            official?: boolean
+            published_at?: string
+        }>
+    }
 }
 
 export type TMDBSeason = {

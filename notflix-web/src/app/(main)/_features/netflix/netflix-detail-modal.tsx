@@ -206,6 +206,11 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
                             posterPath={data.poster_path ?? ""}
                         />
 
+                        {/* Trailer button — embedded YouTube player in a
+                            secondary overlay. Hidden when no trailer is
+                            available (TMDB returns an empty videos.results). */}
+                        <TrailerButton videos={data.videos?.results ?? []} />
+
                         {/* Quality + audio prefs — persisted in localStorage so
                             the choice survives between films. /watch reads
                             them from the URL params. */}
@@ -630,5 +635,91 @@ function BodySkeleton() {
                 <Skeleton className="h-4 w-3/4" />
             </div>
         </div>
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Trailer button + embed
+// ---------------------------------------------------------------------------
+
+type TMDBVideo = {
+    key: string
+    site: string
+    type: string
+    name: string
+    official?: boolean
+}
+
+/** Pick the best YouTube trailer from TMDB's videos.results.
+ *  Preference order: official Trailer → any Trailer → official Teaser
+ *  → first YouTube video. */
+function pickBestTrailer(videos: TMDBVideo[]): TMDBVideo | null {
+    const yt = videos.filter(v => v.site === "YouTube" && v.key)
+    if (yt.length === 0) return null
+    return (
+        yt.find(v => v.type === "Trailer" && v.official) ||
+        yt.find(v => v.type === "Trailer") ||
+        yt.find(v => v.type === "Teaser" && v.official) ||
+        yt.find(v => v.type === "Teaser") ||
+        yt[0]
+    )
+}
+
+function TrailerButton({ videos }: { videos: TMDBVideo[] }) {
+    const { t } = useTranslation()
+    const [open, setOpen] = React.useState(false)
+    const trailer = React.useMemo(() => pickBestTrailer(videos), [videos])
+    if (!trailer) return null
+
+    return (
+        <>
+            <button
+                type="button"
+                onClick={() => setOpen(true)}
+                aria-label={t("modal.trailer", "Bande-annonce")}
+                className={cn(
+                    "inline-flex items-center justify-center gap-2",
+                    "h-10 lg:h-12 px-4 lg:px-5 rounded-md",
+                    "bg-white/20 hover:bg-white/30 backdrop-blur-sm",
+                    "text-white text-sm lg:text-base font-semibold",
+                    "transition-colors",
+                )}
+            >
+                <BiPlay className="text-xl sm:text-2xl" />
+                <span className="hidden sm:inline">
+                    {t("modal.trailer", "Bande-annonce")}
+                </span>
+            </button>
+            {open && (
+                <Modal
+                    open={open}
+                    onOpenChange={(v) => { if (!v) setOpen(false) }}
+                    overlayClass="!z-[90]"
+                    contentClass="!max-w-4xl !p-0 !bg-black border-white/5"
+                    hideCloseButton
+                >
+                    <IconButton
+                        intent="gray-subtle"
+                        size="md"
+                        className={cn(
+                            "absolute z-[100] rounded-full bg-black/80 hover:bg-black !text-white",
+                            "right-3 top-3 size-10",
+                        )}
+                        icon={<BiX className="text-2xl" />}
+                        onClick={() => setOpen(false)}
+                        aria-label="Close"
+                    />
+                    <div className="aspect-video w-full">
+                        <iframe
+                            src={`https://www.youtube.com/embed/${trailer.key}?autoplay=1&rel=0`}
+                            title={trailer.name}
+                            className="w-full h-full"
+                            allow="autoplay; encrypted-media; picture-in-picture"
+                            allowFullScreen
+                        />
+                    </div>
+                </Modal>
+            )}
+        </>
     )
 }

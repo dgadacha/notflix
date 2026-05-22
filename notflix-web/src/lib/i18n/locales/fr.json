@@ -68,6 +68,8 @@
     "sub_prep_skip": "Lancer sans attendre",
     "sub_prep_corner": "Sous-titres en préparation",
     "sub_prep_corner_ready": "Sous-titres activés",
+    "next_episode_label": "Prochain épisode",
+    "next_play_now": "Lancer",
     "no_compatible_source": "Aucune source compatible avec ton navigateur (XviD / DivX non supportés)."
   },
   "profiles": {
@@ -93,6 +95,7 @@
     "episodes_count": "épisodes",
     "genres": "Genres",
     "subtitles": "Sous-titres",
+    "trailer": "Bande-annonce",
     "sub_prep_mode": "Préparation",
     "sub_prep_wait": "Attendre les sous-titres",
     "sub_prep_background": "Lecture immédiate"

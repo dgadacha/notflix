@@ -45,7 +45,7 @@ import {
     useSubPrepMode,
     useSubtitleLangPref,
 } from "@/lib/preferences"
-import { titleOf, tmdbImage, useTMDBDetail, yearOf } from "@/lib/tmdb"
+import { titleOf, tmdbImage, useTMDBDetail, useTMDBSeason, yearOf } from "@/lib/tmdb"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/components/ui/core/styling"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -599,6 +599,9 @@ export default function WatchPage() {
                     onBack={handleClose}
                     onChangeSource={handleChangeSource}
                     onFatalError={handleFatalPlaybackError}
+                    nextEpisodeMediaId={typeParam === "tv" ? mediaId : null}
+                    nextEpisodeSeason={typeParam === "tv" ? season : undefined}
+                    nextEpisodeNumber={typeParam === "tv" ? episode : undefined}
                 />
             </>
         )
@@ -1049,6 +1052,9 @@ function Player({
     onBack,
     onChangeSource,
     onFatalError,
+    nextEpisodeMediaId,
+    nextEpisodeSeason,
+    nextEpisodeNumber,
 }: {
     src: string
     title: string
@@ -1063,6 +1069,9 @@ function Player({
     onBack: () => void
     onChangeSource: () => void
     onFatalError: () => void
+    nextEpisodeMediaId: number | null
+    nextEpisodeSeason: number | undefined
+    nextEpisodeNumber: number | undefined
 }) {
     const { t } = useTranslation()
     const videoRef = React.useRef<HTMLVideoElement>(null)
@@ -1257,6 +1266,94 @@ function Player({
         }
     }, [subPrep?.state, subLangPref, autoShownTrack])
 
+    // Next-episode lookup: only relevant for TV. We fetch the current
+    // season to know whether there's a next episode, and the show
+    // detail to learn the total seasons (in case we need to jump to
+    // season N+1's episode 1).
+    const router = useRouter()
+    const showDetail = useTMDBDetail(nextEpisodeMediaId ? "tv" : "movie", nextEpisodeMediaId)
+    const seasonDetail = useTMDBSeason(nextEpisodeMediaId, nextEpisodeSeason ?? null)
+
+    type NextEpInfo = { season: number; episode: number; name: string }
+    const nextEpisode = React.useMemo<NextEpInfo | null>(() => {
+        if (!nextEpisodeMediaId || !nextEpisodeSeason || !nextEpisodeNumber) return null
+        const epList = seasonDetail.data?.episodes ?? []
+        // Same-season next episode?
+        const sameSeason = epList.find(e => e.episode_number === nextEpisodeNumber + 1)
+        if (sameSeason) {
+            return {
+                season: nextEpisodeSeason,
+                episode: sameSeason.episode_number,
+                name: sameSeason.name || `Épisode ${sameSeason.episode_number}`,
+            }
+        }
+        // No more episodes this season — look for a next season.
+        const seasons = (showDetail.data?.seasons ?? []).filter(s => s.season_number > nextEpisodeSeason)
+        const nextSeason = seasons.sort((a, b) => a.season_number - b.season_number)[0]
+        if (nextSeason && nextSeason.episode_count && nextSeason.episode_count > 0) {
+            return {
+                season: nextSeason.season_number,
+                episode: 1,
+                name: `S${nextSeason.season_number}E1`,
+            }
+        }
+        return null
+    }, [nextEpisodeMediaId, nextEpisodeSeason, nextEpisodeNumber, seasonDetail.data, showDetail.data])
+
+    // Track time remaining and trigger the auto-next overlay in the
+    // last 15 s of playback.
+    const [showNextOverlay, setShowNextOverlay] = React.useState(false)
+    const [countdownSec, setCountdownSec] = React.useState(10)
+    React.useEffect(() => {
+        if (!nextEpisode) return
+        const video = videoRef.current
+        if (!video) return
+        const onTimeUpdate = () => {
+            const dur = Number.isFinite(video.duration) ? video.duration : durationSec
+            if (!dur || dur <= 0) return
+            const remaining = dur - video.currentTime
+            if (remaining <= 15 && remaining > 0) {
+                setShowNextOverlay(true)
+            } else {
+                setShowNextOverlay(false)
+            }
+        }
+        video.addEventListener("timeupdate", onTimeUpdate)
+        return () => video.removeEventListener("timeupdate", onTimeUpdate)
+    }, [nextEpisode, durationSec])
+
+    // Countdown ticker while the overlay is visible.
+    React.useEffect(() => {
+        if (!showNextOverlay) {
+            setCountdownSec(10)
+            return
+        }
+        const handle = window.setInterval(() => {
+            setCountdownSec(c => {
+                if (c <= 1) {
+                    window.clearInterval(handle)
+                    return 0
+                }
+                return c - 1
+            })
+        }, 1000)
+        return () => window.clearInterval(handle)
+    }, [showNextOverlay])
+
+    // Once the countdown hits 0, navigate to the next episode.
+    React.useEffect(() => {
+        if (!showNextOverlay) return
+        if (countdownSec > 0) return
+        if (!nextEpisode || !nextEpisodeMediaId) return
+        const params = new URLSearchParams({
+            id: String(nextEpisodeMediaId),
+            type: "tv",
+            season: String(nextEpisode.season),
+            episode: String(nextEpisode.episode),
+        })
+        router.push(`/watch?${params.toString()}`)
+    }, [countdownSec, showNextOverlay, nextEpisode, nextEpisodeMediaId, router])
+
     // Show a small corner pill while subs prep is in progress, plus a
     // brief "subs ready" toast when it transitions to ready. Lets the
     // user see something IS happening without blocking the video.
@@ -1318,6 +1415,46 @@ function Player({
             {subPrep?.state === "ready" && readyToastShown && (
                 <div className="absolute bottom-20 right-4 z-10 bg-green-500/20 backdrop-blur-sm border border-green-500/40 rounded-lg px-3 py-2 text-xs text-green-200 animate-pulse">
                     {t("watch.sub_prep_corner_ready", "Sous-titres activés")}
+                </div>
+            )}
+
+            {/* Next-episode auto-play overlay — appears in the final 15 s
+                of playback when there IS a next episode. Counts down
+                from 10 s, then navigates. User can dismiss or trigger
+                immediately. */}
+            {showNextOverlay && nextEpisode && (
+                <div className="absolute bottom-24 right-4 z-20 bg-black/90 backdrop-blur-sm border border-white/10 rounded-lg p-4 max-w-sm shadow-2xl">
+                    <p className="text-[--muted] text-xs uppercase tracking-wider font-semibold mb-1">
+                        {t("watch.next_episode_label", "Prochain épisode")}
+                    </p>
+                    <p className="text-white font-bold text-sm mb-3 line-clamp-2">
+                        S{nextEpisode.season}E{nextEpisode.episode}
+                        {nextEpisode.name ? ` · ${nextEpisode.name}` : ""}
+                    </p>
+                    <div className="flex items-center gap-2">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                const params = new URLSearchParams({
+                                    id: String(nextEpisodeMediaId),
+                                    type: "tv",
+                                    season: String(nextEpisode.season),
+                                    episode: String(nextEpisode.episode),
+                                })
+                                router.push(`/watch?${params.toString()}`)
+                            }}
+                            className="flex-1 px-3 py-2 rounded-md bg-white text-black hover:bg-white/90 font-bold text-xs"
+                        >
+                            {t("watch.next_play_now", "Lancer")} · {countdownSec}s
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setShowNextOverlay(false)}
+                            className="px-3 py-2 rounded-md bg-white/10 hover:bg-white/20 text-white text-xs font-semibold"
+                        >
+                            {t("common.cancel", "Annuler")}
+                        </button>
+                    </div>
                 </div>
             )}
 
