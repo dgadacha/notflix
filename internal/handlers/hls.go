@@ -1048,62 +1048,23 @@ func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string)
 		return c.File(cachePath)
 	}
 
-	startSec := float64(n) * hlsSegDurSec
-	if startSec >= sess.duration {
+	if float64(n)*hlsSegDurSec >= sess.duration {
 		return c.NoContent(http.StatusNotFound)
 	}
-	segDur := hlsSegDurSec
-	if startSec+segDur > sess.duration {
-		segDur = sess.duration - startSec
-	}
 
-	inputPath := sess.url
-	if localPath, ok := h.localSourceIfReady(sess.url); ok {
-		inputPath = localPath
-	} else {
+	// Trigger source warmup if not local yet. bakeOneHLSChunk will
+	// pick up whichever input is available (local file if present,
+	// remote URL otherwise).
+	if _, ok := h.localSourceIfReady(sess.url); !ok {
 		go h.warmLocalSource(sess.url)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
-		log.Printf("hls seg %d: mkdir cache: %v", n, err)
-	}
-	tmpPath := cachePath + ".tmp"
-
-	ctx := c.Request().Context()
-	cmd := exec.CommandContext(ctx, "ffmpeg",
-		"-hide_banner",
-		"-loglevel", "warning",
-		"-ss", fmt.Sprintf("%.3f", startSec),
-		"-i", inputPath,
-		"-t", fmt.Sprintf("%.3f", segDur),
-		"-c:v", "copy",
-		"-c:a", "aac",
-		"-b:a", "192k",
-		"-ac", "2",
-		"-output_ts_offset", fmt.Sprintf("%.3f", startSec),
-		"-mpegts_copyts", "1",
-		"-f", "mpegts",
-		// Write to disk AND we'll also pipe the bytes back. tee
-		// muxer is overkill here; we just slurp the tmp file after
-		// ffmpeg exits (chunks are 200-600 KB).
-		"-y",
-		tmpPath,
-	)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		log.Printf("hls seg %d: ffmpeg %v | %s", n, err, strings.TrimSpace(stderr.String()))
-		_ = os.Remove(tmpPath)
-		return c.JSON(http.StatusBadGateway, map[string]any{
-			"error": "ffmpeg failed",
-		})
-	}
-	// Atomic rename — subsequent requests for this chunk hit the
-	// cache fast path.
-	if err := os.Rename(tmpPath, cachePath); err != nil {
-		log.Printf("hls seg %d: rename failed: %v", n, err)
-		// Still serve the tmp file directly to satisfy the request.
-		return c.File(tmpPath)
+	// Bake the chunk to disk (same code path as the prebake), then
+	// serve it. bakeOneHLSChunk already knows to use -c:a copy when
+	// audio is AAC.
+	if err := h.bakeOneHLSChunk(sess, n); err != nil {
+		log.Printf("hls seg %d: bake failed: %v", n, err)
+		return c.JSON(http.StatusBadGateway, map[string]any{"error": "ffmpeg failed"})
 	}
 	c.Response().Header().Set("Content-Type", "video/mp2t")
 	c.Response().Header().Set("Cache-Control", "public, max-age=3600")
@@ -1166,22 +1127,35 @@ func (h *Handler) bakeOneHLSChunk(sess *hlsSession, n int) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ffmpeg",
+
+	// Audio handling depends on the source codec:
+	//   - AAC → `-c:a copy`, the browser plays AAC natively inside
+	//     mpegts. No re-encode = chunks bake in ~100 ms instead of
+	//     2-4 s, and the audio stays bit-perfect.
+	//   - Anything else (AC3 / EAC3 / DTS / TrueHD) → re-encode to
+	//     AAC stereo so the browser can decode it.
+	audioArgs := []string{"-c:a", "aac", "-b:a", "192k", "-ac", "2"}
+	if strings.HasPrefix(strings.ToLower(sess.audioCodec), "aac") {
+		audioArgs = []string{"-c:a", "copy"}
+	}
+
+	args := []string{
 		"-hide_banner",
 		"-loglevel", "error",
 		"-ss", fmt.Sprintf("%.3f", startSec),
 		"-i", inputPath,
 		"-t", fmt.Sprintf("%.3f", segDur),
 		"-c:v", "copy",
-		"-c:a", "aac",
-		"-b:a", "192k",
-		"-ac", "2",
+	}
+	args = append(args, audioArgs...)
+	args = append(args,
 		"-output_ts_offset", fmt.Sprintf("%.3f", startSec),
 		"-mpegts_copyts", "1",
 		"-f", "mpegts",
 		"-y",
 		tmpPath,
 	)
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -1191,18 +1165,37 @@ func (h *Handler) bakeOneHLSChunk(sess *hlsSession, n int) error {
 	return os.Rename(tmpPath, cachePath)
 }
 
-// probeMediaInfo runs ffprobe once to extract the duration and the
-// first audio stream codec. Returns (duration, "") on success,
-// (0, "") on failure. Kept as a tiny shim around probeMediaFull for
-// callers that only need the duration/audio pair.
-func probeMediaInfo(parent context.Context, url string) (float64, string) {
-	dur, audio, _ := probeMediaFull(parent, url)
-	return dur, audio
+// ProbeResult is the full set of facts we extract from a single ffprobe
+// run. Audio codec drives the HLS vs direct decision, video codec +
+// container drive the same (via canPlayType on the client), and the
+// subtitle list drives the prep UI.
+type ProbeResult struct {
+	Duration   float64
+	AudioCodec string // "aac" / "ac3" / "eac3" / "dts" / "truehd" / ""
+	VideoCodec string // "h264" / "hevc" / "vp9" / "av1" / "xvid" / "mpeg4" / ""
+	Container  string // "mp4" / "matroska,webm" / "avi" / "" — ffprobe format_name verbatim
+	Subtitles  []SubtitleTrack
 }
 
-// probeMediaFull runs a single ffprobe invocation that returns the
-// duration, the first audio stream's codec, and every subtitle stream
-// in the source (with language + codec metadata).
+// probeMediaInfo returns just the duration + audio codec for callers
+// that don't need the full picture. Kept as a backwards-compat shim.
+func probeMediaInfo(parent context.Context, url string) (float64, string) {
+	res := probeMediaResult(parent, url)
+	return res.Duration, res.AudioCodec
+}
+
+// probeMediaFull is a backwards-compat shim returning just (dur, audio, subs).
+// New callers should use probeMediaResult which also exposes the video
+// codec and container format.
+func probeMediaFull(parent context.Context, url string) (float64, string, []SubtitleTrack) {
+	res := probeMediaResult(parent, url)
+	return res.Duration, res.AudioCodec, res.Subtitles
+}
+
+// probeMediaResult runs a single ffprobe invocation that returns the
+// duration, the first audio stream's codec, the first video stream's
+// codec, the container format, and every subtitle stream in the
+// source (with language + codec metadata).
 //
 // One probe is preferable to two because TorBox's CDN sometimes
 // rate-limits / 403s on rapid repeats, and ffprobe-over-network is the
@@ -1225,19 +1218,18 @@ func probeMediaInfo(parent context.Context, url string) (float64, string) {
 // the previous stream then. This caught us out on JJK VOSTFR releases
 // where every subtitle landed with Language="" and the player picked
 // none of them as preferred.
-func probeMediaFull(parent context.Context, url string) (float64, string, []SubtitleTrack) {
+func probeMediaResult(parent context.Context, url string) ProbeResult {
 	ctx, cancel := context.WithTimeout(parent, 25*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ffprobe",
 		"-v", "error",
-		// Scan deeper than the default 5s/5MB. MKV stream metadata
-		// usually lives in the EBML header so this is fast, but some
-		// releases (esp. anime with many subtitle tracks) keep the
-		// secondary tracks farther back in the file. 200MB / 60s
-		// covers everything we've seen in the wild.
 		"-analyzeduration", "60M",
 		"-probesize", "200M",
-		"-show_entries", "format=duration:stream=codec_name,codec_type:stream_tags=language,title",
+		// format_name + duration come from format=; codec_name/type
+		// + tags come from stream=. format_name is a comma-joined list
+		// e.g. "mov,mp4,m4a,3gp,3g2,mj2" for MP4-family or
+		// "matroska,webm" for MKV.
+		"-show_entries", "format=duration,format_name:stream=codec_name,codec_type:stream_tags=language,title",
 		"-of", "default=noprint_wrappers=1",
 		url,
 	)
@@ -1246,24 +1238,30 @@ func probeMediaFull(parent context.Context, url string) (float64, string, []Subt
 	out, err := cmd.Output()
 	if err != nil {
 		log.Printf("ffprobe FAIL: %v | %s", err, strings.TrimSpace(stderr.String()))
-		return 0, "", nil
+		return ProbeResult{}
 	}
 
 	var (
-		dur      float64
-		audio    string
-		subs     []SubtitleTrack
-		subIdx   int
-		curName  string
-		curType  string
-		curLang  string
-		curTitle string
+		dur       float64
+		audio     string
+		video     string
+		container string
+		subs      []SubtitleTrack
+		subIdx    int
+		curName   string
+		curType   string
+		curLang   string
+		curTitle  string
 	)
 	flush := func() {
 		switch curType {
 		case "audio":
 			if audio == "" {
 				audio = strings.ToLower(curName)
+			}
+		case "video":
+			if video == "" {
+				video = strings.ToLower(curName)
 			}
 		case "subtitle":
 			subs = append(subs, SubtitleTrack{
@@ -1285,8 +1283,9 @@ func probeMediaFull(parent context.Context, url string) (float64, string, []Subt
 			if v > 0 {
 				dur = v
 			}
+		case strings.HasPrefix(line, "format_name="):
+			container = strings.ToLower(strings.TrimPrefix(line, "format_name="))
 		case strings.HasPrefix(line, "codec_name="):
-			// Start of a new stream block — flush the previous one.
 			flush()
 			curName = strings.TrimPrefix(line, "codec_name=")
 		case strings.HasPrefix(line, "codec_type="):
@@ -1297,7 +1296,6 @@ func probeMediaFull(parent context.Context, url string) (float64, string, []Subt
 			curTitle = strings.TrimPrefix(line, "TAG:title=")
 		}
 	}
-	// Final stream — no more codec_name= lines to trigger a flush.
 	flush()
 
 	if len(subs) > 0 {
@@ -1305,17 +1303,20 @@ func probeMediaFull(parent context.Context, url string) (float64, string, []Subt
 		for _, s := range subs {
 			summary = append(summary, fmt.Sprintf("%s/%s", s.Codec, s.Language))
 		}
-		log.Printf("ffprobe OK: duration=%.1fs audio=%q subs=%d [%s]",
-			dur, audio, len(subs), strings.Join(summary, ", "))
+		log.Printf("ffprobe OK: dur=%.1fs container=%q v=%q a=%q subs=%d [%s]",
+			dur, container, video, audio, len(subs), strings.Join(summary, ", "))
 	} else {
-		log.Printf("ffprobe OK: duration=%.1fs audio=%q subs=0", dur, audio)
-		// Dump the raw stdout so the operator can see what ffprobe
-		// actually said. If subs really are 0 the dump shows only
-		// video + audio streams; if there's a parser miss it shows
-		// subtitle blocks we failed to capture.
+		log.Printf("ffprobe OK: dur=%.1fs container=%q v=%q a=%q subs=0",
+			dur, container, video, audio)
 		log.Printf("ffprobe RAW:\n%s", strings.TrimRight(string(out), "\n"))
 	}
-	return dur, audio, subs
+	return ProbeResult{
+		Duration:   dur,
+		AudioCodec: audio,
+		VideoCodec: video,
+		Container:  container,
+		Subtitles:  subs,
+	}
 }
 
 // isSubtitleConvertible reports whether ffmpeg can turn this codec into

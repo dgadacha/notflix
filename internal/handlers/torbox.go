@@ -251,11 +251,14 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 		return RespondErr(c, err)
 	}
 
-	// 5) Single ffprobe call covers most of what we need for playback:
-	//    duration + audio codec + every embedded subtitle stream. The
-	//    result is passed through to openHLSSession so it doesn't
+	// 5) Single ffprobe call covers everything we need for playback:
+	//    duration, audio/video codecs, container format, and subtitles.
+	//    The result is passed through to openHLSSession so it doesn't
 	//    re-probe (saves 1-2 s on the second hop).
-	durationSec, audioCodec, embeddedSubs := probeMediaFull(ctx, streamURL)
+	probe := probeMediaResult(ctx, streamURL)
+	durationSec := probe.Duration
+	audioCodec := probe.AudioCodec
+	embeddedSubs := probe.Subtitles
 
 	// 6) Many anime releases ship subtitles as sidecar files in the
 	//    same torrent (.ass / .srt / .vtt). Enumerate them and ask
@@ -324,10 +327,12 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 		"fileId":      fileID,
 		"torrentName": ready.Name,
 		"cached":      ready.Cached,
-		"audioCodec":  audioCodec,  // "aac" / "ac3" / "eac3" / "dts" / … / ""
-		"durationSec": durationSec, // 0 on probe failure
-		"subtitles":   allSubs,     // embedded + external, with Source field
-		"sessionId":   sessionID,   // for subtitle URL construction
+		"audioCodec":  audioCodec,        // "aac" / "ac3" / "eac3" / "dts" / "truehd" / ""
+		"videoCodec":  probe.VideoCodec,  // "h264" / "hevc" / "vp9" / "av1" / "xvid" / ""
+		"container":   probe.Container,   // "mov,mp4,m4a,3gp,3g2,mj2" / "matroska,webm" / "avi" / ""
+		"durationSec": durationSec,       // 0 on probe failure
+		"subtitles":   allSubs,           // embedded + external, with Source field
+		"sessionId":   sessionID,         // for subtitle URL construction
 	})
 }
 

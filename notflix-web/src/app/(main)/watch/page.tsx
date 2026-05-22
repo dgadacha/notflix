@@ -111,6 +111,8 @@ export default function WatchPage() {
     const [pickedRelease, setPickedRelease] = React.useState<Release | null>(null)
     const [streamUrl, setStreamUrl] = React.useState<string | null>(null)
     const [streamAudioCodec, setStreamAudioCodec] = React.useState<string>("")
+    const [streamVideoCodec, setStreamVideoCodec] = React.useState<string>("")
+    const [streamContainer, setStreamContainer] = React.useState<string>("")
     const [streamDurationSec, setStreamDurationSec] = React.useState<number>(0)
     const [streamSubtitles, setStreamSubtitles] = React.useState<SubtitleTrack[]>([])
     const [streamSessionId, setStreamSessionId] = React.useState<string>("")
@@ -135,6 +137,8 @@ export default function WatchPage() {
         setPickedRelease(null)
         setStreamUrl(null)
         setStreamAudioCodec("")
+        setStreamVideoCodec("")
+        setStreamContainer("")
         setStreamDurationSec(0)
         setStreamSubtitles([])
         setStreamSessionId("")
@@ -257,6 +261,8 @@ export default function WatchPage() {
             setPickedRelease(release)
             setStreamUrl(null)
             setStreamAudioCodec("")
+            setStreamVideoCodec("")
+            setStreamContainer("")
             setStreamDurationSec(0)
             setErrorMsg(null)
             setPhase("preparing")
@@ -264,6 +270,8 @@ export default function WatchPage() {
                 const result = await play.mutateAsync(payload)
                 setStreamUrl(result.streamUrl)
                 setStreamAudioCodec(result.audioCodec ?? "")
+                setStreamVideoCodec(result.videoCodec ?? "")
+                setStreamContainer(result.container ?? "")
                 setStreamDurationSec(
                     typeof (result as { durationSec?: number }).durationSec === "number"
                         ? (result as { durationSec: number }).durationSec
@@ -521,6 +529,8 @@ export default function WatchPage() {
         setPickedRelease(null)
         setStreamUrl(null)
         setStreamAudioCodec("")
+        setStreamVideoCodec("")
+        setStreamContainer("")
         setStreamDurationSec(0)
         setStreamSubtitles([])
         setStreamSessionId("")
@@ -590,6 +600,8 @@ export default function WatchPage() {
                     title={displayTitle}
                     releaseTitle={pickedRelease?.title ?? ""}
                     audioCodec={streamAudioCodec}
+                    videoCodec={streamVideoCodec}
+                    container={streamContainer}
                     durationSec={streamDurationSec}
                     subtitles={streamSubtitles}
                     sessionId={streamSessionId}
@@ -1043,6 +1055,8 @@ function Player({
     title,
     releaseTitle,
     audioCodec,
+    videoCodec,
+    container,
     durationSec,
     subtitles,
     sessionId,
@@ -1060,6 +1074,8 @@ function Player({
     title: string
     releaseTitle: string
     audioCodec: string
+    videoCodec: string
+    container: string
     durationSec: number
     subtitles: SubtitleTrack[]
     sessionId: string
@@ -1097,30 +1113,34 @@ function Player({
         return () => video.removeEventListener("loadedmetadata", onLoaded)
     }, [src])
 
-    // Decide the streaming path:
+    // Decide the streaming path. The DIRECT path is always faster and
+    // higher-quality (native browser playback, no ffmpeg, no re-encode),
+    // so we use it whenever the browser advertises it can play the
+    // source verbatim. Otherwise we fall back to HLS transmux.
     //
-    //   - audioCodec === "aac…" → DIRECT TorBox URL, native <video src>.
-    //     Full seek + native bandwidth, the best path. Most YTS / WEBRip
-    //     releases land here.
+    // Feature-detection via HTMLMediaElement.canPlayType:
+    //   "" / undefined  → no, force HLS
+    //   "maybe"         → maybe, but unreliable — be safe, force HLS
+    //   "probably"      → yes, use DIRECT
     //
-    //   - audioCodec === something else → HLS via ffmpeg backend. Audio
-    //     is re-encoded to AAC, video copied verbatim into 4-second .ts
-    //     chunks behind a growing .m3u8 playlist. hls.js (or Safari
-    //     native) plays the playlist — the seek bar works because each
-    //     chunk is independently fetchable.
+    // We hand canPlayType a synthesised MIME type that combines the
+    // container hint with codec strings. Examples:
+    //   container=mov,mp4,...  + v=h264 + a=aac → "video/mp4; codecs=\"avc1.640028,mp4a.40.2\""
+    //   container=matroska,... + v=h264 + a=aac → "video/x-matroska; codecs=\"avc1.640028,mp4a.40.2\""
+    //   container=avi          + ...            → "video/x-msvideo" (browsers always say "")
     //
-    //   - audioCodec empty (probe failed) → fall through to DIRECT, on
-    //     the bet that probe failures correlate with CDN hiccups, not
-    //     exotic codecs. If audio ends up silent the user clicks
-    //     "Changer de source".
-    const needsTransmux = audioCodec ? !audioCodec.startsWith("aac") : false
+    // Falls back to "force HLS" on probe failure (empty codec / container)
+    // — safer than trying DIRECT on an unknown format.
+    const needsTransmux = React.useMemo(() => {
+        return !canBrowserPlayDirect(container, videoCodec, audioCodec)
+    }, [container, videoCodec, audioCodec])
 
     React.useEffect(() => {
         console.info(
-            `[Notflix] audioCodec=${audioCodec || "(probe failed)"} → ` +
+            `[Notflix] probe: container=${container || "?"} v=${videoCodec || "?"} a=${audioCodec || "?"} → ` +
             `${needsTransmux ? "HLS transmux (seek OK)" : "DIRECT (seek OK)"}`,
         )
-    }, [audioCodec, needsTransmux])
+    }, [container, videoCodec, audioCodec, needsTransmux])
 
     // Debug: log what subtitle tracks we're trying to render. Lets the
     // user (and us) tell whether the issue is "backend returned 0 subs",
@@ -1518,6 +1538,95 @@ function Player({
             </video>
         </div>
     )
+}
+
+/** Pick a MIME type the browser's canPlayType understands from the
+ *  comma-joined container list ffprobe returns. Returns "" when none
+ *  of the listed format names map to a known MIME — in which case the
+ *  caller should force HLS transmux. */
+function mimeForContainer(container: string): string {
+    const c = container.toLowerCase()
+    // ffprobe joins multiple compatible format ids with commas, so we
+    // substring-match instead of strict-equals.
+    if (c.includes("mp4") || c.includes("mov") || c.includes("m4a") || c.includes("m4v")) {
+        return "video/mp4"
+    }
+    if (c.includes("webm")) {
+        return "video/webm"
+    }
+    // MKV is universally probed as "matroska,webm". Some browsers handle
+    // it (Chrome on macOS, Firefox); many don't. We let canPlayType
+    // arbitrate — if it says "" the caller forces HLS.
+    if (c.includes("matroska")) {
+        return "video/x-matroska"
+    }
+    // AVI, WMV, FLV, … — browsers don't decode any of these.
+    return ""
+}
+
+/** Best-effort codec strings for canPlayType. We pick conservative
+ *  profile/level pairs that cover 99% of releases (H.264 high level 4
+ *  for 1080p, AAC LC 2.0). Real-world releases use higher levels too,
+ *  but canPlayType isn't strict about that — "probably" usually means
+ *  "the codec, any common profile". */
+function codecStringFor(videoCodec: string, audioCodec: string): string {
+    const parts: string[] = []
+    switch (videoCodec.toLowerCase()) {
+        case "h264":
+        case "avc":
+            parts.push("avc1.640028")
+            break
+        case "hevc":
+        case "h265":
+            parts.push("hvc1.1.6.L120.B0")
+            break
+        case "vp9":
+            parts.push("vp09.00.50.08")
+            break
+        case "av1":
+            parts.push("av01.0.05M.08")
+            break
+        case "vp8":
+            parts.push("vp8")
+            break
+        // xvid/mpeg4 ASP/wmv/divx → no canPlayType match, browser
+        // will refuse. Leave empty so the MIME stays plain
+        // "video/mp4" (or whatever) and canPlayType says "".
+    }
+    switch (audioCodec.toLowerCase()) {
+        case "aac":
+            parts.push("mp4a.40.2")
+            break
+        case "mp3":
+            parts.push("mp4a.40.34") // MP3 in MP4 container
+            break
+        case "opus":
+            parts.push("opus")
+            break
+        case "vorbis":
+            parts.push("vorbis")
+            break
+        // AC3/EAC3/DTS/TrueHD/FLAC → not browser-decodable on most
+        // platforms. Skip to keep canPlayType honest.
+    }
+    return parts.join(",")
+}
+
+/** True iff the browser advertises native playback for this exact
+ *  combination of container + video codec + audio codec. */
+function canBrowserPlayDirect(container: string, videoCodec: string, audioCodec: string): boolean {
+    if (typeof document === "undefined") return false
+    const mime = mimeForContainer(container)
+    if (!mime) return false
+    const codecs = codecStringFor(videoCodec, audioCodec)
+    const full = codecs ? `${mime}; codecs="${codecs}"` : mime
+    const v = document.createElement("video")
+    const verdict = v.canPlayType(full)
+    // Only "probably" is a confident yes. "maybe" is the browser
+    // hedging — often it can't actually play the audio side even
+    // though the container is fine. Force HLS on "maybe" to avoid
+    // silent playback.
+    return verdict === "probably"
 }
 
 /** Map ffprobe's ISO-639-2 (3-letter) tags to the 2-letter BCP-47 codes

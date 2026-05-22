@@ -93,6 +93,12 @@ export type TorBoxPlayResult = {
      *  "ac3", "eac3", "dts", "truehd". Empty string when probe fails or
      *  no audio stream was found. */
     audioCodec?: string
+    /** First video stream codec — "h264" / "hevc" / "vp9" / "av1" / "xvid"
+     *  / "". Drives the direct-vs-HLS decision in the player. */
+    videoCodec?: string
+    /** Comma-joined container format list from ffprobe, e.g.
+     *  "mov,mp4,m4a,3gp,3g2,mj2" for MP4 or "matroska,webm" for MKV. */
+    container?: string
     /** Total duration in seconds from ffprobe. 0 on probe failure. */
     durationSec?: number
     /** Embedded subtitle streams. Always sent (empty array when none). */
