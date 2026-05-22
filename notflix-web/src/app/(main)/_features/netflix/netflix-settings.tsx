@@ -620,6 +620,142 @@ function ServerConfigEditor() {
                 source={data.anthropicModel.source}
                 bodyKey="anthropicModel"
             />
+
+            <ProviderTestPanel />
+        </div>
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Test connection panel — live-ping each configured backend
+// ---------------------------------------------------------------------------
+
+type TestProvider = "tmdb" | "torbox" | "prowlarr" | "anthropic"
+type TestResult = {
+    state: "idle" | "running" | "ok" | "err"
+    info?: string
+    error?: string
+}
+
+function ProviderTestPanel() {
+    const { t } = useTranslation()
+    const [results, setResults] = React.useState<Record<TestProvider, TestResult>>({
+        tmdb: { state: "idle" },
+        torbox: { state: "idle" },
+        prowlarr: { state: "idle" },
+        anthropic: { state: "idle" },
+    })
+
+    const runOne = async (provider: TestProvider) => {
+        setResults(r => ({ ...r, [provider]: { state: "running" } }))
+        try {
+            const res = await fetch(`/api/v1/admin/test/${provider}`, { method: "POST" })
+            const j = await res.json()
+            const data = j.data ?? j
+            if (data?.ok) {
+                setResults(r => ({ ...r, [provider]: { state: "ok", info: data.info } }))
+            } else {
+                setResults(r => ({ ...r, [provider]: { state: "err", error: data.error || `HTTP ${res.status}` } }))
+            }
+        } catch (e) {
+            setResults(r => ({ ...r, [provider]: { state: "err", error: (e as Error).message } }))
+        }
+    }
+
+    const runAll = () => {
+        // Fire in parallel — server doesn't gate.
+        void Promise.all([runOne("tmdb"), runOne("torbox"), runOne("prowlarr"), runOne("anthropic")])
+    }
+
+    const PROVIDERS: { key: TestProvider; label: string }[] = [
+        { key: "tmdb", label: "TMDB" },
+        { key: "torbox", label: "TorBox" },
+        { key: "prowlarr", label: "Prowlarr" },
+        { key: "anthropic", label: "Anthropic" },
+    ]
+
+    return (
+        <div className="mt-4 pt-4 border-t border-white/10 space-y-2">
+            <div className="flex items-center justify-between gap-3">
+                <p className="text-xs text-white/70 font-semibold">
+                    {t("settings.test_title", "Tester les connexions")}
+                </p>
+                <button
+                    type="button"
+                    onClick={runAll}
+                    className={cn(
+                        "px-2.5 py-1 rounded-md text-[11px] font-semibold",
+                        "bg-white/10 hover:bg-white/15 text-white/90 transition-colors",
+                    )}
+                >
+                    {t("settings.test_all", "Tout tester")}
+                </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {PROVIDERS.map(p => (
+                    <ProviderTestRow
+                        key={p.key}
+                        label={p.label}
+                        result={results[p.key]}
+                        onRun={() => void runOne(p.key)}
+                    />
+                ))}
+            </div>
+        </div>
+    )
+}
+
+function ProviderTestRow({
+    label,
+    result,
+    onRun,
+}: {
+    label: string
+    result: TestResult
+    onRun: () => void
+}) {
+    const { t } = useTranslation()
+    const dotClass =
+        result.state === "ok" ? "bg-emerald-400" :
+            result.state === "err" ? "bg-red-400" :
+                result.state === "running" ? "bg-amber-400 animate-pulse" :
+                    "bg-white/30"
+
+    return (
+        <div className="flex items-center gap-2 rounded-md px-2.5 py-2 bg-black/30 border border-white/10">
+            <span className={cn("size-2 rounded-full shrink-0", dotClass)} />
+            <div className="flex-1 min-w-0">
+                <div className="flex items-baseline gap-1.5">
+                    <span className="text-white text-xs font-semibold">{label}</span>
+                    {result.state === "ok" && result.info && (
+                        <span className="text-[10px] text-emerald-300/80 truncate" title={result.info}>
+                            {result.info}
+                        </span>
+                    )}
+                    {result.state === "err" && result.error && (
+                        <span className="text-[10px] text-red-300/80 truncate" title={result.error}>
+                            {result.error.length > 60 ? result.error.slice(0, 60) + "…" : result.error}
+                        </span>
+                    )}
+                    {result.state === "running" && (
+                        <span className="text-[10px] text-amber-300/80">
+                            {t("settings.test_running", "test en cours…")}
+                        </span>
+                    )}
+                </div>
+            </div>
+            <button
+                type="button"
+                onClick={onRun}
+                disabled={result.state === "running"}
+                className={cn(
+                    "px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider",
+                    "bg-white/10 hover:bg-white/15 text-white shrink-0",
+                    "disabled:opacity-50 disabled:cursor-not-allowed",
+                )}
+            >
+                {t("settings.test_button", "Tester")}
+            </button>
         </div>
     )
 }

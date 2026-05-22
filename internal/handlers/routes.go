@@ -50,6 +50,7 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	admin.PUT("/config", h.HandleUpdateServerConfig)
 	admin.GET("/backup", h.HandleBackupExport)
 	admin.POST("/backup/restore", h.HandleBackupRestore)
+	admin.POST("/test/:provider", h.HandleTestProvider)
 
 	// TMDB image cache — disk-backed proxy for image.tmdb.org so posters,
 	// backdrops and stills are served at LAN speed and survive browser
