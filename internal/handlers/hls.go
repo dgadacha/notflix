@@ -322,7 +322,10 @@ func (h *Handler) HandleStreamHLSFile(c echo.Context) error {
 	case strings.HasPrefix(file, "playlist_") && strings.HasSuffix(file, ".m3u8"):
 		variant := strings.TrimSuffix(strings.TrimPrefix(file, "playlist_"), ".m3u8")
 		return h.serveHLSVariantPlaylist(c, sess, variant)
-	case strings.HasPrefix(file, "segment_") && strings.HasSuffix(file, ".ts"):
+	case strings.HasPrefix(file, "init_") && strings.HasSuffix(file, ".mp4"):
+		variant := strings.TrimSuffix(strings.TrimPrefix(file, "init_"), ".mp4")
+		return h.serveHLSInitSegment(c, sess, variant)
+	case strings.HasPrefix(file, "segment_") && strings.HasSuffix(file, ".m4s"):
 		return h.serveHLSSegment(c, sess, file)
 	case strings.HasPrefix(file, "sub_") && strings.HasSuffix(file, ".vtt"):
 		return h.serveHLSSubtitle(c, sess, file)
@@ -1015,12 +1018,29 @@ func hlsVariants() []hlsVariant {
 	}
 }
 
-// hlsChunkCacheVariantPath is hlsChunkCachePath with a variant subdir
-// so the source-quality .ts files don't collide with 720p .ts files
-// for the same chunk index.
+// hlsChunkCacheVariantPath returns the disk path for one CMAF segment
+// (.m4s file). Layout: <datadir>/cache/hls-chunks/<sid>/<variant>/<N>.m4s.
+//
+// We use fMP4 / CMAF (.m4s) instead of MPEG-TS (.ts) because:
+//   - hls.js can play HEVC-in-fMP4 natively on Safari + Chrome (TS
+//     would need a software decoder for HEVC, which it doesn't have).
+//   - CMAF segments are ~5-10% smaller than MPEG-TS for the same
+//     payload (no transport-stream packetisation overhead).
+//   - Cleaner spec — same container as MP4 direct-play, so the
+//     browser decoder path is identical.
+//
+// Each variant has its own init segment, see hlsInitCachePath.
 func (h *Handler) hlsChunkCacheVariantPath(sessionID, variant string, n int) string {
 	return filepath.Join(h.App.Config.Data.Dir, "cache", "hls-chunks",
-		sessionID, variant, fmt.Sprintf("%05d.ts", n))
+		sessionID, variant, fmt.Sprintf("%05d.m4s", n))
+}
+
+// hlsInitCachePath returns the disk path for the fMP4 init segment of
+// one variant. Baked once at session open; referenced from the
+// variant playlist via #EXT-X-MAP.
+func (h *Handler) hlsInitCachePath(sessionID, variant string) string {
+	return filepath.Join(h.App.Config.Data.Dir, "cache", "hls-chunks",
+		sessionID, variant, "init.mp4")
 }
 
 // serveHLSPlaylist returns the master playlist. Currently a single
@@ -1046,9 +1066,12 @@ func (h *Handler) serveHLSPlaylist(c echo.Context, sess *hlsSession) error {
 	return c.String(http.StatusOK, b.String())
 }
 
-// serveHLSVariantPlaylist returns the per-level playlist for one ABR
-// variant. Each variant has its own chunk URL prefix so the chunks
-// don't collide on disk.
+// serveHLSVariantPlaylist returns the per-level playlist for one
+// variant. Each variant has its own init segment + chunk URL prefix
+// so they don't collide on disk.
+//
+// Version 7 is required because we use EXT-X-MAP (introduced in v6)
+// and want fMP4 segments without the legacy MPEG-TS fallback caveats.
 func (h *Handler) serveHLSVariantPlaylist(c echo.Context, sess *hlsSession, variant string) error {
 	segCount := int(math.Ceil(sess.duration / hlsSegDurSec))
 	if segCount < 1 {
@@ -1057,10 +1080,13 @@ func (h *Handler) serveHLSVariantPlaylist(c echo.Context, sess *hlsSession, vari
 
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n")
-	b.WriteString("#EXT-X-VERSION:3\n")
+	b.WriteString("#EXT-X-VERSION:7\n")
 	fmt.Fprintf(&b, "#EXT-X-TARGETDURATION:%d\n", int(math.Ceil(hlsSegDurSec)))
 	b.WriteString("#EXT-X-PLAYLIST-TYPE:VOD\n")
 	b.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
+	// fMP4 init segment — the player loads this ONCE before any
+	// segment, then re-uses the codec init across the whole playlist.
+	fmt.Fprintf(&b, "#EXT-X-MAP:URI=\"init_%s.mp4\"\n", variant)
 
 	for i := 0; i < segCount; i++ {
 		segDur := hlsSegDurSec
@@ -1071,13 +1097,29 @@ func (h *Handler) serveHLSVariantPlaylist(c echo.Context, sess *hlsSession, vari
 			}
 		}
 		fmt.Fprintf(&b, "#EXTINF:%.3f,\n", segDur)
-		fmt.Fprintf(&b, "segment_%s_%05d.ts\n", variant, i)
+		fmt.Fprintf(&b, "segment_%s_%05d.m4s\n", variant, i)
 	}
 	b.WriteString("#EXT-X-ENDLIST\n")
 
 	c.Response().Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	c.Response().Header().Set("Cache-Control", "no-store")
 	return c.String(http.StatusOK, b.String())
+}
+
+// serveHLSInitSegment serves the per-variant fMP4 init segment baked
+// at session open. If missing (eg first request before prebake had a
+// chance), bakes synchronously.
+func (h *Handler) serveHLSInitSegment(c echo.Context, sess *hlsSession, variant string) error {
+	initPath := h.hlsInitCachePath(sess.id, variant)
+	if info, err := os.Stat(initPath); err != nil || info.Size() == 0 {
+		if err := h.bakeInitSegment(sess, variant); err != nil {
+			log.Printf("hls init %s: bake failed: %v", variant, err)
+			return c.JSON(http.StatusBadGateway, map[string]any{"error": "init bake failed"})
+		}
+	}
+	c.Response().Header().Set("Content-Type", "video/mp4")
+	c.Response().Header().Set("Cache-Control", "public, max-age=3600")
+	return c.File(initPath)
 }
 
 
@@ -1099,7 +1141,7 @@ func (h *Handler) serveHLSVariantPlaylist(c echo.Context, sess *hlsSession, vari
 // File shape: segment_<variant>_<NNNNN>.ts (e.g. segment_source_00012.ts).
 func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string) error {
 	// Strip the prefix and suffix, split on "_" — variant first, number second.
-	body := strings.TrimSuffix(strings.TrimPrefix(file, "segment_"), ".ts")
+	body := strings.TrimSuffix(strings.TrimPrefix(file, "segment_"), ".m4s")
 	lastUnderscore := strings.LastIndex(body, "_")
 	if lastUnderscore < 0 {
 		return c.NoContent(http.StatusBadRequest)
@@ -1111,16 +1153,17 @@ func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string)
 		return c.NoContent(http.StatusBadRequest)
 	}
 
+	const segmentMIME = "video/iso.segment"
 	key := ramCacheKey(sess.id, variant, n)
 	ram := getHLSRAMCache()
 
 	// Tier 1 — RAM cache. Sub-ms hit, no syscall, ideal for re-seek
 	// inside the playback window.
 	if data, ok := ram.Get(key); ok {
-		c.Response().Header().Set("Content-Type", "video/mp2t")
+		c.Response().Header().Set("Content-Type", segmentMIME)
 		c.Response().Header().Set("Cache-Control", "public, max-age=3600")
 		c.Response().Header().Set("X-Hls-Source", "ram")
-		return c.Blob(http.StatusOK, "video/mp2t", data)
+		return c.Blob(http.StatusOK, segmentMIME, data)
 	}
 
 	// Tier 2 — disk cache.
@@ -1130,7 +1173,7 @@ func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string)
 		if data, rerr := os.ReadFile(cachePath); rerr == nil {
 			ram.Put(key, data)
 		}
-		c.Response().Header().Set("Content-Type", "video/mp2t")
+		c.Response().Header().Set("Content-Type", segmentMIME)
 		c.Response().Header().Set("Cache-Control", "public, max-age=3600")
 		c.Response().Header().Set("X-Hls-Source", "cache")
 		return c.File(cachePath)
@@ -1146,12 +1189,12 @@ func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string)
 		return c.JSON(http.StatusBadGateway, map[string]any{"error": "ffmpeg failed"})
 	}
 	if data, ok := ram.Get(key); ok {
-		c.Response().Header().Set("Content-Type", "video/mp2t")
+		c.Response().Header().Set("Content-Type", segmentMIME)
 		c.Response().Header().Set("Cache-Control", "public, max-age=3600")
 		c.Response().Header().Set("X-Hls-Source", "ffmpeg")
-		return c.Blob(http.StatusOK, "video/mp2t", data)
+		return c.Blob(http.StatusOK, segmentMIME, data)
 	}
-	c.Response().Header().Set("Content-Type", "video/mp2t")
+	c.Response().Header().Set("Content-Type", segmentMIME)
 	c.Response().Header().Set("Cache-Control", "public, max-age=3600")
 	c.Response().Header().Set("X-Hls-Source", "ffmpeg")
 	return c.File(cachePath)
@@ -1175,6 +1218,15 @@ func (h *Handler) prebakeHLSChunks(sess *hlsSession, count int) {
 		return
 	}
 	start := time.Now()
+
+	// Init segment first — chunks can't be served without it.
+	for _, v := range hlsVariants() {
+		if err := h.bakeInitSegment(sess, v.Name); err != nil {
+			log.Printf("hls prebake: init segment for %s failed: %v", v.Name, err)
+			// Don't bail — chunks might still bake. The serve path
+			// will retry the init segment on first request.
+		}
+	}
 
 	sem := make(chan struct{}, hlsPrebakeConcurrency)
 	var wg sync.WaitGroup
@@ -1219,9 +1271,106 @@ func (h *Handler) prebakeHLSChunks(sess *hlsSession, count int) {
 		sess.id, done, count, time.Since(start).Round(100*time.Millisecond))
 }
 
-// bakeOneHLSChunk runs ffmpeg synchronously to generate one .ts segment
-// for one ABR variant into the disk cache. Used by both the prebake
-// path and the on-demand serveHLSSegment path.
+// bakeInitSegment generates the fMP4 init segment (init.mp4) for one
+// variant. The init segment carries the codec parameters (sps/pps for
+// H.264, vps/sps/pps for HEVC, etc.) and the moov box; on-demand
+// chunks reference it via EXT-X-MAP.
+//
+// We use ffmpeg's HLS muxer in fmp4 mode for ONE short pass, then keep
+// only the init file. The first emitted .m4s segment is discarded —
+// the on-demand bake path produces its own segments.
+//
+// Cost: ~1 s for codec-copy. Called once per session per variant from
+// prebakeHLSChunks, before any segment bake.
+func (h *Handler) bakeInitSegment(sess *hlsSession, variantName string) error {
+	if sess == nil {
+		return fmt.Errorf("nil session")
+	}
+	initPath := h.hlsInitCachePath(sess.id, variantName)
+	if info, err := os.Stat(initPath); err == nil && info.Size() > 0 {
+		return nil // already baked
+	}
+
+	// Locate the variant.
+	var variant hlsVariant
+	for _, v := range hlsVariants() {
+		if v.Name == variantName {
+			variant = v
+			break
+		}
+	}
+	if variant.Name == "" {
+		return fmt.Errorf("unknown variant %q", variantName)
+	}
+
+	cacheDir := filepath.Dir(initPath)
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Same audio decision as on-demand bake to keep the init codec
+	// metadata consistent with the chunks.
+	audioArgs := []string{"-c:a", "aac", "-b:a", "192k", "-ac", "2"}
+	if variantName == "source" && strings.HasPrefix(strings.ToLower(sess.audioCodec), "aac") {
+		audioArgs = []string{"-c:a", "copy"}
+	}
+
+	args := []string{
+		"-hide_banner",
+		"-loglevel", "error",
+		"-ss", "0",
+	}
+	if strings.HasPrefix(sess.url, "http://") || strings.HasPrefix(sess.url, "https://") {
+		args = append(args, ffmpegHTTPInputFlags()...)
+	}
+	args = append(args,
+		"-i", sess.url,
+		// Read just enough source to flush the init segment.
+		"-t", fmt.Sprintf("%.0f", hlsSegDurSec),
+	)
+	args = append(args, variant.VideoArgs...)
+	args = append(args, audioArgs...)
+	args = append(args,
+		"-f", "hls",
+		"-hls_time", fmt.Sprintf("%.0f", hlsSegDurSec),
+		"-hls_list_size", "0",
+		"-hls_segment_type", "fmp4",
+		"-hls_fmp4_init_filename", "init.mp4",
+		// Throwaway segment + playlist — we only want init.mp4. The
+		// .m4s and .m3u8 files are immediately deleted after.
+		"-hls_segment_filename", filepath.Join(cacheDir, "_init_seed_%05d.m4s"),
+		filepath.Join(cacheDir, "_init_seed.m3u8"),
+	)
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("init bake: %v | %s", err, strings.TrimSpace(stderr.String()))
+	}
+
+	// Clean up the throwaway pieces. ffmpeg writes init.mp4 +
+	// _init_seed_NNNNN.m4s + _init_seed.m3u8.
+	entries, _ := os.ReadDir(cacheDir)
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, "_init_seed") {
+			_ = os.Remove(filepath.Join(cacheDir, name))
+		}
+	}
+
+	if info, err := os.Stat(initPath); err != nil || info.Size() == 0 {
+		return fmt.Errorf("init bake: ffmpeg did not produce init.mp4")
+	}
+	return nil
+}
+
+// bakeOneHLSChunk runs ffmpeg synchronously to generate one .m4s
+// segment for one variant into the disk cache. Used by both the
+// prebake path and the on-demand serveHLSSegment path.
 func (h *Handler) bakeOneHLSChunk(sess *hlsSession, variantName string, n int) error {
 	startSec := float64(n) * hlsSegDurSec
 	if startSec >= sess.duration {
@@ -1290,10 +1439,23 @@ func (h *Handler) bakeOneHLSChunk(sess *hlsSession, variantName string, n int) e
 		args = append(args, "-b:v", variant.VideoBR, "-maxrate", variant.VideoBR, "-bufsize", "4000k")
 	}
 	args = append(args, audioArgs...)
+	// fMP4 / CMAF muxing.
+	//   - empty_moov: don't write a moov in the segment — it lives in
+	//                 the init.mp4 referenced via EXT-X-MAP.
+	//   - default_base_moof: track timestamps anchor on the moof box
+	//                        so seeks work without the init knowing
+	//                        the segment count.
+	//   - frag_keyframe: start a new fragment on every keyframe →
+	//                    in practice one fragment per chunk for our
+	//                    short segDur.
+	//   - separate_moof: write a separate moof per track.
+	//   - omit_tfhd_offset: don't write absolute byte offsets in tfhd
+	//                       (they'd be wrong since the segment isn't
+	//                        at offset 0 of the full file).
 	args = append(args,
 		"-output_ts_offset", fmt.Sprintf("%.3f", startSec),
-		"-mpegts_copyts", "1",
-		"-f", "mpegts",
+		"-movflags", "+empty_moov+default_base_moof+frag_keyframe+omit_tfhd_offset+separate_moof",
+		"-f", "mp4",
 		"-y",
 		tmpPath,
 	)
