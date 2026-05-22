@@ -779,27 +779,38 @@ function TrailerButton({ videos }: { videos: TMDBVideo[] }) {
                         )}
                         {!loading && picked && (
                             <>
+                                {/* youtube-nocookie.com is YouTube's privacy-
+                                    enhanced embed domain. It's noticeably more
+                                    permissive than youtube.com/embed/ on
+                                    regional restrictions + iframe blocking —
+                                    notably the "youtube.com n'autorise pas la
+                                    connexion" error that hits some clients via
+                                    Cloudflare / regional CDNs. modestbranding
+                                    hides most of the YouTube chrome. */}
                                 <iframe
-                                    src={`https://www.youtube.com/embed/${picked.key}?autoplay=1&rel=0`}
+                                    src={`https://www.youtube-nocookie.com/embed/${picked.key}?autoplay=1&rel=0&modestbranding=1`}
                                     title={picked.name}
                                     className="w-full h-full"
-                                    allow="autoplay; encrypted-media; picture-in-picture"
+                                    referrerPolicy="strict-origin-when-cross-origin"
+                                    allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
                                     allowFullScreen
                                 />
-                                {/* Always-visible escape hatch under the iframe — if
-                                    the embed loads but playback then fails (very
-                                    rare with the pre-check, but it happens on age-
-                                    gated videos that pass oEmbed but block playback),
-                                    the user has a way out. */}
+                                {/* Always-visible escape hatch under the iframe —
+                                    even with nocookie the embed can still fail
+                                    silently on some networks (corporate DNS,
+                                    parental controls, ISP-level YouTube
+                                    restrictions). One click and the user is on
+                                    the real YouTube page. */}
                                 <a
                                     href={`https://www.youtube.com/watch?v=${picked.key}`}
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     className={cn(
                                         "absolute left-3 bottom-3 z-[110]",
-                                        "px-2.5 py-1 rounded-md text-[11px] font-semibold",
-                                        "bg-black/70 hover:bg-black/90 text-white/90",
+                                        "px-3 py-1.5 rounded-md text-xs font-semibold",
+                                        "bg-black/80 hover:bg-red-600/90 text-white",
                                         "backdrop-blur-sm transition-colors",
+                                        "border border-white/20",
                                     )}
                                 >
                                     {t("modal.trailer_open_external", "Ouvrir sur YouTube ↗")}
