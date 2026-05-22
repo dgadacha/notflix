@@ -51,10 +51,6 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	admin.GET("/backup", h.HandleBackupExport)
 	admin.POST("/backup/restore", h.HandleBackupRestore)
 
-	// YouTube embed availability check — gracefully degrade the
-	// trailer modal when a video is geoblocked / removed / age-gated.
-	v1.GET("/youtube/check", h.HandleYouTubeCheck)
-
 	// TMDB image cache — disk-backed proxy for image.tmdb.org so posters,
 	// backdrops and stills are served at LAN speed and survive browser
 	// cache evictions. Registered BEFORE the catch-all /tmdb/* so the
