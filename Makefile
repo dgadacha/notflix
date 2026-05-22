@@ -85,6 +85,26 @@ docker: ## Build the container image ($(IMAGE):$(TAG))
 docker-push: docker ## Build + push to the registry
 	@docker push $(IMAGE):$(TAG)
 
+# ─────────────────────────────────────────────────────────────────────
+# All-in-one bundle image (Notflix + Prowlarr + Flaresolverr)
+# ─────────────────────────────────────────────────────────────────────
+BUNDLE_IMAGE ?= $(IMAGE)-bundle
+BUNDLE_TAG   ?= $(TAG)
+
+docker-bundle: ## Build the bundle image (Notflix + Prowlarr + Flaresolverr)
+	@docker build --platform=linux/amd64 -f Dockerfile.bundle -t $(BUNDLE_IMAGE):$(BUNDLE_TAG) .
+
+docker-bundle-push: docker-bundle ## Build + push the bundle image
+	@docker push $(BUNDLE_IMAGE):$(BUNDLE_TAG)
+
+docker-bundle-run: ## Run the bundle image locally for testing
+	@docker run --rm -it \
+		-p 43212:43212 \
+		-p 9696:9696 \
+		-v notflix-bundle-data:/data \
+		--name notflix-bundle \
+		$(BUNDLE_IMAGE):$(BUNDLE_TAG)
+
 deploy: docker-push ## Build, push, kubectl apply, rollout restart
 	@$(KUBECTL) apply -f k8s/namespace.yaml
 	@$(KUBECTL) apply -f k8s/pvc.yaml

@@ -1,0 +1,169 @@
+# syntax=docker/dockerfile:1.7
+#
+# Notflix all-in-one bundle — Notflix + Prowlarr + Flaresolverr in a
+# single image. Designed for self-hosted homelab use where ops simplicity
+# beats best-practice ("one process per container").
+#
+# Services:
+#   - Notflix      port 43212  (configurable via NOTFLIX_SERVER_PORT)
+#   - Prowlarr     port 9696
+#   - Flaresolverr port 8191   (internal — Prowlarr talks to it on localhost)
+#
+# Sizes (approx):
+#   - Notflix binary + ffmpeg:        ~150 MB
+#   - Prowlarr .NET self-contained:   ~150 MB
+#   - Chromium + drivers:             ~300 MB
+#   - Python + Flaresolverr deps:     ~200 MB
+#   - Total compressed:                ~700-900 MB
+#
+# All three services start at container boot via a small bash
+# supervisor. If any process exits, the container exits (docker /
+# k8s restarts it as a unit).
+#
+# Volumes:
+#   /data           — Notflix data dir   (config.toml, notflix.db, caches)
+#   /data/prowlarr  — Prowlarr data dir  (config.xml, prowlarr.db, indexers)
+#
+# Defaults that wire the three together:
+#   NOTFLIX_PROWLARR_URL  = http://127.0.0.1:9696
+#   Prowlarr → FlareSolverr indexer config = http://127.0.0.1:8191
+#   (set this once in the Prowlarr UI: Settings → Indexer → FlareSolverr)
+
+############################
+# 1) Build the React frontend
+############################
+FROM node:20-bookworm-slim AS web-builder
+WORKDIR /app/notflix-web
+
+COPY notflix-web/package.json notflix-web/package-lock.json* ./
+RUN npm install --no-audit --no-fund
+
+COPY notflix-web/ ./
+RUN npx --yes rsbuild build
+
+############################
+# 2) Build the Go binary
+############################
+FROM golang:1.23-bookworm AS go-builder
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+COPY --from=web-builder /app/notflix-web/dist ./web
+
+RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/notflix ./
+
+############################
+# 3) Download Prowlarr release
+############################
+FROM debian:bookworm-slim AS prowlarr-fetcher
+ARG PROWLARR_VERSION=1.31.2.5181
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Prowlarr ships self-contained .NET binaries (no Mono needed). The
+# `linux-core-x64` tar bundles the .NET runtime alongside the app.
+RUN curl -fsSL -o /tmp/prowlarr.tar.gz \
+      "https://github.com/Prowlarr/Prowlarr/releases/download/v${PROWLARR_VERSION}/Prowlarr.master.${PROWLARR_VERSION}.linux-core-x64.tar.gz" \
+ && mkdir -p /opt \
+ && tar -xzf /tmp/prowlarr.tar.gz -C /opt \
+ && rm /tmp/prowlarr.tar.gz \
+ && test -f /opt/Prowlarr/Prowlarr
+
+############################
+# 4) Clone Flaresolverr source
+############################
+FROM debian:bookworm-slim AS flaresolverr-fetcher
+ARG FLARESOLVERR_VERSION=v3.3.21
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 --branch "${FLARESOLVERR_VERSION}" \
+      https://github.com/FlareSolverr/FlareSolverr.git /opt/flaresolverr \
+ && rm -rf /opt/flaresolverr/.git
+
+############################
+# 5) Runtime — everything in one image
+############################
+FROM debian:bookworm-slim AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=UTC \
+    PYTHONUNBUFFERED=1 \
+    NOTFLIX_DATA_DIR=/data \
+    NOTFLIX_PROWLARR_URL=http://127.0.0.1:9696
+
+# Runtime dependencies:
+#   - ffmpeg, ffprobe       — Notflix HLS pipeline
+#   - ca-certificates, tzdata — HTTPS + timezone
+#   - libicu72              — Prowlarr .NET runtime
+#   - chromium, chromium-driver — Flaresolverr Chrome
+#   - python3, python3-pip, python3-venv — Flaresolverr runtime
+#   - tini                  — minimal PID 1 (replaces s6-overlay)
+#   - curl, ca-certificates — useful for healthcheck + debug
+#
+# Tini reaps zombie children — important because the supervisor
+# script forks 3 background processes. Without tini, defunct
+# processes accumulate over time.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates tzdata tini curl \
+      ffmpeg \
+      libicu72 \
+      chromium chromium-driver \
+      python3 python3-pip python3-venv \
+      xvfb \
+ && rm -rf /var/lib/apt/lists/*
+
+# Create the unprivileged user that runs all three services.
+RUN useradd -r -m -u 999 -d /home/notflix -s /bin/bash notflix
+
+# Notflix binary + data dir
+WORKDIR /app
+COPY --from=go-builder /out/notflix /app/notflix
+
+# Prowlarr install
+COPY --from=prowlarr-fetcher /opt/Prowlarr /opt/prowlarr
+
+# Flaresolverr install — copy source then pip-install deps. We use a
+# venv to keep system Python clean; pip with --break-system-packages
+# would work on bookworm too but venv is cleaner.
+COPY --from=flaresolverr-fetcher /opt/flaresolverr /opt/flaresolverr
+RUN python3 -m venv /opt/flaresolverr/venv \
+ && /opt/flaresolverr/venv/bin/pip install --no-cache-dir --upgrade pip \
+ && /opt/flaresolverr/venv/bin/pip install --no-cache-dir -r /opt/flaresolverr/requirements.txt
+
+# Supervisor script — starts all 3 in background and exits on the
+# first death so docker / k8s restart-policy kicks in cleanly.
+COPY docker/bundle/entrypoint.sh /usr/local/bin/notflix-bundle
+RUN chmod +x /usr/local/bin/notflix-bundle
+
+# Pre-create the data dirs + give the unprivileged user write
+# access to everything it might touch.
+RUN mkdir -p /data /data/prowlarr /data/flaresolverr-cache \
+ && chown -R notflix:notflix /app /opt/prowlarr /opt/flaresolverr /data \
+ && chmod -R u+w /opt/prowlarr /opt/flaresolverr
+
+USER notflix
+WORKDIR /app
+
+# Ports:
+#   43212  Notflix backend (also serves the SPA)
+#   9696   Prowlarr UI / API
+#   8191   Flaresolverr — kept internal, NOT exposed by default. Add
+#          -p 8191:8191 to the docker run if you want external access.
+EXPOSE 43212 9696
+
+VOLUME ["/data"]
+
+# tini as PID 1, supervisor script as the actual process. Tini
+# handles SIGCHLD properly so dead child processes don't pile up.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/usr/local/bin/notflix-bundle"]
