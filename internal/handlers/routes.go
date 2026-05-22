@@ -71,6 +71,7 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	// annotated with TorBox cache state).
 	pr := v1.Group("/prowlarr")
 	pr.GET("/status", h.HandleProwlarrStatus)
+	pr.GET("/health", h.HandleProwlarrHealth)
 	pr.GET("/search/movie", h.HandleSearchMovie)
 	pr.GET("/search/tv", h.HandleSearchTV)
 

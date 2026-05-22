@@ -136,6 +136,39 @@ func (c *Client) ListIndexers(ctx context.Context) ([]Indexer, error) {
 }
 
 // -----------------------------------------------------------------------------
+// /api/v1/indexerstats — per-indexer success/failure rolling counts
+// -----------------------------------------------------------------------------
+
+// IndexerStat is one row from Prowlarr's stats endpoint. Counts are
+// since the rolling window Prowlarr internally tracks (defaults to
+// 1 day). Useful for the "is this indexer alive" UI dot.
+type IndexerStat struct {
+	IndexerID            int    `json:"indexerId"`
+	IndexerName          string `json:"indexerName"`
+	AverageResponseTime  int    `json:"averageResponseTime"`
+	NumberOfQueries      int    `json:"numberOfQueries"`
+	NumberOfGrabs        int    `json:"numberOfGrabs"`
+	NumberOfRssQueries   int    `json:"numberOfRssQueries"`
+	NumberOfAuthQueries  int    `json:"numberOfAuthQueries"`
+	NumberOfFailedQueries int   `json:"numberOfFailedQueries"`
+	NumberOfFailedGrabs  int    `json:"numberOfFailedGrabs"`
+	NumberOfFailedRssQueries int `json:"numberOfFailedRssQueries"`
+	NumberOfFailedAuthQueries int `json:"numberOfFailedAuthQueries"`
+}
+
+type indexerStatsResponse struct {
+	Indexers []IndexerStat `json:"indexers"`
+}
+
+func (c *Client) IndexerStats(ctx context.Context) ([]IndexerStat, error) {
+	var resp indexerStatsResponse
+	if err := c.do(ctx, http.MethodGet, "/api/v1/indexerstats", nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Indexers, nil
+}
+
+// -----------------------------------------------------------------------------
 // /api/v1/search — the main thing Notflix uses
 // -----------------------------------------------------------------------------
 

@@ -27,6 +27,7 @@ import {
     useServerConfig,
     useUpdateServerConfig,
 } from "@/lib/auth"
+import { useQuery } from "@tanstack/react-query"
 import {
     AudioPref,
     AUDIO_OPTIONS,
@@ -48,7 +49,7 @@ import {
     BiShield,
     BiUser,
 } from "react-icons/bi"
-import { LuArrowRight, LuGlobe, LuKey, LuPlay, LuServer, LuUsers } from "react-icons/lu"
+import { LuActivity, LuArrowRight, LuGlobe, LuKey, LuPlay, LuServer, LuUsers } from "react-icons/lu"
 
 export function NetflixSettings() {
     const { t } = useTranslation()
@@ -136,6 +137,12 @@ export function NetflixSettings() {
             {me?.isAdmin && (
                 <Section icon={<LuServer className="size-5" />} title={t("settings.server", "Configuration serveur")}>
                     <ServerConfigEditor />
+                </Section>
+            )}
+
+            {me?.isAdmin && (
+                <Section icon={<LuActivity className="size-5" />} title={t("settings.prowlarr_health", "État Prowlarr")}>
+                    <ProwlarrHealthPanel />
                 </Section>
             )}
 
@@ -916,6 +923,172 @@ function NavRow({
                 {cta}
                 <LuArrowRight className="size-3.5" />
             </button>
+        </div>
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Prowlarr health
+// ---------------------------------------------------------------------------
+
+type ProwlarrHealth = {
+    configured: boolean
+    up?: boolean
+    appName?: string
+    version?: string
+    indexerCount?: number
+    enabledIndexers?: number
+    error?: string
+    indexers?: Array<{
+        id: number
+        name: string
+        enable: boolean
+        protocol: string
+        status: "up" | "degraded" | "down" | "unknown" | "disabled"
+        queries: number
+        failures: number
+        averageResponseTimeMs: number
+    }>
+}
+
+function useProwlarrHealth() {
+    return useQuery<ProwlarrHealth>({
+        queryKey: ["prowlarr", "health"],
+        queryFn: async () => {
+            const r = await fetch("/api/v1/prowlarr/health")
+            if (!r.ok) throw new Error(`health ${r.status}`)
+            const j = await r.json()
+            return (j.data ?? j) as ProwlarrHealth
+        },
+        // Refresh whenever the panel comes into view + every 30 s.
+        refetchOnWindowFocus: true,
+        refetchInterval: 30_000,
+        staleTime: 10_000,
+    })
+}
+
+const STATUS_COLOR: Record<NonNullable<ProwlarrHealth["indexers"]>[number]["status"], string> = {
+    up: "bg-emerald-400",
+    degraded: "bg-amber-400",
+    down: "bg-red-400",
+    unknown: "bg-white/30",
+    disabled: "bg-white/15",
+}
+
+function ProwlarrHealthPanel() {
+    const { t } = useTranslation()
+    const { data, isLoading, error } = useProwlarrHealth()
+
+    if (isLoading) {
+        return (
+            <div className="space-y-2">
+                <Skeleton className="h-5 w-40" />
+                <Skeleton className="h-3 w-3/4" />
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2">
+                    {Array.from({ length: 4 }).map((_, i) => (
+                        <Skeleton key={i} className="h-9 w-full" />
+                    ))}
+                </div>
+            </div>
+        )
+    }
+    if (error) {
+        return (
+            <p className="text-red-300 text-xs bg-red-500/10 border border-red-500/30 rounded-md px-3 py-2">
+                {(error as Error)?.message ?? "load failed"}
+            </p>
+        )
+    }
+    if (!data || !data.configured) {
+        return (
+            <p className="text-[--muted] text-xs">
+                {t("settings.prowlarr_not_configured",
+                    "Prowlarr n'est pas configuré. Renseigne l'URL + la clé API ci-dessus.")}
+            </p>
+        )
+    }
+    if (data.up === false) {
+        return (
+            <div className="text-xs bg-red-500/10 border border-red-500/30 rounded-md px-3 py-2 text-red-200 space-y-1">
+                <p className="font-semibold">
+                    {t("settings.prowlarr_down", "Prowlarr injoignable")}
+                </p>
+                {data.error && <p className="text-red-300/80">{data.error}</p>}
+            </div>
+        )
+    }
+
+    const indexers = data.indexers ?? []
+    const counts = indexers.reduce(
+        (acc, ix) => {
+            acc[ix.status] = (acc[ix.status] || 0) + 1
+            return acc
+        },
+        { up: 0, degraded: 0, down: 0, unknown: 0, disabled: 0 } as Record<string, number>,
+    )
+
+    return (
+        <div className="space-y-3">
+            <div className="flex items-center gap-2 text-sm">
+                <span className="size-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]" />
+                <span className="text-white font-semibold">
+                    {data.appName ?? "Prowlarr"} v{data.version ?? "?"}
+                </span>
+                <span className="text-[--muted] text-xs">
+                    · {data.enabledIndexers ?? 0}/{data.indexerCount ?? 0}{" "}
+                    {t("settings.prowlarr_enabled_indexers", "indexers actifs")}
+                </span>
+            </div>
+
+            {(counts.up + counts.degraded + counts.down + counts.unknown) > 0 && (
+                <div className="flex flex-wrap gap-2 text-[11px] text-[--muted]">
+                    {counts.up > 0 && (
+                        <span className="inline-flex items-center gap-1">
+                            <span className="size-1.5 rounded-full bg-emerald-400" /> {counts.up} {t("settings.prowlarr_status_up", "OK")}
+                        </span>
+                    )}
+                    {counts.degraded > 0 && (
+                        <span className="inline-flex items-center gap-1">
+                            <span className="size-1.5 rounded-full bg-amber-400" /> {counts.degraded} {t("settings.prowlarr_status_degraded", "dégradé")}
+                        </span>
+                    )}
+                    {counts.down > 0 && (
+                        <span className="inline-flex items-center gap-1">
+                            <span className="size-1.5 rounded-full bg-red-400" /> {counts.down} {t("settings.prowlarr_status_down", "down")}
+                        </span>
+                    )}
+                    {counts.unknown > 0 && (
+                        <span className="inline-flex items-center gap-1">
+                            <span className="size-1.5 rounded-full bg-white/30" /> {counts.unknown} {t("settings.prowlarr_status_unknown", "inconnu")}
+                        </span>
+                    )}
+                </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {indexers.map(ix => (
+                    <div
+                        key={ix.id}
+                        className={cn(
+                            "flex items-center gap-2 rounded-md px-2.5 py-1.5 text-xs",
+                            "bg-black/30 border border-white/10",
+                            !ix.enable && "opacity-60",
+                        )}
+                    >
+                        <span className={cn("size-2 rounded-full shrink-0", STATUS_COLOR[ix.status])} />
+                        <span className="text-white font-medium truncate flex-1" title={ix.name}>
+                            {ix.name}
+                        </span>
+                        {ix.queries > 0 && (
+                            <span className="text-[--muted] text-[10px] tabular-nums shrink-0">
+                                {ix.failures > 0
+                                    ? `${ix.failures}/${ix.queries} ✗`
+                                    : `${ix.averageResponseTimeMs}ms`}
+                            </span>
+                        )}
+                    </div>
+                ))}
+            </div>
         </div>
     )
 }

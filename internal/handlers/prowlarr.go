@@ -88,6 +88,105 @@ func (h *Handler) HandleProwlarrStatus(c echo.Context) error {
 	})
 }
 
+// HandleProwlarrHealth — GET /api/v1/prowlarr/health
+//
+// Detailed health report: system status + per-indexer stats. Used by
+// the settings UI to render the green/yellow/red dots next to each
+// indexer.
+//
+// One IndexerHealth row per indexer:
+//   - up:        Enable && (no recent failures OR successful queries)
+//   - degraded:  some queries failed in the rolling window
+//   - down:      all recent queries failed OR indexer disabled
+//
+// Indexers that have never been queried (numberOfQueries == 0) show
+// up as "unknown" so the UI can render them as a neutral dot rather
+// than red.
+func (h *Handler) HandleProwlarrHealth(c echo.Context) error {
+	if !h.App.Prowlarr.Configured() {
+		return RespondOK(c, map[string]any{"configured": false})
+	}
+	ctx := c.Request().Context()
+	sys, err := h.App.Prowlarr.SystemStatus(ctx)
+	if err != nil {
+		return c.JSON(http.StatusBadGateway, map[string]any{
+			"configured": true,
+			"up":         false,
+			"error":      err.Error(),
+		})
+	}
+	indexers, idxErr := h.App.Prowlarr.ListIndexers(ctx)
+	if idxErr != nil {
+		return c.JSON(http.StatusBadGateway, map[string]any{
+			"configured": true,
+			"up":         true,
+			"version":    sys.Version,
+			"error":      "indexer list: " + idxErr.Error(),
+		})
+	}
+	stats, _ := h.App.Prowlarr.IndexerStats(ctx) // best-effort
+
+	statByID := make(map[int]prowlarr.IndexerStat, len(stats))
+	for _, s := range stats {
+		statByID[s.IndexerID] = s
+	}
+
+	type indexerHealth struct {
+		ID                  int    `json:"id"`
+		Name                string `json:"name"`
+		Enable              bool   `json:"enable"`
+		Protocol            string `json:"protocol"`
+		Status              string `json:"status"` // "up" | "degraded" | "down" | "unknown" | "disabled"
+		Queries             int    `json:"queries"`
+		Failures            int    `json:"failures"`
+		AverageResponseTime int    `json:"averageResponseTimeMs"`
+	}
+
+	out := make([]indexerHealth, 0, len(indexers))
+	for _, ix := range indexers {
+		st := statByID[ix.ID]
+		h := indexerHealth{
+			ID:                  ix.ID,
+			Name:                ix.Name,
+			Enable:              ix.Enable,
+			Protocol:            ix.Protocol,
+			Queries:             st.NumberOfQueries,
+			Failures:            st.NumberOfFailedQueries,
+			AverageResponseTime: st.AverageResponseTime,
+		}
+		switch {
+		case !ix.Enable:
+			h.Status = "disabled"
+		case st.NumberOfQueries == 0:
+			h.Status = "unknown"
+		case st.NumberOfFailedQueries == 0:
+			h.Status = "up"
+		case st.NumberOfFailedQueries < st.NumberOfQueries:
+			h.Status = "degraded"
+		default:
+			h.Status = "down"
+		}
+		out = append(out, h)
+	}
+
+	enabled := 0
+	for _, ix := range indexers {
+		if ix.Enable {
+			enabled++
+		}
+	}
+
+	return RespondOK(c, map[string]any{
+		"configured":      true,
+		"up":              true,
+		"appName":         sys.AppName,
+		"version":         sys.Version,
+		"indexerCount":    len(indexers),
+		"enabledIndexers": enabled,
+		"indexers":        out,
+	})
+}
+
 // HandleSearchMovie — GET /api/v1/prowlarr/search/movie?title=…&year=…
 //
 // Returns the Prowlarr release list sorted by quality heuristic and
