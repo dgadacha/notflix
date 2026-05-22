@@ -700,7 +700,16 @@ func (h *Handler) annotateAndSort(c echo.Context, results []prowlarr.SearchResul
 func scoreRelease(r prowlarr.SearchResult, cached bool) float64 {
 	var score float64
 	if cached {
-		score += 10000
+		// Cached on TorBox = instant playback. Everything else
+		// (non-cached releases) means the user waits 1-3 min for
+		// TorBox to peer-fetch the file. That's so much worse that
+		// no quality difference is worth it: a cached SD release
+		// beats a non-cached BluRay in our scoring.
+		// Bumped 10k → 1M after the user spent 3+ min watching
+		// "TorBox télécharge la source" on a Spider-Man release
+		// whose cached French alternatives existed but were
+		// pushed down by seeder counts.
+		score += 1_000_000
 	}
 	score += float64(r.Seeders) * 2
 	score -= float64(r.Leechers) / 4

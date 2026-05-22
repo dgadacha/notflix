@@ -720,7 +720,7 @@ export default function WatchPage() {
                                 )
                                 : t(
                                     "watch.torbox_downloading",
-                                    "TorBox télécharge la source — cela peut prendre 1-3 min...",
+                                    "Source non en cache — TorBox la récupère (max 90s avant d'essayer une autre release)...",
                                 )
                         }
                         fallbackAttempt={fallbackAttempt}

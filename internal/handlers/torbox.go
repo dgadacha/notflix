@@ -195,10 +195,15 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 		return RespondErr(c, err)
 	}
 
-	// 2) Poll until ready — cap at 3 min so the request doesn't hang
-	//    forever on non-cached torrents.
+	// 2) Poll until ready. 90 s cap is tight on purpose: cached
+	//    releases reply within 1-3 s, so any wait past ~30 s already
+	//    means we're peer-fetching from cold storage. Beyond 90 s
+	//    we'd be staring at a "downloading" overlay for minutes —
+	//    much better UX is to error out and let the frontend's
+	//    fallback machinery try the next ranked release (which the
+	//    +1M cached score bonus should ensure is also cached).
 	var ready *torbox.Torrent
-	deadline := time.Now().Add(3 * time.Minute)
+	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		t, err := h.App.TorBox.GetTorrent(ctx, created.TorrentID)
 		if err != nil {
@@ -212,7 +217,7 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 	}
 	if ready == nil {
 		return c.JSON(http.StatusGatewayTimeout, map[string]any{
-			"error":     "TorBox still downloading after 3 min — retry later",
+			"error":     "TorBox: source not cached, peer-fetch > 90s — pick another release",
 			"torrentId": created.TorrentID,
 		})
 	}
