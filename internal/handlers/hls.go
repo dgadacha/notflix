@@ -356,13 +356,6 @@ func (h *Handler) serveHLSExternalSubtitle(c echo.Context, sess *hlsSession, fil
 	// entries from the same session.
 	cacheIdx := n + 10_000
 
-	if targetLang != "" {
-		if cached := h.readCachedTranslation(sess.id, cacheIdx, targetLang); cached != nil {
-			h.writeSubtitleResponse(c, cached, "cache:translated")
-			return nil
-		}
-	}
-
 	// Try the raw cache.
 	raw := h.readCachedTranslation(sess.id, cacheIdx, "")
 	if raw == nil {
@@ -379,6 +372,21 @@ func (h *Handler) serveHLSExternalSubtitle(c echo.Context, sess *hlsSession, fil
 		h.writeSubtitleResponse(c, raw, "ffmpeg")
 		return nil
 	}
+
+	// Content-addressable cache lookup — survives session expiry and
+	// TorBox stream-URL rotation. The session-keyed cache is still
+	// checked as a fallback in case the raw VTT changed across runs.
+	if cached := h.readCachedTranslationByContent(raw, targetLang); cached != nil {
+		h.writeSubtitleResponse(c, cached, "cache:translated-content")
+		return nil
+	}
+	if cached := h.readCachedTranslation(sess.id, cacheIdx, targetLang); cached != nil {
+		// Found in legacy session cache — promote to content cache.
+		h.writeCachedTranslationByContent(raw, targetLang, cached)
+		h.writeSubtitleResponse(c, cached, "cache:translated")
+		return nil
+	}
+
 	if !h.App.Anthropic.HasKey() {
 		h.writeSubtitleResponse(c, raw, "ffmpeg")
 		return nil
@@ -391,6 +399,7 @@ func (h *Handler) serveHLSExternalSubtitle(c echo.Context, sess *hlsSession, fil
 		return nil
 	}
 	h.writeCachedTranslation(sess.id, cacheIdx, targetLang, translated)
+	h.writeCachedTranslationByContent(raw, targetLang, translated)
 	h.writeSubtitleResponse(c, translated, "claude")
 	return nil
 }
@@ -622,7 +631,21 @@ func (h *Handler) runSubPrep(sess *hlsSession, chosenIdx int, targetLang string,
 	}
 
 	// Already translated and cached?
+	//   1. Content-addressable cache — survives session expiry + TorBox
+	//      stream URL rotation. Hit here means we already paid for this
+	//      exact VTT in some previous session.
+	//   2. Session-keyed legacy cache — kept as a fallback while older
+	//      caches age out.
+	if cached := h.readCachedTranslationByContent(raw, targetLang); cached != nil {
+		setState("ready", 100, "")
+		log.Printf("hls prep: session %s ready (content-cached translation %s→%s)",
+			sess.id, track.Language, targetLang)
+		return
+	}
 	if cached := h.readCachedTranslation(sess.id, rawCacheIdx, targetLang); cached != nil {
+		// Found in legacy cache — promote to content cache so the next
+		// run hits instantly even if the session id changes.
+		h.writeCachedTranslationByContent(raw, targetLang, cached)
 		setState("ready", 100, "")
 		log.Printf("hls prep: session %s ready (cached translation %s→%s)",
 			sess.id, track.Language, targetLang)
@@ -656,6 +679,7 @@ func (h *Handler) runSubPrep(sess *hlsSession, chosenIdx int, targetLang string,
 		return
 	}
 	h.writeCachedTranslation(sess.id, rawCacheIdx, targetLang, translated)
+	h.writeCachedTranslationByContent(raw, targetLang, translated)
 	setState("ready", 100, "")
 	log.Printf("hls prep: session %s ready (claude %s→%s)",
 		sess.id, track.Language, targetLang)
@@ -896,19 +920,8 @@ func (h *Handler) serveHLSSubtitle(c echo.Context, sess *hlsSession, file string
 		targetLang = ""
 	}
 
-	// Cache lookup — translated VTT (fast path when the user is on a
-	// previously-translated episode).
-	if targetLang != "" {
-		if cached := h.readCachedTranslation(sess.id, n, targetLang); cached != nil {
-			h.writeSubtitleResponse(c, cached, "cache:translated")
-			return nil
-		}
-	}
-
-	// Try the RAW extraction cache. Lets us skip the ffmpeg call
-	// entirely when this track has been served before in the same
-	// session (or a previous session with the same source URL — the
-	// session id hashes the URL).
+	// Try the RAW extraction cache first — we need the raw VTT before
+	// we can compute the content hash for the translated cache lookup.
 	raw := h.readCachedTranslation(sess.id, n, "")
 	if raw == nil {
 		extracted, err := h.extractSubtitleVTT(c.Request().Context(), sess.url, track.Index)
@@ -923,6 +936,18 @@ func (h *Handler) serveHLSSubtitle(c echo.Context, sess *hlsSession, file string
 	// No translation requested — serve the raw VTT.
 	if targetLang == "" {
 		h.writeSubtitleResponse(c, raw, "ffmpeg")
+		return nil
+	}
+
+	// Translated cache: content-addressable (cross-session) first,
+	// legacy session cache as fallback.
+	if cached := h.readCachedTranslationByContent(raw, targetLang); cached != nil {
+		h.writeSubtitleResponse(c, cached, "cache:translated-content")
+		return nil
+	}
+	if cached := h.readCachedTranslation(sess.id, n, targetLang); cached != nil {
+		h.writeCachedTranslationByContent(raw, targetLang, cached)
+		h.writeSubtitleResponse(c, cached, "cache:translated")
 		return nil
 	}
 
@@ -941,6 +966,7 @@ func (h *Handler) serveHLSSubtitle(c echo.Context, sess *hlsSession, file string
 		return nil
 	}
 	h.writeCachedTranslation(sess.id, n, targetLang, translated)
+	h.writeCachedTranslationByContent(raw, targetLang, translated)
 	h.writeSubtitleResponse(c, translated, "claude")
 	return nil
 }

@@ -67,10 +67,73 @@ func translateLangName(code string) string {
 // cache path under <datadir>/cache/subtitles/. Sessions already encode
 // the source URL into their id, so two distinct files always land in
 // distinct cache files.
+//
+// IMPORTANT: this path is session-local. TorBox stream URLs are
+// short-lived signed URLs, so the same MKV gets a fresh session ID on
+// every launch — and the cache misses every time. For TRANSLATED
+// subtitles (the expensive Claude API path), prefer
+// translateSubtitleCachePathByContent which is cross-session.
+//
+// We keep the session-keyed path for the raw extraction cache where
+// re-extraction is cheap (~1 min of ffmpeg, no API spend).
 func (h *Handler) translateSubtitleCachePath(sessionID string, idx int, targetLang string) string {
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%s", sessionID, idx, strings.ToLower(targetLang))))
 	name := hex.EncodeToString(digest[:12]) + ".vtt"
 	return filepath.Join(h.App.Config.Data.Dir, "cache", "subtitles", name)
+}
+
+// translateSubtitleCachePathByContent returns a content-addressable
+// cache path for a TRANSLATED VTT. The key is sha256(rawVTT)+lang, so
+// the same subtitle text always lands at the same path regardless of
+// where the source MKV was downloaded from — re-launches of the same
+// film never re-translate.
+//
+// We hash the raw VTT bytes (post-extraction, pre-translation): two
+// different rips of the same film usually share byte-identical subs
+// because the embedded subs come from the same release pipeline. Even
+// when they don't, the worst case is a separate cache entry — never a
+// wrong hit.
+//
+// Hash truncated to 16 bytes for shorter filenames; collision risk at
+// 128 bits is negligible.
+func (h *Handler) translateSubtitleCachePathByContent(rawVTT []byte, targetLang string) string {
+	h2 := sha256.New()
+	h2.Write(rawVTT)
+	h2.Write([]byte("|"))
+	h2.Write([]byte(strings.ToLower(targetLang)))
+	digest := h2.Sum(nil)
+	name := hex.EncodeToString(digest[:16]) + ".vtt"
+	return filepath.Join(h.App.Config.Data.Dir, "cache", "subtitles", "by-content", name)
+}
+
+// readCachedTranslationByContent looks up a content-addressable
+// translated subtitle cache entry. Returns nil on miss or read error.
+func (h *Handler) readCachedTranslationByContent(rawVTT []byte, targetLang string) []byte {
+	if len(rawVTT) == 0 || targetLang == "" {
+		return nil
+	}
+	path := h.translateSubtitleCachePathByContent(rawVTT, targetLang)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+// writeCachedTranslationByContent persists a content-addressable
+// translation. Best-effort: errors only logged.
+func (h *Handler) writeCachedTranslationByContent(rawVTT []byte, targetLang string, data []byte) {
+	if len(rawVTT) == 0 || targetLang == "" || len(data) == 0 {
+		return
+	}
+	path := h.translateSubtitleCachePathByContent(rawVTT, targetLang)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		log.Printf("sub cache: mkdir failed for %s: %v", filepath.Dir(path), err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		log.Printf("sub cache: write failed for %s: %v", path, err)
+	}
 }
 
 // translateVTT is a thin shim over translateVTTWithProgress that
