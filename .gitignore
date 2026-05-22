@@ -86,7 +86,14 @@ codegen/generated/hooks.mdx
 internal/extension_repo/**/test*.*
 internal/extension_repo/goja_plugin_test
 
+# Heritage Seanime root scripts (build.sh etc) — not used by Notflix.
+# We keep the broad `*.sh` ignore but ALLOW shell scripts checked
+# under our own subdirs (docker/, k8s/, scripts/) which we genuinely
+# want tracked in git.
 *.sh
+!docker/**/*.sh
+!k8s/**/*.sh
+!scripts/**/*.sh
 
 notflix-web-tr/
 codegen/nonext/

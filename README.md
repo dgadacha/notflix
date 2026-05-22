@@ -106,6 +106,75 @@ Tout ce qui est listé ci-dessus est livré. Ce qui reste à faire :
 
 ## Setup
 
+Deux chemins selon ton goût d'ops :
+
+- **Setup A — bundle** : une seule image Docker qui contient Notflix + Prowlarr + FlareSolverr. `docker run` unique, un seul container à monitorer. Voir [Quick start avec le bundle](#quick-start-avec-le-bundle).
+- **Setup B — manuel** : trois containers séparés (Notflix + Prowlarr + FlareSolverr), plus de flexibilité mais 3× le tooling. Voir [Setup manuel](#setup-manuel) plus bas.
+
+---
+
+## Quick start avec le bundle
+
+Le bundle empaquette Notflix + Prowlarr + FlareSolverr dans une seule image (~700-900 MB compressée, ~400 MB RAM idle). Idéal pour homelab.
+
+### Build + run en local
+
+```sh
+git clone https://github.com/dgadacha/notflix.git
+cd notflix
+
+make docker-bundle           # build l'image (5-8 min cold, à cause de Chromium)
+make docker-bundle-run       # lance avec ports 43212 + 9696 exposés
+```
+
+Une fois `[bundle] children: …` dans les logs, ouvre :
+
+- **Notflix**  → http://localhost:43212
+- **Prowlarr** → http://localhost:9696
+
+Au premier boot Prowlarr te demande un mot de passe. Ensuite :
+
+1. Récupère l'API key Prowlarr (Settings → General → API Key)
+2. Va dans Prowlarr → Settings → Indexers → "+" → **FlareSolverr** → URL `http://127.0.0.1:8191` → Apply
+3. Va dans Notflix → /settings → colle l'API key Prowlarr + tes clés TMDB + TorBox
+4. Bouton "Tester les connexions" → tout doit être vert
+
+### Déploiement k8s
+
+Le bundle a ses propres manifests dans `k8s/bundle/`. Namespace dédié `notflix-bundle` pour cohabiter avec un éventuel déploiement single-service existant.
+
+```sh
+make deploy-bundle           # build + push + apply manifests + rollout
+make bundle-logs             # logs en live avec préfixes [notflix]/[prowlarr]/[flaresolverr]
+make bundle-prowlarr-ui      # port-forward Prowlarr sur localhost:9696
+```
+
+### Migration depuis un setup existant
+
+Si tu as déjà Notflix + Prowlarr en containers séparés (k8s ou Docker), le script `k8s/bundle/migrate.sh` copie tes données dans le PVC du bundle :
+
+```sh
+# k8s → k8s
+bash k8s/bundle/migrate.sh \
+  --prowlarr-pvc prowlarr-config \
+  --prowlarr-ns media
+
+# Docker volume → k8s
+bash k8s/bundle/migrate.sh \
+  --prowlarr-volume prowlarr_config
+
+# Skip Prowlarr (juste migrer Notflix)
+bash k8s/bundle/migrate.sh --skip-prowlarr
+```
+
+Le script scale down l'ancien deployment, spin des pods "tar pump" temporaires dans chaque namespace, et stream les données via `kubectl exec | tar`. Aucune copie locale, aucun snapshot à manager.
+
+Détails : voir `docker/bundle/README.md`.
+
+---
+
+## Setup manuel
+
 ### 1. Cloner
 
 ```sh
