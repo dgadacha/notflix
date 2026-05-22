@@ -25,7 +25,8 @@ import {
 import { tmdbImage } from "@/lib/tmdb"
 import * as React from "react"
 import { useTranslation } from "react-i18next"
-import { BiPlay, BiTrash } from "react-icons/bi"
+import { BiCheck, BiPlay, BiTrash, BiX } from "react-icons/bi"
+import { LuArrowDownAZ, LuClock } from "react-icons/lu"
 
 type TabKey = "list" | "history"
 
@@ -103,11 +104,59 @@ function TabPill({
 // Ma liste
 // ---------------------------------------------------------------------------
 
+type ListSortMode = "recent" | "alphabetical"
+type ListFilterMode = "all" | "movie" | "tv"
+
 function MyListGrid() {
     const { t } = useTranslation()
     const { data: list, isLoading } = useActiveProfileListQuery()
     const { remove } = useProfileListActions()
     const { openDetail } = useNetflixDetailModal()
+
+    const [sort, setSort] = React.useState<ListSortMode>("recent")
+    const [filter, setFilter] = React.useState<ListFilterMode>("all")
+    // Set of "<mediaType>-<tmdbId>" keys currently selected. Empty set
+    // = selection mode off.
+    const [selected, setSelected] = React.useState<Set<string>>(new Set())
+
+    const entryKey = (e: ProfileListEntry) => `${e.mediaType}-${e.tmdbId}`
+
+    const visible = React.useMemo(() => {
+        let xs: ProfileListEntry[] = list
+        if (filter !== "all") {
+            xs = xs.filter(e => e.mediaType === filter)
+        }
+        if (sort === "alphabetical") {
+            xs = [...xs].sort((a, b) => (a.title || "").localeCompare(b.title || ""))
+        } else {
+            xs = [...xs].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+        }
+        return xs
+    }, [list, sort, filter])
+
+    const toggleSelect = (e: ProfileListEntry) => {
+        setSelected(prev => {
+            const next = new Set(prev)
+            const k = entryKey(e)
+            if (next.has(k)) next.delete(k)
+            else next.add(k)
+            return next
+        })
+    }
+    const clearSelection = () => setSelected(new Set())
+    const selectAllVisible = () => setSelected(new Set(visible.map(entryKey)))
+    const deleteSelected = () => {
+        // Fire all remove() calls — the mutation hook handles optimistic
+        // updates so the UI shrinks as each succeeds.
+        for (const e of visible) {
+            if (selected.has(entryKey(e))) {
+                remove(e.tmdbId, e.mediaType)
+            }
+        }
+        setSelected(new Set())
+    }
+
+    const selectionMode = selected.size > 0
 
     if (isLoading) {
         return <ListSkeletonGrid />
@@ -122,16 +171,184 @@ function MyListGrid() {
     }
 
     return (
-        <ResultGrid>
-            {list.map(entry => (
-                <ListCard
-                    key={`${entry.mediaType}-${entry.tmdbId}`}
-                    entry={entry}
-                    onOpen={() => openDetail(entry.tmdbId, entry.mediaType)}
-                    onRemove={() => remove(entry.tmdbId, entry.mediaType)}
+        <div className="space-y-3">
+            <ListToolbar
+                sort={sort}
+                onSortChange={setSort}
+                filter={filter}
+                onFilterChange={setFilter}
+                count={list.length}
+                visibleCount={visible.length}
+            />
+            {selectionMode && (
+                <SelectionBar
+                    count={selected.size}
+                    onSelectAll={selectAllVisible}
+                    onClear={clearSelection}
+                    onDelete={deleteSelected}
                 />
-            ))}
-        </ResultGrid>
+            )}
+            {visible.length === 0 ? (
+                <p className="text-center py-12 text-[--muted]">
+                    {t("lists.empty_filter", "Aucun titre ne correspond à ce filtre.")}
+                </p>
+            ) : (
+                <ResultGrid>
+                    {visible.map(entry => {
+                        const k = entryKey(entry)
+                        const isSelected = selected.has(k)
+                        return (
+                            <ListCard
+                                key={k}
+                                entry={entry}
+                                selectionMode={selectionMode}
+                                isSelected={isSelected}
+                                onOpen={() => {
+                                    if (selectionMode) toggleSelect(entry)
+                                    else openDetail(entry.tmdbId, entry.mediaType)
+                                }}
+                                onRemove={() => remove(entry.tmdbId, entry.mediaType)}
+                                onToggleSelect={() => toggleSelect(entry)}
+                            />
+                        )
+                    })}
+                </ResultGrid>
+            )}
+        </div>
+    )
+}
+
+function ListToolbar({
+    sort,
+    onSortChange,
+    filter,
+    onFilterChange,
+    count,
+    visibleCount,
+}: {
+    sort: ListSortMode
+    onSortChange: (m: ListSortMode) => void
+    filter: ListFilterMode
+    onFilterChange: (m: ListFilterMode) => void
+    count: number
+    visibleCount: number
+}) {
+    const { t } = useTranslation()
+    return (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+            {/* Filter chips */}
+            <div className="flex items-center gap-1">
+                <FilterChip active={filter === "all"} onClick={() => onFilterChange("all")}>
+                    {t("lists.filter_all", "Tout")}
+                </FilterChip>
+                <FilterChip active={filter === "movie"} onClick={() => onFilterChange("movie")}>
+                    {t("lists.filter_movies", "Films")}
+                </FilterChip>
+                <FilterChip active={filter === "tv"} onClick={() => onFilterChange("tv")}>
+                    {t("lists.filter_tv", "Séries")}
+                </FilterChip>
+            </div>
+            <div className="flex-1 min-w-0" />
+            {/* Sort toggle — two-option, so a pill switcher beats a dropdown */}
+            <div className="flex items-center gap-1 bg-white/5 border border-white/10 rounded-full p-0.5">
+                <SortPill active={sort === "recent"} onClick={() => onSortChange("recent")}>
+                    <LuClock className="size-3.5" />
+                    {t("lists.sort_recent", "Récent")}
+                </SortPill>
+                <SortPill active={sort === "alphabetical"} onClick={() => onSortChange("alphabetical")}>
+                    <LuArrowDownAZ className="size-3.5" />
+                    {t("lists.sort_alphabetical", "A-Z")}
+                </SortPill>
+            </div>
+            {/* Count */}
+            <span className="text-[--muted] text-[11px] shrink-0">
+                {visibleCount === count
+                    ? t("lists.count", "{{n}} titres", { n: count })
+                    : t("lists.count_filtered", "{{v}}/{{n}}", { v: visibleCount, n: count })}
+            </span>
+        </div>
+    )
+}
+
+function FilterChip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            className={cn(
+                "px-2.5 py-1 rounded-full font-semibold transition-colors",
+                active
+                    ? "bg-white text-black"
+                    : "bg-white/5 text-white/80 hover:bg-white/10",
+            )}
+        >
+            {children}
+        </button>
+    )
+}
+
+function SortPill({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            className={cn(
+                "inline-flex items-center gap-1 px-2.5 py-1 rounded-full font-semibold transition-colors",
+                active
+                    ? "bg-white text-black"
+                    : "text-white/70 hover:text-white",
+            )}
+        >
+            {children}
+        </button>
+    )
+}
+
+function SelectionBar({
+    count,
+    onSelectAll,
+    onClear,
+    onDelete,
+}: {
+    count: number
+    onSelectAll: () => void
+    onClear: () => void
+    onDelete: () => void
+}) {
+    const { t } = useTranslation()
+    return (
+        <div className={cn(
+            "flex flex-wrap items-center gap-2 px-3 py-2 rounded-md",
+            "bg-brand-500/10 border border-brand-500/30 text-sm",
+        )}>
+            <span className="text-white font-semibold">
+                {t("lists.selection_count", "{{n}} sélectionné(s)", { n: count })}
+            </span>
+            <div className="flex-1 min-w-0" />
+            <button
+                type="button"
+                onClick={onSelectAll}
+                className="px-2.5 py-1 rounded-md text-xs font-semibold bg-white/10 hover:bg-white/15 text-white"
+            >
+                {t("lists.select_all", "Tout sélectionner")}
+            </button>
+            <button
+                type="button"
+                onClick={onDelete}
+                className="px-2.5 py-1 rounded-md text-xs font-bold bg-red-500/80 hover:bg-red-500 text-white inline-flex items-center gap-1"
+            >
+                <BiTrash className="size-4" />
+                {t("lists.delete_selected", "Supprimer")}
+            </button>
+            <button
+                type="button"
+                onClick={onClear}
+                className="px-2 py-1 rounded-md text-xs font-semibold text-white/70 hover:text-white inline-flex items-center gap-1"
+                aria-label={t("common.cancel", "Annuler")}
+            >
+                <BiX className="size-4" />
+            </button>
+        </div>
     )
 }
 
@@ -139,10 +356,16 @@ function ListCard({
     entry,
     onOpen,
     onRemove,
+    selectionMode,
+    isSelected,
+    onToggleSelect,
 }: {
     entry: ProfileListEntry
     onOpen: () => void
     onRemove: () => void
+    selectionMode: boolean
+    isSelected: boolean
+    onToggleSelect: () => void
 }) {
     const { t } = useTranslation()
     const img = tmdbImage("w500", entry.posterPath) || ""
@@ -150,8 +373,9 @@ function ListCard({
         <div
             className={cn(
                 "group relative aspect-video rounded-md overflow-hidden bg-gray-900",
-                "ring-0 ring-brand-500 hover:ring-2 transition-[transform,box-shadow] duration-200",
+                "transition-[transform,box-shadow] duration-200",
                 "hover:scale-[1.03] hover:z-[2] hover:shadow-2xl transform-gpu origin-center",
+                isSelected ? "ring-2 ring-brand-500" : "ring-0 ring-brand-500 hover:ring-2",
             )}
         >
             <button
@@ -165,7 +389,10 @@ function ListCard({
                         src={img}
                         alt={entry.title}
                         loading="lazy"
-                        className="w-full h-full object-cover object-center"
+                        className={cn(
+                            "w-full h-full object-cover object-center",
+                            isSelected && "opacity-70",
+                        )}
                     />
                 )}
             </button>
@@ -174,23 +401,48 @@ function ListCard({
                     {entry.title}
                 </p>
             </div>
-            {/* Remove action — visible on hover. Stops propagation so the
-                trash click doesn't also open the modal. */}
+            {/* Selection checkbox — always visible in selection mode,
+                appears on hover otherwise so the user can toggle on
+                without leaving normal browsing. */}
             <button
                 type="button"
                 onClick={(e) => {
                     e.stopPropagation()
-                    onRemove()
+                    onToggleSelect()
                 }}
-                aria-label={t("lists.remove", "Retirer")}
+                aria-label={t("lists.select", "Sélectionner")}
                 className={cn(
-                    "absolute top-2 right-2 p-2 rounded-full",
-                    "bg-black/70 text-white hover:bg-red-500/80 hover:text-white",
-                    "opacity-0 group-hover:opacity-100 transition-opacity",
+                    "absolute top-2 left-2 size-6 rounded-md border-2 transition-all",
+                    "flex items-center justify-center",
+                    isSelected
+                        ? "bg-brand-500 border-brand-500 text-white"
+                        : "bg-black/60 border-white/60 text-transparent hover:border-white",
+                    selectionMode
+                        ? "opacity-100"
+                        : "opacity-0 group-hover:opacity-100",
                 )}
             >
-                <BiTrash className="size-4" />
+                <BiCheck className="size-4" />
             </button>
+            {/* Single-item remove — hidden in selection mode to avoid
+                conflicting affordances. */}
+            {!selectionMode && (
+                <button
+                    type="button"
+                    onClick={(e) => {
+                        e.stopPropagation()
+                        onRemove()
+                    }}
+                    aria-label={t("lists.remove", "Retirer")}
+                    className={cn(
+                        "absolute top-2 right-2 p-2 rounded-full",
+                        "bg-black/70 text-white hover:bg-red-500/80 hover:text-white",
+                        "opacity-0 group-hover:opacity-100 transition-opacity",
+                    )}
+                >
+                    <BiTrash className="size-4" />
+                </button>
+            )}
         </div>
     )
 }
