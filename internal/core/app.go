@@ -3,6 +3,7 @@ package core
 import (
 	"log"
 	"path/filepath"
+	"time"
 
 	"notflix/internal/anthropic"
 	"notflix/internal/database/db"
@@ -70,7 +71,34 @@ func New() (*App, error) {
 		return nil, err
 	}
 
+	// Sweep TMDB cache on boot then hourly. Keeps the DB size in
+	// check; expired rows are silently filtered by reads anyway, this
+	// just frees the rows.
+	go app.tmdbCacheReaper()
+
 	return app, nil
+}
+
+// tmdbCacheReaper drops expired TMDB cache rows on a 1 h ticker.
+// Runs forever as a daemon goroutine; an error in any sweep is logged
+// but doesn't stop the loop.
+func (a *App) tmdbCacheReaper() {
+	sweep := func() {
+		n, err := a.Database.PurgeExpiredTMDBCache()
+		if err != nil {
+			log.Printf("tmdb cache reaper: %v", err)
+			return
+		}
+		if n > 0 {
+			log.Printf("tmdb cache reaper: purged %d expired rows", n)
+		}
+	}
+	sweep() // initial sweep so a long-running install doesn't accumulate forever
+	t := time.NewTicker(1 * time.Hour)
+	defer t.Stop()
+	for range t.C {
+		sweep()
+	}
 }
 
 // overlaySettingsOnto reads the admin-mutable keys from the DB and

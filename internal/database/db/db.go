@@ -30,10 +30,48 @@ func Open(path string) (*Database, error) {
 		&models.Profile{},
 		&models.ProfileWatchHistory{},
 		&models.ProfileListEntry{},
+		&models.TMDBCacheEntry{},
 	); err != nil {
 		return nil, err
 	}
 	return &Database{gormdb: g}, nil
+}
+
+// -----------------------------------------------------------------------------
+// TMDB response cache
+// -----------------------------------------------------------------------------
+
+// GetTMDBCache returns the cached body for the given URL hash if it
+// exists AND has not expired. Returns nil otherwise.
+func (db *Database) GetTMDBCache(urlHash string) []byte {
+	var e models.TMDBCacheEntry
+	if err := db.gormdb.Where("url_hash = ? AND expires_at > ?", urlHash, time.Now()).First(&e).Error; err != nil {
+		return nil
+	}
+	return e.Body
+}
+
+// PutTMDBCache upserts a cache entry with the given TTL. Best-effort —
+// errors are logged but not surfaced (the upstream HTTP response is
+// still served).
+func (db *Database) PutTMDBCache(urlHash, path string, body []byte, expiresAt time.Time) error {
+	e := models.TMDBCacheEntry{
+		URLHash:   urlHash,
+		Path:      path,
+		Body:      body,
+		ExpiresAt: expiresAt,
+	}
+	return db.gormdb.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "url_hash"}},
+		DoUpdates: clause.AssignmentColumns([]string{"path", "body", "expires_at"}),
+	}).Create(&e).Error
+}
+
+// PurgeExpiredTMDBCache deletes every cache entry whose ExpiresAt is in
+// the past. Called on startup + hourly from the handler-side reaper.
+func (db *Database) PurgeExpiredTMDBCache() (int64, error) {
+	res := db.gormdb.Where("expires_at < ?", time.Now()).Delete(&models.TMDBCacheEntry{})
+	return res.RowsAffected, res.Error
 }
 
 func (db *Database) Close() error {

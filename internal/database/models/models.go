@@ -94,3 +94,18 @@ type ProfileListEntry struct {
 	Title      string `gorm:"column:title;size:255" json:"title"`
 	PosterPath string `gorm:"column:poster_path;size:255" json:"posterPath"`
 }
+
+// TMDBCacheEntry persists TMDB API responses so home/detail pages stay
+// snappy across restarts and survive bursts beyond the 30 s in-memory
+// window of tmdb.Client. URLHash is sha256(path + sorted query params
+// minus api_key) — so rotating the API key doesn't invalidate cache.
+//
+// TTL is path-dependent (see tmdbCacheTTL in handlers/tmdb_proxy.go).
+// A background reaper sweeps expired rows hourly.
+type TMDBCacheEntry struct {
+	URLHash   string    `gorm:"column:url_hash;primaryKey;size:64" json:"urlHash"`
+	Path      string    `gorm:"column:path;size:255" json:"path"` // For debugging / metrics
+	Body      []byte    `gorm:"column:body" json:"body"`
+	ExpiresAt time.Time `gorm:"column:expires_at;index" json:"expiresAt"`
+	CreatedAt time.Time `json:"createdAt"`
+}
