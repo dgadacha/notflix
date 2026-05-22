@@ -331,6 +331,8 @@ func (h *Handler) HandleStreamHLSFile(c echo.Context) error {
 		return h.serveHLSSubtitle(c, sess, file)
 	case strings.HasPrefix(file, "ext_") && strings.HasSuffix(file, ".vtt"):
 		return h.serveHLSExternalSubtitle(c, sess, file)
+	case strings.HasPrefix(file, "thumbs_"):
+		return h.serveHLSThumb(c, sess, strings.TrimPrefix(file, "thumbs_"))
 	}
 	return c.NoContent(http.StatusNotFound)
 }
@@ -1698,12 +1700,17 @@ func startHLSCleanup() {
 					// Drop the RAM cache entries for this session so the
 					// LRU isn't kept warm by long-dead chunks.
 					getHLSRAMCache().DropSession(id)
-					// rm -rf the per-session chunk cache.
+					// rm -rf the per-session chunk cache + thumbnail
+					// sprites. Both are tied to the (now-expired)
+					// session URL hash, so they're useless across
+					// future sessions even for the same source.
 					if hlsCleanupDataDir != "" {
 						chunkDir := filepath.Join(hlsCleanupDataDir, "cache", "hls-chunks", id)
 						if err := os.RemoveAll(chunkDir); err == nil {
 							log.Printf("hls: cleared chunk cache %s", chunkDir)
 						}
+						thumbsDir := filepath.Join(hlsCleanupDataDir, "cache", "hls-thumbs", id)
+						_ = os.RemoveAll(thumbsDir)
 					}
 				}
 			}
