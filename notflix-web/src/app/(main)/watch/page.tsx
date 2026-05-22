@@ -1192,6 +1192,17 @@ function Player({
                         // ~30s of pre-buffer keeps seek-forward smooth
                         // without hoarding RAM.
                         maxBufferLength: 30,
+                        // Bumped fragment-load timeouts from the default 10s.
+                        // Our backend transcodes each chunk on demand via
+                        // ffmpeg, which can take 5-15s on a cold start
+                        // (HTTP open + seek to chunk timestamp on TorBox).
+                        // 10s was too aggressive — first-fragment timeouts
+                        // killed playback before the user even saw video.
+                        fragLoadingTimeOut: 60_000,
+                        manifestLoadingTimeOut: 30_000,
+                        levelLoadingTimeOut: 30_000,
+                        fragLoadingMaxRetry: 4,
+                        fragLoadingMaxRetryTimeout: 60_000,
                     })
                     hls.loadSource(playlistUrl)
                     hls.attachMedia(video)

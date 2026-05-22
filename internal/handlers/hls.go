@@ -1008,6 +1008,11 @@ func (h *Handler) serveHLSPlaylist(c echo.Context, sess *hlsSession) error {
 // `-ss before -i` is the fast (input) seek — keyframe-accurate, can
 // drift by up to one GOP but cheap. For HLS that's fine, the next
 // segment overlaps anyway.
+//
+// Source preference: use the parallel-downloaded LOCAL file when
+// available — ffmpeg seek + reads at disk speed instead of fighting
+// TorBox CDN latency per chunk. The first segment requests trigger
+// the background download; subsequent ones hit the local file.
 func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string) error {
 	// Parse segment number out of "segment_NNNNN.ts".
 	numPart := strings.TrimSuffix(strings.TrimPrefix(file, "segment_"), ".ts")
@@ -1024,12 +1029,25 @@ func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string)
 		segDur = sess.duration - startSec
 	}
 
+	// Prefer the local cached source when present — ffmpeg seek over
+	// HTTP can take 3-10 s per chunk on a slow CDN, hitting hls.js's
+	// fragLoadingTimeOut. From disk it's <100 ms.
+	inputPath := sess.url
+	if cachePath, ok := h.localSourceIfReady(sess.url); ok {
+		inputPath = cachePath
+	} else {
+		// Kick off a background download for future chunks. First few
+		// segments still pay the HTTP cost; from segment ~10 onwards
+		// the local file should be ready.
+		go h.warmLocalSource(sess.url)
+	}
+
 	ctx := c.Request().Context()
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-hide_banner",
 		"-loglevel", "warning",
 		"-ss", fmt.Sprintf("%.3f", startSec),
-		"-i", sess.url,
+		"-i", inputPath,
 		"-t", fmt.Sprintf("%.3f", segDur),
 		"-c:v", "copy",
 		"-c:a", "aac",

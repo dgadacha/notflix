@@ -296,12 +296,17 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 		sessionID = sess.id
 		allSubs = sess.subtitles
 	}
-	// No pre-warm here any more — extraction happens on demand when
-	// the frontend calls POST /stream/hls/:sessionId/prep with the
-	// user's chosen language. That picks ONE source (preferred lang
-	// native → English translated → Japanese translated) instead of
-	// blindly extracting all 9 tracks, and exposes a status endpoint
-	// the watch page polls to drive its progress bar.
+	// Sub extraction stays on-demand via /stream/hls/:sessionId/prep.
+	// But we ALWAYS pre-warm the source download in the background
+	// because both HLS chunks AND subtitle extraction benefit from
+	// reading from the local cache. The user pays nothing if it's
+	// already cached (fast no-op). When ffmpeg is about to transcode
+	// HLS chunks on a non-AAC release, the source being local means
+	// each chunk completes in <1 s instead of fighting TorBox CDN
+	// latency 4+ times per minute.
+	if streamURL != "" {
+		go h.warmLocalSource(streamURL)
+	}
 
 	return RespondOK(c, map[string]any{
 		"streamUrl":   streamURL,

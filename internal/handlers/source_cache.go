@@ -68,6 +68,46 @@ type sourceDownload struct {
 	total int64
 }
 
+// localSourceIfReady returns the cached path + true iff the source has
+// already been downloaded to disk in full. Cheap (single stat call),
+// safe to call on the hot path. Does NOT trigger a download.
+func (h *Handler) localSourceIfReady(sourceURL string) (string, bool) {
+	cacheDir := filepath.Join(h.App.Config.Data.Dir, "cache", "sources")
+	key := sourceCacheKey(sourceURL)
+	path := filepath.Join(cacheDir, key+".bin")
+	if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+		// Touch mtime so LRU keeps it alive.
+		now := time.Now()
+		_ = os.Chtimes(path, now, now)
+		return path, true
+	}
+	return "", false
+}
+
+// warmLocalSource kicks off a background parallel download if the cache
+// file is missing AND there's not already one in flight. Idempotent;
+// repeated calls collapse into a single download via the in-flight
+// coalescer inside ensureLocalSource.
+func (h *Handler) warmLocalSource(sourceURL string) {
+	if _, ready := h.localSourceIfReady(sourceURL); ready {
+		return
+	}
+	key := sourceCacheKey(sourceURL)
+	sourceCacheMu.Lock()
+	if _, inflight := sourceCacheInFlight[key]; inflight {
+		sourceCacheMu.Unlock()
+		return
+	}
+	sourceCacheMu.Unlock()
+	// 15 min hard cap on background warmup — should never need that
+	// long but bounds the goroutine lifetime if TorBox stalls.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	if _, err := h.ensureLocalSource(ctx, sourceURL, nil); err != nil {
+		log.Printf("source warmup failed: %v", err)
+	}
+}
+
 // ensureLocalSource returns the local file path for the given URL,
 // downloading in parallel if not already cached. progressCb receives
 // (downloadedBytes, totalBytes) callbacks during the download phase.
