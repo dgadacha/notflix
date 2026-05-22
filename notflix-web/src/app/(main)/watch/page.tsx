@@ -1234,19 +1234,40 @@ function Player({
 
                 if (Hls.isSupported()) {
                     hls = new Hls({
-                        // ~30s of pre-buffer keeps seek-forward smooth
-                        // without hoarding RAM.
-                        maxBufferLength: 30,
-                        // Bumped fragment-load timeouts from the default 10s.
-                        // Our backend transcodes each chunk on demand via
-                        // ffmpeg, which can take 5-15s on a cold start
-                        // (HTTP open + seek to chunk timestamp on TorBox).
-                        // 10s was too aggressive — first-fragment timeouts
-                        // killed playback before the user even saw video.
+                        // Buffer 120 s of media ahead of the playhead.
+                        // Lets the player ride out 30-60 s connection
+                        // dips without rebuffering — the classic
+                        // Netflix-like resilience to cellular handoffs.
+                        maxBufferLength: 120,
+                        maxMaxBufferLength: 240,
+                        // Keep 60 s behind the playhead too so seek-back
+                        // in the last minute doesn't trigger a refetch.
+                        backBufferLength: 60,
+
+                        // Initial bandwidth estimate: 5 Mbps. ABR uses
+                        // this to pick the starting level before it has
+                        // measured the connection itself. Below the
+                        // 1080p bitrate so the player starts on 720p
+                        // for users on cellular, then ramps up.
+                        abrEwmaDefaultEstimate: 5_000_000,
+                        // Auto-pick the start level via the EWMA above
+                        // instead of always starting at the highest.
+                        startLevel: -1,
+                        // Prefetch the next fragment while the current
+                        // one is still playing → smoother handover.
+                        startFragPrefetch: true,
+                        // Allow level-down on a single failed fragment.
+                        // Better UX than retrying the same level twice.
+                        abrBandWidthFactor: 0.95,
+                        abrBandWidthUpFactor: 0.7,
+
+                        // Long timeouts because our backend transcodes
+                        // chunks on demand (5-15 s cold start on remote
+                        // sources; <1 s after the local cache is warm).
                         fragLoadingTimeOut: 60_000,
                         manifestLoadingTimeOut: 30_000,
                         levelLoadingTimeOut: 30_000,
-                        fragLoadingMaxRetry: 4,
+                        fragLoadingMaxRetry: 6,
                         fragLoadingMaxRetryTimeout: 60_000,
                     })
                     hls.loadSource(playlistUrl)

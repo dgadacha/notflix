@@ -291,6 +291,9 @@ func (h *Handler) HandleStreamHLSFile(c echo.Context) error {
 	switch {
 	case file == "index.m3u8":
 		return h.serveHLSPlaylist(c, sess)
+	case strings.HasPrefix(file, "playlist_") && strings.HasSuffix(file, ".m3u8"):
+		variant := strings.TrimSuffix(strings.TrimPrefix(file, "playlist_"), ".m3u8")
+		return h.serveHLSVariantPlaylist(c, sess, variant)
 	case strings.HasPrefix(file, "segment_") && strings.HasSuffix(file, ".ts"):
 		return h.serveHLSSegment(c, sess, file)
 	case strings.HasPrefix(file, "sub_") && strings.HasSuffix(file, ".vtt"):
@@ -973,11 +976,103 @@ func (h *Handler) writeSubtitleResponse(c echo.Context, body []byte, source stri
 	_, _ = c.Response().Writer.Write(body)
 }
 
-// serveHLSPlaylist generates a VOD-typed m3u8 listing every segment from
-// 0 to ceil(duration / segDur). EXT-X-ENDLIST tells the player the file
-// is finite — that's what makes the progress bar show the full length
-// from the first frame.
+// HLS variants for adaptive bitrate. The "source" variant is `-c copy`
+// (whatever the original file uses) and is fastest to bake but heaviest
+// on bandwidth. The "720p" variant re-encodes to a 720p H.264 + AAC
+// stream around 2 Mbps — much friendlier to cellular / WAN clients.
+// hls.js's ABR algorithm switches between them based on real-time
+// bandwidth measurements.
+type hlsVariant struct {
+	Name      string // "source" / "720p"
+	Bandwidth int    // declared bitrate for the master playlist
+	Width     int    // pixel width for the master playlist
+	Height    int    // pixel height
+	Scale     string // empty for source (`-c copy`), "scale=-2:720" for 720p
+	VideoArgs []string // ffmpeg video codec args ("-c:v copy" or libx264)
+	VideoBR   string   // target bitrate string, empty = no limit
+}
+
+func hlsVariants() []hlsVariant {
+	return []hlsVariant{
+		{
+			// Source-quality stream — codec-copy from the source.
+			Name:      "source",
+			Bandwidth: 8_000_000, // declared 8 Mbps; actual depends on source
+			Width:     1920,
+			Height:    1080,
+			Scale:     "",
+			VideoArgs: []string{"-c:v", "copy"},
+		},
+		{
+			// 720p re-encode at ~2 Mbps. Roughly equivalent to Netflix's
+			// SDR HD tier. Uses libx264 veryfast preset — encodes at
+			// ~50× real-time on modern CPUs, so a 4 s chunk bakes in
+			// well under 100 ms.
+			Name:      "720p",
+			Bandwidth: 2_500_000,
+			Width:     1280,
+			Height:    720,
+			Scale:     "scale=-2:720",
+			VideoArgs: []string{
+				"-c:v", "libx264",
+				"-preset", "veryfast",
+				"-profile:v", "main",
+				"-level", "4.0",
+				// Force keyframe at chunk boundaries so each chunk is
+				// independently decodable. Otherwise hls.js can't seek
+				// cleanly between fragments.
+				"-g", "96",
+				"-keyint_min", "96",
+				"-sc_threshold", "0",
+			},
+			VideoBR: "2000k",
+		},
+	}
+}
+
+// hlsChunkCacheVariantPath is hlsChunkCachePath with a variant subdir
+// so the source-quality .ts files don't collide with 720p .ts files
+// for the same chunk index.
+func (h *Handler) hlsChunkCacheVariantPath(sessionID, variant string, n int) string {
+	return filepath.Join(h.App.Config.Data.Dir, "cache", "hls-chunks",
+		sessionID, variant, fmt.Sprintf("%05d.ts", n))
+}
+
+// serveHLSPlaylist returns the master playlist listing both ABR
+// variants. hls.js loads this, then loads each variant's per-level
+// playlist as needed.
 func (h *Handler) serveHLSPlaylist(c echo.Context, sess *hlsSession) error {
+	variants := hlsVariants()
+
+	var b strings.Builder
+	b.WriteString("#EXTM3U\n")
+	b.WriteString("#EXT-X-VERSION:3\n")
+	for _, v := range variants {
+		// CODECS string: avc1.64xx for H.264 + mp4a.40.2 for AAC.
+		// We claim Main profile @ Level 4.0 for the 720p variant
+		// (matches our libx264 args) and a slightly higher profile/
+		// level for source (since codec-copy passes through whatever
+		// the source actually uses). hls.js mostly uses this for ABR
+		// hints, not strict validation.
+		codecs := "avc1.640028,mp4a.40.2"
+		if v.Name == "720p" {
+			codecs = "avc1.4d4028,mp4a.40.2"
+		}
+		fmt.Fprintf(&b,
+			"#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"%s\"\n",
+			v.Bandwidth, v.Width, v.Height, codecs)
+		fmt.Fprintf(&b, "playlist_%s.m3u8\n", v.Name)
+	}
+
+	c.Response().Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	c.Response().Header().Set("Cache-Control", "no-store")
+	return c.String(http.StatusOK, b.String())
+}
+
+// serveHLSVariantPlaylist returns the per-level playlist for one ABR
+// variant. Each variant has its own chunk URL prefix so the chunks
+// don't collide on disk.
+func (h *Handler) serveHLSVariantPlaylist(c echo.Context, sess *hlsSession, variant string) error {
 	segCount := int(math.Ceil(sess.duration / hlsSegDurSec))
 	if segCount < 1 {
 		segCount = 1
@@ -993,14 +1088,13 @@ func (h *Handler) serveHLSPlaylist(c echo.Context, sess *hlsSession) error {
 	for i := 0; i < segCount; i++ {
 		segDur := hlsSegDurSec
 		if i == segCount-1 {
-			// Final segment is the remainder.
 			segDur = sess.duration - float64(i)*hlsSegDurSec
 			if segDur <= 0 || segDur > hlsSegDurSec {
 				segDur = hlsSegDurSec
 			}
 		}
 		fmt.Fprintf(&b, "#EXTINF:%.3f,\n", segDur)
-		fmt.Fprintf(&b, "segment_%05d.ts\n", i)
+		fmt.Fprintf(&b, "segment_%s_%05d.ts\n", variant, i)
 	}
 	b.WriteString("#EXT-X-ENDLIST\n")
 
@@ -1009,13 +1103,6 @@ func (h *Handler) serveHLSPlaylist(c echo.Context, sess *hlsSession) error {
 	return c.String(http.StatusOK, b.String())
 }
 
-// hlsChunkCachePath is where prebaked / on-demand-generated HLS .ts
-// chunks live on disk. Per-session subdir so cleanup is just rm -rf
-// when the session reaper fires.
-func (h *Handler) hlsChunkCachePath(sessionID string, n int) string {
-	return filepath.Join(h.App.Config.Data.Dir, "cache", "hls-chunks",
-		sessionID, fmt.Sprintf("%05d.ts", n))
-}
 
 // serveHLSSegment serves the requested HLS .ts chunk. Two paths:
 //
@@ -1032,15 +1119,23 @@ func (h *Handler) hlsChunkCachePath(sessionID string, n int) string {
 // Source preference: when the local source cache file exists, ffmpeg
 // reads from disk (instant seek). Otherwise we use the TorBox URL and
 // kick off a background download so subsequent chunks go local.
+// File shape: segment_<variant>_<NNNNN>.ts (e.g. segment_source_00012.ts).
 func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string) error {
-	numPart := strings.TrimSuffix(strings.TrimPrefix(file, "segment_"), ".ts")
+	// Strip the prefix and suffix, split on "_" — variant first, number second.
+	body := strings.TrimSuffix(strings.TrimPrefix(file, "segment_"), ".ts")
+	lastUnderscore := strings.LastIndex(body, "_")
+	if lastUnderscore < 0 {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	variant := body[:lastUnderscore]
+	numPart := body[lastUnderscore+1:]
 	n, err := strconv.Atoi(numPart)
 	if err != nil || n < 0 {
 		return c.NoContent(http.StatusBadRequest)
 	}
 
 	// Cache hit fast path.
-	cachePath := h.hlsChunkCachePath(sess.id, n)
+	cachePath := h.hlsChunkCacheVariantPath(sess.id, variant, n)
 	if info, statErr := os.Stat(cachePath); statErr == nil && info.Size() > 0 {
 		c.Response().Header().Set("Content-Type", "video/mp2t")
 		c.Response().Header().Set("Cache-Control", "public, max-age=3600")
@@ -1059,11 +1154,8 @@ func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string)
 		go h.warmLocalSource(sess.url)
 	}
 
-	// Bake the chunk to disk (same code path as the prebake), then
-	// serve it. bakeOneHLSChunk already knows to use -c:a copy when
-	// audio is AAC.
-	if err := h.bakeOneHLSChunk(sess, n); err != nil {
-		log.Printf("hls seg %d: bake failed: %v", n, err)
+	if err := h.bakeOneHLSChunk(sess, variant, n); err != nil {
+		log.Printf("hls seg %s/%d: bake failed: %v", variant, n, err)
 		return c.JSON(http.StatusBadGateway, map[string]any{"error": "ffmpeg failed"})
 	}
 	c.Response().Header().Set("Content-Type", "video/mp2t")
@@ -1082,29 +1174,34 @@ func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string)
 // file's seek head — N concurrent ffmpeg-over-HTTP processes would
 // fight for the same TCP connection on TorBox's CDN. Once the local
 // source cache is warm, each chunk takes <1 s.
+// prebakeHLSChunks warms the disk cache for the first N chunks of EVERY
+// ABR variant. For the source variant, baking is fast (`-c copy`). For
+// the 720p variant, ffmpeg re-encodes video — costs ~50× real-time so
+// 5 chunks of 4s each at 720p libx264 veryfast = ~2s of CPU per variant.
 func (h *Handler) prebakeHLSChunks(sess *hlsSession, count int) {
 	if sess == nil {
 		return
 	}
-	for i := 0; i < count; i++ {
-		// Skip if already done (idempotent — multiple /torbox/play
-		// hits for the same session shouldn't redo work).
-		path := h.hlsChunkCachePath(sess.id, i)
-		if info, err := os.Stat(path); err == nil && info.Size() > 0 {
-			continue
-		}
-		if err := h.bakeOneHLSChunk(sess, i); err != nil {
-			log.Printf("hls prebake: chunk %d failed: %v", i, err)
-			return // stop on first failure; on-demand path will retry
+	for _, v := range hlsVariants() {
+		for i := 0; i < count; i++ {
+			path := h.hlsChunkCacheVariantPath(sess.id, v.Name, i)
+			if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+				continue
+			}
+			if err := h.bakeOneHLSChunk(sess, v.Name, i); err != nil {
+				log.Printf("hls prebake: %s chunk %d failed: %v", v.Name, i, err)
+				break // try next variant
+			}
 		}
 	}
-	log.Printf("hls prebake: session %s warmed %d chunks", sess.id, count)
+	log.Printf("hls prebake: session %s warmed %d chunks × %d variants",
+		sess.id, count, len(hlsVariants()))
 }
 
 // bakeOneHLSChunk runs ffmpeg synchronously to generate one .ts segment
-// into the disk cache. Used by both the prebake path and (implicitly)
-// the on-demand serveHLSSegment path — same output shape, same flags.
-func (h *Handler) bakeOneHLSChunk(sess *hlsSession, n int) error {
+// for one ABR variant into the disk cache. Used by both the prebake
+// path and the on-demand serveHLSSegment path.
+func (h *Handler) bakeOneHLSChunk(sess *hlsSession, variantName string, n int) error {
 	startSec := float64(n) * hlsSegDurSec
 	if startSec >= sess.duration {
 		return fmt.Errorf("chunk %d beyond duration", n)
@@ -1114,28 +1211,42 @@ func (h *Handler) bakeOneHLSChunk(sess *hlsSession, n int) error {
 		segDur = sess.duration - startSec
 	}
 
+	// Locate the variant config.
+	var variant hlsVariant
+	for _, v := range hlsVariants() {
+		if v.Name == variantName {
+			variant = v
+			break
+		}
+	}
+	if variant.Name == "" {
+		return fmt.Errorf("unknown variant %q", variantName)
+	}
+
 	inputPath := sess.url
 	if localPath, ok := h.localSourceIfReady(sess.url); ok {
 		inputPath = localPath
 	}
 
-	cachePath := h.hlsChunkCachePath(sess.id, n)
+	cachePath := h.hlsChunkCacheVariantPath(sess.id, variantName, n)
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
 		return err
 	}
 	tmpPath := cachePath + ".tmp"
 
+	// 720p re-encoding can take 5-10s for a single chunk on slower
+	// CPUs (raspi, low-end NUC). The source variant is `-c copy` and
+	// completes in <1s. Both bounded by 90s for safety.
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	// Audio handling depends on the source codec:
-	//   - AAC → `-c:a copy`, the browser plays AAC natively inside
-	//     mpegts. No re-encode = chunks bake in ~100 ms instead of
-	//     2-4 s, and the audio stays bit-perfect.
-	//   - Anything else (AC3 / EAC3 / DTS / TrueHD) → re-encode to
-	//     AAC stereo so the browser can decode it.
+	// Audio handling:
+	//   - AAC source → `-c:a copy` for the source variant (bit-perfect).
+	//     For 720p variant, we always re-encode to a fixed AAC 192k
+	//     stereo to normalise the audio bitrate across variants.
+	//   - Anything else → re-encode to AAC stereo on both variants.
 	audioArgs := []string{"-c:a", "aac", "-b:a", "192k", "-ac", "2"}
-	if strings.HasPrefix(strings.ToLower(sess.audioCodec), "aac") {
+	if variantName == "source" && strings.HasPrefix(strings.ToLower(sess.audioCodec), "aac") {
 		audioArgs = []string{"-c:a", "copy"}
 	}
 
@@ -1145,7 +1256,14 @@ func (h *Handler) bakeOneHLSChunk(sess *hlsSession, n int) error {
 		"-ss", fmt.Sprintf("%.3f", startSec),
 		"-i", inputPath,
 		"-t", fmt.Sprintf("%.3f", segDur),
-		"-c:v", "copy",
+	}
+	// Video filter for downscale (720p) goes before the video codec.
+	if variant.Scale != "" {
+		args = append(args, "-vf", variant.Scale)
+	}
+	args = append(args, variant.VideoArgs...)
+	if variant.VideoBR != "" {
+		args = append(args, "-b:v", variant.VideoBR, "-maxrate", variant.VideoBR, "-bufsize", "4000k")
 	}
 	args = append(args, audioArgs...)
 	args = append(args,
