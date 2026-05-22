@@ -777,6 +777,12 @@ func (h *Handler) annotateAndSort(c echo.Context, results []prowlarr.SearchResul
 			"cached":      isCached,
 			"quality":     detectQuality(r.Title),
 			"score":       scoreRelease(r, isCached),
+			// Speed tier — UI badge. "instant" / "fast" / "normal" /
+			// "slow" / "very_slow". Cached releases are always instant
+			// because TorBox serves them from its CDN; non-cached
+			// releases depend on how fast TorBox can peer-fetch from
+			// the seeders.
+			"speedTier": releaseSpeedTier(isCached, r.Seeders),
 		})
 	}
 
@@ -790,8 +796,13 @@ func (h *Handler) annotateAndSort(c echo.Context, results []prowlarr.SearchResul
 // scoreRelease — heuristic to rank torrent releases.
 //
 // Priority order:
-//  1. Cached on TorBox (= instant playback) — dominant factor
-//  2. Number of seeders
+//  1. Cached on TorBox (= instant playback) — dominant factor (1M bonus)
+//  2. For NON-CACHED releases: number of seeders gates everything
+//     else. TorBox has to peer-fetch the file in real time; a release
+//     with 2 seeders streams at ~500 KB/s no matter how good its
+//     1080p HEVC quality is. We add seeder-tier bonuses/penalties so
+//     between two non-cached releases the well-seeded one wins
+//     decisively, even if the dead one is "higher quality".
 //  3. Quality markers in the title (BluRay, 1080p, HEVC, French audio)
 //  4. File size sweet spot (1-5 GB for 1080p)
 //
@@ -809,6 +820,26 @@ func scoreRelease(r prowlarr.SearchResult, cached bool) float64 {
 		// whose cached French alternatives existed but were
 		// pushed down by seeder counts.
 		score += 1_000_000
+	} else {
+		// Seeder tiers — only applied to non-cached releases.
+		// Thresholds tuned for TorBox's peer-fetch throughput:
+		//   - <3 seeders   = essentially dead, ~kbps to ~hundreds kbps
+		//   - 3-9 seeders  = slow, ~1-2 MB/s, buffers on a 5 Mbps line
+		//   - 10-19        = OK, ~3-5 MB/s
+		//   - 20-49        = good, ~5-10 MB/s
+		//   - 50+          = full speed, saturates most home ISPs
+		switch {
+		case r.Seeders < 3:
+			// Effectively disqualifies the release unless it's the
+			// only one available. Magnitude > qualityScore's max (~75).
+			score -= 200
+		case r.Seeders < 10:
+			score -= 50
+		case r.Seeders >= 50:
+			score += 30
+		case r.Seeders >= 20:
+			score += 15
+		}
 	}
 	score += float64(r.Seeders) * 2
 	score -= float64(r.Leechers) / 4
@@ -828,6 +859,28 @@ func scoreRelease(r prowlarr.SearchResult, cached bool) float64 {
 		score -= 30
 	}
 	return score
+}
+
+// releaseSpeedTier classifies how fast a release will stream from
+// TorBox. Used as a UI badge in the source picker so the user knows
+// what they're picking. Cached → CDN throughput; non-cached → bound
+// by TorBox's peer-fetch from seeders.
+//
+// Tier strings are stable — the frontend pattern-matches on them.
+func releaseSpeedTier(cached bool, seeders int) string {
+	if cached {
+		return "instant"
+	}
+	switch {
+	case seeders >= 50:
+		return "fast"
+	case seeders >= 10:
+		return "normal"
+	case seeders >= 3:
+		return "slow"
+	default:
+		return "very_slow"
+	}
 }
 
 func detectQuality(title string) string {

@@ -34,6 +34,7 @@ import {
     useTMDBSeason,
     yearOf,
 } from "@/lib/tmdb"
+import { useSearchMovie, type Release } from "@/lib/notflix-api"
 import { atom, useAtom, useSetAtom } from "jotai"
 import React from "react"
 import { useTranslation } from "react-i18next"
@@ -127,6 +128,19 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
         if (seasons.length === 0) return
         setSelectedSeason(seasons[0].season_number)
     }, [target.type, seasons, selectedSeason])
+
+    // Speculative TorBox prefetch — if the user dwells on the modal for
+    // 5 s, ask TorBox to start peer-fetching the best non-cached release
+    // ahead of the explicit Play click. By the time they actually click
+    // (often 10-60 s later, after reading the synopsis), part of the file
+    // is already on TorBox's CDN → stream starts much faster.
+    //
+    // Only fires for movies; TV episode selection is too variable.
+    // Computed defensively (with optional chaining) because hooks must
+    // run on every render BEFORE the loading early-return below.
+    const prefetchTitle = data && mediaTypeOf(data, target.type) === "movie" ? titleOf(data) : ""
+    const prefetchYear = data ? yearOf(data) : undefined
+    useTorBoxPrefetch(prefetchTitle, prefetchYear)
 
     if (isLoading || !data) return <BodySkeleton />
 
@@ -722,4 +736,64 @@ function TrailerButton({ videos }: { videos: TMDBVideo[] }) {
             )}
         </>
     )
+}
+
+// ---------------------------------------------------------------------------
+// Speculative TorBox prefetch
+// ---------------------------------------------------------------------------
+
+/** Session-scoped Set of infoHashes we've already prefetched. Avoids
+ *  re-firing AddMagnet when the user re-opens the same detail modal. */
+const __prefetchedHashes = new Set<string>()
+
+/** useTorBoxPrefetch fires a single AddMagnet for the best non-cached
+ *  release of `title` (movie) after a 5 s dwell on the detail modal.
+ *  Idempotent within a session — re-opening the same modal does NOT
+ *  re-trigger the prefetch.
+ *
+ *  Quiet when:
+ *    - title is empty (e.g. caller hasn't loaded the TMDB data yet)
+ *    - TorBox isn't configured (the backend silently no-ops anyway)
+ *    - the top release is already cached (no need to nudge)
+ *    - the top release has too few seeders (speedTier slow/very_slow —
+ *      pre-adding it just wastes quota; TorBox can't peer-fetch fast)
+ */
+function useTorBoxPrefetch(title: string, year?: number) {
+    const [armed, setArmed] = React.useState(false)
+
+    // Dwell timer. Re-armed whenever title changes (new modal open).
+    React.useEffect(() => {
+        setArmed(false)
+        if (!title) return
+        const t = window.setTimeout(() => setArmed(true), 5_000)
+        return () => window.clearTimeout(t)
+    }, [title, year])
+
+    // Only when armed do we fire the actual Prowlarr search. Reusing
+    // useSearchMovie means the result is also warm in the cache when
+    // the user clicks Lecture and /watch hits the same key.
+    const { data: releases } = useSearchMovie(armed ? title : "", armed ? year : undefined)
+
+    React.useEffect(() => {
+        if (!armed || !releases || releases.length === 0) return
+        // Already sorted by score desc — take the top.
+        const best = releases[0]
+        if (!best || best.cached) return
+        if (best.speedTier === "slow" || best.speedTier === "very_slow") return
+        const key = (best.infoHash || best.magnetUrl || best.downloadUrl || "").toLowerCase()
+        if (!key || __prefetchedHashes.has(key)) return
+        __prefetchedHashes.add(key)
+
+        // Fire-and-forget. Errors are swallowed — worst case the user
+        // pays the regular TorBox add cost at Play time.
+        fetch("/api/v1/torbox/prefetch", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+                magnet: best.magnetUrl,
+                downloadUrl: best.downloadUrl,
+                infoHash: best.infoHash,
+            }),
+        }).catch(() => { /* silent */ })
+    }, [armed, releases])
 }

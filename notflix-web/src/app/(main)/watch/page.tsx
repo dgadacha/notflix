@@ -1016,7 +1016,7 @@ function ReleasePicker({
                                     {release.title}
                                 </p>
                                 <div className="flex items-center gap-3 text-xs text-[--muted]">
-                                    <span>↑ {release.seeders}</span>
+                                    <SpeedBadge tier={release.speedTier} seeders={release.seeders} />
                                     <span>{formatSize(release.size)}</span>
                                 </div>
                             </div>
@@ -1047,6 +1047,34 @@ function CachedBadge() {
         >
             <BiSolidCheckCircle className="size-3" />
             {t("watch.cached", "Cache")}
+        </span>
+    )
+}
+
+/** SpeedBadge — combines the seeder count with an emoji and color cue.
+ *  Cached releases get a separate green "Cache" pill upstream so we don't
+ *  double-tag them; everything else is bound by TorBox's peer-fetch from
+ *  the seeders, so we surface the expected user experience right next to
+ *  the upload arrow. */
+function SpeedBadge({ tier, seeders }: { tier: Release["speedTier"]; seeders: number }) {
+    const { t } = useTranslation()
+    // Cached releases already advertise themselves via CachedBadge; show
+    // only the seeder count here so the row doesn't get noisy.
+    if (tier === "instant") {
+        return <span>↑ {seeders}</span>
+    }
+    const meta: Record<Release["speedTier"], { icon: string; label: string; cls: string }> = {
+        instant:   { icon: "⚡", label: t("watch.speed_instant",   "instantané"), cls: "text-emerald-300" },
+        fast:      { icon: "⚡", label: t("watch.speed_fast",      "rapide"),      cls: "text-emerald-300" },
+        normal:    { icon: "•",  label: t("watch.speed_normal",    "OK"),          cls: "text-white/70"    },
+        slow:      { icon: "🐢", label: t("watch.speed_slow",      "lent"),        cls: "text-amber-300"   },
+        very_slow: { icon: "🐢", label: t("watch.speed_very_slow", "très lent"),   cls: "text-red-300"     },
+    }
+    const m = meta[tier]
+    return (
+        <span className={cn("inline-flex items-center gap-1", m.cls)}>
+            <span aria-hidden>↑ {seeders}</span>
+            <span className="opacity-75" title={m.label}>· {m.icon} {m.label}</span>
         </span>
     )
 }

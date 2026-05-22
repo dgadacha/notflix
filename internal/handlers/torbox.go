@@ -9,6 +9,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"notflix/internal/torbox"
@@ -158,6 +159,128 @@ func (h *Handler) HandleTorBoxCheckCached(c echo.Context) error {
 		return RespondErr(c, err)
 	}
 	return RespondOK(c, cached)
+}
+
+// HandleTorBoxPrefetch — POST {"magnet" | "downloadUrl", "infoHash"}
+//
+// Speculative pre-add. Called when the user OPENS a detail modal: if
+// the best-ranked non-cached release has enough seeders to be worth
+// it, we ask TorBox to start peer-fetching it NOW so that by the time
+// the user clicks Play (often 10-60 s of synopsis-reading later),
+// part of the file is already on TorBox's CDN.
+//
+// Fire-and-forget shape:
+//   - Returns 200 immediately after firing the AddMagnet request.
+//   - Errors are logged but never surfaced to the user (the worst case
+//     is the play path runs as before — TorBox de-dupes adds anyway).
+//   - In-process map dedupes by infoHash so re-opens of the same modal
+//     don't spam AddMagnet.
+//
+// Quota note: each call consumes one TorBox "add" against the daily
+// allowance. The frontend uses a 5 s dwell-time + per-session de-dupe
+// to keep this in the 1-5 calls per browsing session range.
+func (h *Handler) HandleTorBoxPrefetch(c echo.Context) error {
+	var body struct {
+		Magnet      string `json:"magnet"`
+		DownloadURL string `json:"downloadUrl"`
+		InfoHash    string `json:"infoHash"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return RespondErr(c, err)
+	}
+	if body.Magnet == "" && body.DownloadURL == "" {
+		return c.JSON(http.StatusBadRequest, map[string]any{"error": "magnet or downloadUrl required"})
+	}
+	if !h.App.TorBox.HasKey() {
+		// Silent no-op — the frontend always tries, the backend
+		// gracefully ignores when not configured.
+		return RespondOK(c, map[string]any{"prefetched": false, "reason": "torbox_not_configured"})
+	}
+
+	// In-process dedupe. infoHash is the strongest key; fall back to
+	// the magnet itself.
+	key := strings.ToLower(body.InfoHash)
+	if key == "" {
+		key = body.Magnet
+	}
+	if key == "" {
+		key = body.DownloadURL
+	}
+	if prefetchSeen(key) {
+		return RespondOK(c, map[string]any{"prefetched": false, "reason": "already_seen"})
+	}
+	prefetchMark(key)
+
+	// Fire-and-forget. AddMagnet is idempotent on TorBox's side — if
+	// the torrent is already queued / cached the call returns the same
+	// id, so concurrent races don't double-spend the quota.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		var err error
+		if body.Magnet != "" {
+			_, err = h.App.TorBox.AddMagnet(ctx, body.Magnet)
+		} else {
+			content, filename, ferr := fetchTorrentFromURL(ctx, body.DownloadURL)
+			if ferr != nil {
+				log.Printf("torbox prefetch: fetch .torrent failed: %v", ferr)
+				return
+			}
+			if strings.HasPrefix(string(content), "magnet:?") {
+				_, err = h.App.TorBox.AddMagnet(ctx, string(content))
+			} else {
+				_, err = h.App.TorBox.AddTorrentFile(ctx, filename, content)
+			}
+		}
+		if err != nil {
+			log.Printf("torbox prefetch: add failed: %v", err)
+		} else {
+			log.Printf("torbox prefetch: queued %s", truncateForLog(key, 16))
+		}
+	}()
+	return RespondOK(c, map[string]any{"prefetched": true})
+}
+
+// prefetchSeen / prefetchMark — process-local set guarding against
+// duplicate AddMagnet calls within a session. Cleared on a soft TTL
+// so a user who browses the same film 30 min apart can still trigger
+// a fresh prefetch (in case TorBox dropped the queued torrent).
+var (
+	prefetchMu   sync.Mutex
+	prefetchKeys = map[string]time.Time{}
+)
+
+func prefetchSeen(key string) bool {
+	if key == "" {
+		return false
+	}
+	prefetchMu.Lock()
+	defer prefetchMu.Unlock()
+	// Purge old entries inline (cheap — typical size is <100).
+	cutoff := time.Now().Add(-30 * time.Minute)
+	for k, t := range prefetchKeys {
+		if t.Before(cutoff) {
+			delete(prefetchKeys, k)
+		}
+	}
+	_, ok := prefetchKeys[key]
+	return ok
+}
+
+func prefetchMark(key string) {
+	if key == "" {
+		return
+	}
+	prefetchMu.Lock()
+	defer prefetchMu.Unlock()
+	prefetchKeys[key] = time.Now()
+}
+
+func truncateForLog(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // HandleTorBoxPlay — POST {"magnet":"…"} OR {"downloadUrl":"…"} [+fileId]

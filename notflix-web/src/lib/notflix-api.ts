@@ -199,6 +199,13 @@ export type Release = {
     cached: boolean
     quality: string
     score: number
+    // Server-computed streaming speed estimate:
+    //   "instant"   = cached on TorBox (CDN)
+    //   "fast"      = non-cached + 50+ seeders (saturates home ISP)
+    //   "normal"    = non-cached + 10-49 seeders (smooth 1080p)
+    //   "slow"      = non-cached + 3-9 seeders (likely to buffer)
+    //   "very_slow" = non-cached + <3 seeders (basically dead)
+    speedTier: "instant" | "fast" | "normal" | "slow" | "very_slow"
 }
 
 export type ProwlarrStatus = {

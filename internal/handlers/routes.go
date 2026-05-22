@@ -64,6 +64,7 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	tb.GET("/status", h.HandleTorBoxStatus)
 	tb.POST("/cache", h.HandleTorBoxCheckCached)
 	tb.POST("/play", h.HandleTorBoxPlay)
+	tb.POST("/prefetch", h.HandleTorBoxPrefetch)
 	tb.GET("/list", h.HandleTorBoxList)
 	tb.DELETE("/torrent/:id", h.HandleTorBoxDelete)
 
