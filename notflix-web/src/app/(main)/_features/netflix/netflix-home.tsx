@@ -1,6 +1,7 @@
 import { NetflixContinueWatching } from "@/app/(main)/_features/netflix/netflix-continue-watching"
 import { NetflixHero } from "@/app/(main)/_features/netflix/netflix-hero"
 import { NetflixRow } from "@/app/(main)/_features/netflix/netflix-row"
+import { NetflixTopTen } from "@/app/(main)/_features/netflix/netflix-top-ten"
 import { useActiveProfileHistory } from "@/lib/profiles/profiles"
 import { useDiscover, useTMDBRecommendations, useTrending } from "@/lib/tmdb"
 import React from "react"
@@ -33,6 +34,11 @@ export function NetflixHome() {
                     asks TMDB for recommendations, renders or returns
                     null. Hidden if no profile / no history. */}
                 <BecauseYouWatchedRow />
+                {/* Netflix-signature Top 10 row — giant 1-10 numerals
+                    behind portrait posters. Sourced from TMDB
+                    /trending/all/week (movies + series combined),
+                    truncated to 10. */}
+                <NetflixTopTen />
                 <TrendingMoviesRow />
                 <PopularMoviesRow />
                 <TopRatedMoviesRow />
