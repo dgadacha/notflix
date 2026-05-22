@@ -14,7 +14,13 @@ GO      ?= go
 NPM     ?= npm
 
 .DEFAULT_GOAL := help
-.PHONY: help dev backend frontend setup install-deps init-config build run clean
+.PHONY: help dev backend frontend setup install-deps init-config build run clean docker docker-push deploy
+
+# Container image — override per environment.
+IMAGE   ?= registry.gitlab.com/kidnar/notflix
+TAG     ?= latest
+KUBECTL ?= kubectl
+NS      ?= notflix
 
 help:
 	@printf "notflix Makefile — targets:\n"
@@ -68,3 +74,22 @@ run: build ## Build then launch the prod binary
 clean: ## Remove build artifacts (web/, notflix, notflix-web/out)
 	@rm -rf web notflix notflix-web/out
 	@echo "→ cleaned. Your datadir at $(DATADIR) is untouched."
+
+# ─────────────────────────────────────────────────────────────────────
+# Container / k8s deploy
+# ─────────────────────────────────────────────────────────────────────
+
+docker: ## Build the container image ($(IMAGE):$(TAG))
+	@docker build --platform=linux/amd64 -t $(IMAGE):$(TAG) .
+
+docker-push: docker ## Build + push to the registry
+	@docker push $(IMAGE):$(TAG)
+
+deploy: docker-push ## Build, push, kubectl apply, rollout restart
+	@$(KUBECTL) apply -f k8s/namespace.yaml
+	@$(KUBECTL) apply -f k8s/pvc.yaml
+	@$(KUBECTL) apply -f k8s/deployment.yaml
+	@$(KUBECTL) apply -f k8s/service.yaml
+	@$(KUBECTL) apply -f k8s/ingress.yaml
+	@$(KUBECTL) -n $(NS) rollout restart deploy/notflix
+	@$(KUBECTL) -n $(NS) rollout status deploy/notflix --timeout=120s
