@@ -90,6 +90,7 @@ docker-push: docker ## Build + push to the registry
 # ─────────────────────────────────────────────────────────────────────
 BUNDLE_IMAGE ?= $(IMAGE)-bundle
 BUNDLE_TAG   ?= $(TAG)
+BUNDLE_NS    ?= notflix-bundle
 
 docker-bundle: ## Build the bundle image (Notflix + Prowlarr + Flaresolverr)
 	@docker build --platform=linux/amd64 -f Dockerfile.bundle -t $(BUNDLE_IMAGE):$(BUNDLE_TAG) .
@@ -104,6 +105,21 @@ docker-bundle-run: ## Run the bundle image locally for testing
 		-v notflix-bundle-data:/data \
 		--name notflix-bundle \
 		$(BUNDLE_IMAGE):$(BUNDLE_TAG)
+
+deploy-bundle: docker-bundle-push ## Build, push, apply bundle manifests, rollout restart
+	@$(KUBECTL) apply -f k8s/bundle/namespace.yaml
+	@$(KUBECTL) apply -f k8s/bundle/pvc.yaml
+	@$(KUBECTL) apply -f k8s/bundle/deployment.yaml
+	@$(KUBECTL) apply -f k8s/bundle/service.yaml
+	@$(KUBECTL) apply -f k8s/bundle/ingress.yaml
+	@$(KUBECTL) -n $(BUNDLE_NS) rollout restart deploy/notflix-bundle
+	@$(KUBECTL) -n $(BUNDLE_NS) rollout status deploy/notflix-bundle --timeout=180s
+
+bundle-prowlarr-ui: ## Port-forward the bundle's Prowlarr UI to localhost:9696
+	@$(KUBECTL) -n $(BUNDLE_NS) port-forward svc/notflix-bundle 9696:9696
+
+bundle-logs: ## Tail the bundle pod's logs (supervisor + 3 services)
+	@$(KUBECTL) -n $(BUNDLE_NS) logs -l app=notflix-bundle --tail=200 -f
 
 deploy: docker-push ## Build, push, kubectl apply, rollout restart
 	@$(KUBECTL) apply -f k8s/namespace.yaml

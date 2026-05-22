@@ -1,0 +1,21 @@
+# Bundle PVC.
+#
+# Carries everything under /data:
+#   - Notflix:        config.toml, notflix.db, /data/cache/*
+#   - Prowlarr:       /data/prowlarr/config.xml + indexer db
+#   - Flaresolverr:   /data/flaresolverr-cache/  (currently empty, reserved)
+#
+# 30 Gi is sized for the same Notflix workload as the single-service
+# PVC. Prowlarr's footprint is in the MB range; Flaresolverr keeps
+# nothing persistent.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: notflix-bundle-data
+  namespace: notflix-bundle
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 30Gi

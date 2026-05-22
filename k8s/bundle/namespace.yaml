@@ -1,0 +1,7 @@
+# Dedicated namespace for the all-in-one bundle deployment.
+# Kept separate from the regular `notflix` namespace so the two can
+# coexist during a migration / A-B test.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: notflix-bundle
