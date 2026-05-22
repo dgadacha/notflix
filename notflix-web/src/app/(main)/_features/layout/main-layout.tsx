@@ -16,7 +16,7 @@ import { NetflixBottomTab } from "@/app/(main)/_features/netflix/netflix-bottom-
 import { NetflixDetailModal } from "@/app/(main)/_features/netflix/netflix-detail-modal"
 import { NetflixLogin } from "@/app/(main)/_features/netflix/netflix-login"
 import { NetflixTopBar } from "@/app/(main)/_features/netflix/netflix-top-bar"
-import { LoadingOverlayWithLogo } from "@/components/shared/loading-overlay-with-logo"
+import { RouteFallback } from "@/components/shared/loading-overlay-with-logo"
 import { AppLayout, AppLayoutContent, AppSidebarProvider } from "@/components/ui/app-layout"
 import { useCurrentUser } from "@/lib/auth"
 import { usePathname, useRouter } from "@/lib/navigation"
@@ -31,7 +31,14 @@ export const MainLayout = ({ children }: { children: React.ReactNode }) => {
     // deep links (`/lists`, `/watch?id=…`) survive the auth round trip —
     // the user lands back on the URL they wanted once `useCurrentUser`
     // resolves to a real account.
-    if (isLoading) return <LoadingOverlayWithLogo />
+    //
+    // Loading state is a discreet spinner — NOT the big "N" logo
+    // splash. That splash fired on every window refocus / network
+    // blip (because useCurrentUser refetches), which the user
+    // experienced as "le gros N qui apparaît des fois". The thin
+    // spinner has the same affordance ("we're working") without
+    // hijacking the screen each time.
+    if (isLoading) return <RouteFallback />
     if (!user) return <NetflixLogin />
 
     return <AuthenticatedShell>{children}</AuthenticatedShell>
