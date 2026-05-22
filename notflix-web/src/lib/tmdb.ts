@@ -153,6 +153,24 @@ export function useDiscover(path: string) {
 }
 
 /**
+ * TMDB /movie/:id/recommendations or /tv/:id/recommendations. Used by
+ * the "Parce que tu as regardé X" row on the home page. Returns the
+ * same paged shape as discover so the row component renders unchanged.
+ *
+ * Disabled when id is null so the row can render conditionally.
+ */
+export function useTMDBRecommendations(type: "movie" | "tv" | null, id: number | null) {
+    return useQuery<TMDBPaged>({
+        queryKey: ["tmdb", "recommendations", type, id],
+        queryFn: () => tmdbFetch(`/${type}/${id}/recommendations`),
+        enabled: !!type && !!id,
+        // Recommendations rarely change — keep the response warm for an
+        // hour to avoid re-fetching as the user toggles between rows.
+        staleTime: 60 * 60_000,
+    })
+}
+
+/**
  * Paginated variant of useDiscover for the /categories grid — fetches
  * the first page on mount and lets the caller pull more via fetchNextPage().
  *
