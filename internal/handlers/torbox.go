@@ -454,10 +454,6 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 		// gives the player an instant-start window without any disk
 		// cache of the full source.
 		go h.prebakeHLSChunks(sess, hlsPrebakeChunkCount)
-		// Generate scrub-bar thumbnails in the background. ~30-60 s
-		// for a 2 h movie; ready by the time the user even thinks
-		// about scrubbing. Self-throttling — duplicate calls collapse.
-		h.generateThumbnails(sess)
 	}
 	// Sub extraction stays on-demand via /stream/hls/:sessionId/prep,
 	// reading the subtitle track directly from the TorBox URL.
