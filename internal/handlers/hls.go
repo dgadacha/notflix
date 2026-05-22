@@ -45,10 +45,13 @@ import (
 
 const hlsSegDurSec = 4.0
 
-// Number of chunks to prebake in the background when an HLS session opens.
-// 5 × 4s = 20s of playback buffered to disk before the user clicks Play
-// → instant cold-start (sub-second from <video> mount to first frame).
-const hlsPrebakeChunkCount = 5
+// Number of source-variant chunks to prebake in the background when an
+// HLS session opens. 10 × 4s = 40s of playback buffered to disk before
+// the user clicks Play → instant cold-start (sub-second from <video>
+// mount to first frame) AND a comfortable cushion in case the local
+// source download is slow (parallel downloader needs ~30-60s; prebake
+// chunks bake from the partial file or via remote URL).
+const hlsPrebakeChunkCount = 10
 
 // SubtitleTrack describes one subtitle source we expose to the player.
 // Embedded streams live inside the video file (extracted via ffmpeg);
@@ -993,39 +996,64 @@ type hlsVariant struct {
 }
 
 func hlsVariants() []hlsVariant {
+	// Ladder roughly mirroring Netflix's SDR tiers. Listed in
+	// bandwidth-descending order so the master playlist lists the
+	// highest first (hls.js prefers them at the top when starting at
+	// the highest level).
+	libx264Args := func(level string) []string {
+		return []string{
+			"-c:v", "libx264",
+			"-preset", "veryfast",
+			"-profile:v", "main",
+			"-level", level,
+			// Force keyframes every 96 frames (4 s at 24 fps) so each
+			// HLS chunk is independently decodable; otherwise hls.js
+			// can't seek cleanly between fragments.
+			"-g", "96",
+			"-keyint_min", "96",
+			"-sc_threshold", "0",
+		}
+	}
 	return []hlsVariant{
 		{
-			// Source-quality stream — codec-copy from the source.
+			// Source — codec-copy. Bit-perfect, fastest to bake (~100 ms
+			// per chunk regardless of resolution).
 			Name:      "source",
-			Bandwidth: 8_000_000, // declared 8 Mbps; actual depends on source
+			Bandwidth: 8_000_000,
 			Width:     1920,
 			Height:    1080,
 			Scale:     "",
 			VideoArgs: []string{"-c:v", "copy"},
 		},
 		{
-			// 720p re-encode at ~2 Mbps. Roughly equivalent to Netflix's
-			// SDR HD tier. Uses libx264 veryfast preset — encodes at
-			// ~50× real-time on modern CPUs, so a 4 s chunk bakes in
-			// well under 100 ms.
 			Name:      "720p",
 			Bandwidth: 2_500_000,
 			Width:     1280,
 			Height:    720,
 			Scale:     "scale=-2:720",
-			VideoArgs: []string{
-				"-c:v", "libx264",
-				"-preset", "veryfast",
-				"-profile:v", "main",
-				"-level", "4.0",
-				// Force keyframe at chunk boundaries so each chunk is
-				// independently decodable. Otherwise hls.js can't seek
-				// cleanly between fragments.
-				"-g", "96",
-				"-keyint_min", "96",
-				"-sc_threshold", "0",
-			},
-			VideoBR: "2000k",
+			VideoArgs: libx264Args("4.0"),
+			VideoBR:   "2000k",
+		},
+		{
+			// 480p — comfortable on a 1.5 Mbps cellular link.
+			Name:      "480p",
+			Bandwidth: 1_000_000,
+			Width:     854,
+			Height:    480,
+			Scale:     "scale=-2:480",
+			VideoArgs: libx264Args("3.1"),
+			VideoBR:   "800k",
+		},
+		{
+			// 360p — the "watch on flaky 3G/edge" safety net. Visible
+			// quality drop but never rebuffers under ~500 Kbps.
+			Name:      "360p",
+			Bandwidth: 500_000,
+			Width:     640,
+			Height:    360,
+			Scale:     "scale=-2:360",
+			VideoArgs: libx264Args("3.0"),
+			VideoBR:   "400k",
 		},
 	}
 }
@@ -1174,28 +1202,139 @@ func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string)
 // file's seek head — N concurrent ffmpeg-over-HTTP processes would
 // fight for the same TCP connection on TorBox's CDN. Once the local
 // source cache is warm, each chunk takes <1 s.
-// prebakeHLSChunks warms the disk cache for the first N chunks of EVERY
-// ABR variant. For the source variant, baking is fast (`-c copy`). For
-// the 720p variant, ffmpeg re-encodes video — costs ~50× real-time so
-// 5 chunks of 4s each at 720p libx264 veryfast = ~2s of CPU per variant.
+// prebakeHLSChunks warms the disk cache for the first N source-variant
+// chunks. Source is `-c copy` so this is cheap (< 1 s for 10 chunks).
+// Lower variants (720p / 480p / 360p) are NOT prebaked here — they're
+// produced by backgroundFullEncodeVariants which encodes the entire
+// movie of each lower variant once the source file is locally cached.
+// That way ABR has every lower-variant chunk on disk by the time it
+// needs to downshift, instead of stalling on a libx264 cold start.
 func (h *Handler) prebakeHLSChunks(sess *hlsSession, count int) {
 	if sess == nil {
 		return
 	}
-	for _, v := range hlsVariants() {
-		for i := 0; i < count; i++ {
-			path := h.hlsChunkCacheVariantPath(sess.id, v.Name, i)
-			if info, err := os.Stat(path); err == nil && info.Size() > 0 {
-				continue
-			}
-			if err := h.bakeOneHLSChunk(sess, v.Name, i); err != nil {
-				log.Printf("hls prebake: %s chunk %d failed: %v", v.Name, i, err)
-				break // try next variant
-			}
+	for i := 0; i < count; i++ {
+		path := h.hlsChunkCacheVariantPath(sess.id, "source", i)
+		if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+			continue
+		}
+		if err := h.bakeOneHLSChunk(sess, "source", i); err != nil {
+			log.Printf("hls prebake: source chunk %d failed: %v", i, err)
+			return
 		}
 	}
-	log.Printf("hls prebake: session %s warmed %d chunks × %d variants",
-		sess.id, count, len(hlsVariants()))
+	log.Printf("hls prebake: session %s warmed %d source chunks", sess.id, count)
+}
+
+// backgroundFullEncodeVariants encodes the complete movie at every
+// lower-bandwidth variant once the source has been downloaded to local
+// disk. Runs as a fire-and-forget goroutine spawned from /torbox/play.
+//
+// One ffmpeg invocation per variant uses the HLS muxer to emit every
+// chunk in a single pass — much cheaper than N separate ffmpeg
+// processes seeking back into the source. For libx264 veryfast at
+// 720p, that's ~50× real-time → a 2 h movie's 720p variant takes ~2.5 min.
+// 480p and 360p are even faster. Sequential so we don't saturate CPU
+// while the user is watching.
+//
+// Encoded chunks land directly in the per-variant disk cache. The
+// on-demand serveHLSSegment path serves them from there → ABR
+// downshifts are instant.
+func (h *Handler) backgroundFullEncodeVariants(sess *hlsSession) {
+	if sess == nil {
+		return
+	}
+	// Wait for the local source to be ready (up to 15 min — should
+	// usually take 30-60 s with the parallel downloader).
+	deadline := time.Now().Add(15 * time.Minute)
+	var localPath string
+	for time.Now().Before(deadline) {
+		if p, ok := h.localSourceIfReady(sess.url); ok {
+			localPath = p
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if localPath == "" {
+		log.Printf("hls bg-encode: session %s — local source never landed, skipping", sess.id)
+		return
+	}
+
+	for _, v := range hlsVariants() {
+		if v.Name == "source" {
+			continue // codec-copy, already prebaked / on-demand
+		}
+		// Skip if the whole variant is already cached (re-play of a
+		// previously-encoded session).
+		expected := int(math.Ceil(sess.duration / hlsSegDurSec))
+		lastChunk := h.hlsChunkCacheVariantPath(sess.id, v.Name, expected-1)
+		if info, err := os.Stat(lastChunk); err == nil && info.Size() > 0 {
+			continue
+		}
+		start := time.Now()
+		if err := h.fullEncodeOneVariant(sess, localPath, v); err != nil {
+			log.Printf("hls bg-encode: %s failed after %s: %v",
+				v.Name, time.Since(start).Round(time.Second), err)
+			continue
+		}
+		log.Printf("hls bg-encode: %s done in %s (%.0fx real-time)",
+			v.Name, time.Since(start).Round(time.Second),
+			sess.duration/time.Since(start).Seconds())
+	}
+}
+
+// fullEncodeOneVariant runs a single ffmpeg via the HLS muxer that
+// emits every chunk of one variant straight into the per-variant disk
+// cache directory. Cheaper than baking chunk-by-chunk because ffmpeg
+// reads the source file ONCE.
+func (h *Handler) fullEncodeOneVariant(sess *hlsSession, localPath string, v hlsVariant) error {
+	cacheDir := filepath.Dir(h.hlsChunkCacheVariantPath(sess.id, v.Name, 0))
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return err
+	}
+
+	// Hard timeout — 30 min covers a 4 h movie at the slowest variant
+	// even on a low-end CPU.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	args := []string{
+		"-hide_banner",
+		"-loglevel", "error",
+		"-i", localPath,
+	}
+	if v.Scale != "" {
+		args = append(args, "-vf", v.Scale)
+	}
+	args = append(args, v.VideoArgs...)
+	if v.VideoBR != "" {
+		args = append(args, "-b:v", v.VideoBR, "-maxrate", v.VideoBR, "-bufsize", "4000k")
+	}
+	// Force a keyframe every 4 s regardless of source fps — keeps HLS
+	// chunks independently decodable. Without this, ffmpeg's segmenter
+	// drifts to scene-cut boundaries and chunks aren't aligned.
+	args = append(args, "-force_key_frames", "expr:gte(t,n_forced*4)")
+	args = append(args,
+		"-c:a", "aac", "-b:a", "128k", "-ac", "2",
+		"-f", "hls",
+		"-hls_time", fmt.Sprintf("%.0f", hlsSegDurSec),
+		"-hls_list_size", "0",
+		// Discard the playlist file ffmpeg writes — we generate our
+		// own from sess.duration in serveHLSVariantPlaylist. The chunks
+		// are what we care about, named %05d.ts to match the on-demand
+		// bake path.
+		"-hls_segment_filename", filepath.Join(cacheDir, "%05d.ts"),
+		"-hls_flags", "temp_file",
+		filepath.Join(cacheDir, "_bg.m3u8"),
+	)
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%v | %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // bakeOneHLSChunk runs ffmpeg synchronously to generate one .ts segment

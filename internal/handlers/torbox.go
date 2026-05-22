@@ -306,13 +306,18 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 	if sess, err := openHLSSession(ctx, streamURL, durationSec, audioCodec, embeddedSubs, externals); err == nil {
 		sessionID = sess.id
 		allSubs = sess.subtitles
-		// Prebake the first few HLS chunks in the background. If the
-		// frontend ends up taking the HLS path (non-AAC audio) these
-		// will be on disk by the time hls.js requests them → instant
-		// cold start. For AAC releases the prebake is wasted work but
-		// cheap (5 × ~500 KB chunks ≈ 2.5 MB on disk, single ffmpeg
-		// run pipelined with the source download).
+		// Prebake the first N source-variant chunks in background.
+		// These are `-c copy` so it's fast (< 1 s for 10 chunks).
 		go h.prebakeHLSChunks(sess, hlsPrebakeChunkCount)
+		// Once the source has fully landed locally (parallel
+		// downloader, ~30-60 s on LAN), fire a full background encode
+		// of every LOWER variant (720p / 480p / 360p). One ffmpeg per
+		// variant via the HLS muxer, emitting all chunks in a single
+		// pass — ~2.5 min for 720p of a 2 h movie. By the time ABR
+		// needs to downshift (cellular handoff, weak wifi), every
+		// chunk of every lower variant is on disk → instant switch,
+		// never a rebuffer.
+		go h.backgroundFullEncodeVariants(sess)
 	}
 	// Sub extraction stays on-demand via /stream/hls/:sessionId/prep.
 	// But we ALWAYS pre-warm the source download in the background
