@@ -48,10 +48,35 @@ const hlsSegDurSec = 4.0
 // Number of source-variant chunks to prebake in the background when an
 // HLS session opens. 10 × 4s = 40s of playback buffered to disk before
 // the user clicks Play → instant cold-start (sub-second from <video>
-// mount to first frame) AND a comfortable cushion in case the local
-// source download is slow (parallel downloader needs ~30-60s; prebake
-// chunks bake from the partial file or via remote URL).
+// mount to first frame) AND a comfortable cushion against early
+// rebuffer while the player ramps up its own download.
 const hlsPrebakeChunkCount = 10
+
+// How many prebake ffmpeg processes may hit TorBox in parallel.
+// 4 is the empirical sweet spot: TorBox's CDN handles parallel range
+// requests fine, but pushing higher hits the per-IP rate limiter and
+// the gains plateau anyway because individual chunks are CDN-bound.
+const hlsPrebakeConcurrency = 4
+
+// ffmpegHTTPInputFlags returns input-side options that make ffmpeg's
+// HTTP demuxer resilient against transient TorBox CDN hiccups
+// (TCP RST, brief 5xx, slow first byte, idle TLS connection drop).
+// MUST be inserted BEFORE the `-i URL` argument on the command line —
+// these are input options, not output options.
+//
+// Only safe flags for ffmpeg ≥ 4.4 are used; earlier attempts at
+// `-reconnect_on_network_error` / `-reconnect_on_http_error` /
+// `-reconnect_at_eof` crashed the user's build with "option not found".
+func ffmpegHTTPInputFlags() []string {
+	return []string{
+		"-multiple_requests", "1", // HTTP/1.1 keep-alive across range requests
+		"-seekable", "1",
+		"-reconnect", "1",
+		"-reconnect_streamed", "1",
+		"-reconnect_delay_max", "5",
+		"-rw_timeout", "30000000", // 30 s in microseconds — kills hung sockets
+	}
+}
 
 // SubtitleTrack describes one subtitle source we expose to the player.
 // Embedded streams live inside the video file (extracted via ffmpeg);
@@ -659,7 +684,7 @@ func (h *Handler) extractEmbeddedSubtitleWithProgress(
 	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "ffmpeg",
+	subArgs := []string{
 		"-hide_banner",
 		"-loglevel", "error",
 		// -progress writes K=V progress info to fd 2 (stderr). With
@@ -667,18 +692,9 @@ func (h *Handler) extractEmbeddedSubtitleWithProgress(
 		// only sees progress lines and actual error messages — both
 		// of which we collect.
 		"-progress", "pipe:2",
-		// HTTP demuxer tuning — input options, must come before -i.
-		// Kept to the flags supported by ffmpeg ≥ 4.4 since older
-		// ones (reconnect_on_network_error / on_http_error / at_eof)
-		// caused immediate crashes on the user's setup.
-		"-multiple_requests", "1",
-		// CLI name is `-seekable`, NOT `-http_seekable` (which is the
-		// internal libavformat name and is rejected at the CLI). User
-		// hit "Option http_seekable not found" on ffmpeg 4.4.
-		"-seekable", "1",
-		"-reconnect", "1",
-		"-reconnect_streamed", "1",
-		"-reconnect_delay_max", "5",
+	}
+	subArgs = append(subArgs, ffmpegHTTPInputFlags()...)
+	subArgs = append(subArgs,
 		// Cap the format-probe scan since /torbox/play already
 		// ffprobed the source.
 		"-analyzeduration", "5M",
@@ -689,6 +705,7 @@ func (h *Handler) extractEmbeddedSubtitleWithProgress(
 		"-f", "webvtt",
 		"pipe:1",
 	)
+	cmd := exec.CommandContext(ctx, "ffmpeg", subArgs...)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -817,14 +834,18 @@ func (h *Handler) HandleSubPrepStatus(c echo.Context) error {
 func (h *Handler) extractExternalSubtitleVTT(parent context.Context, sourceURL string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ffmpeg",
+	args := []string{
 		"-hide_banner",
 		"-loglevel", "warning",
+	}
+	args = append(args, ffmpegHTTPInputFlags()...)
+	args = append(args,
 		"-i", sourceURL,
 		"-c:s", "webvtt",
 		"-f", "webvtt",
 		"pipe:1",
 	)
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -1118,25 +1139,61 @@ func (h *Handler) serveHLSSegment(c echo.Context, sess *hlsSession, file string)
 // instantly instead of paying ffmpeg's cold-start cost on a remote
 // source. Run as a fire-and-forget goroutine from /torbox/play.
 //
-// Sequential rather than parallel because each ffmpeg-over-HTTP
-// process opens its own TCP connection to TorBox; N concurrent
-// processes seeking into the same source fight for CDN bandwidth.
-// Source variant is `-c copy` so each chunk is cheap (~1 s).
+// Concurrency: hlsPrebakeConcurrency ffmpeg processes run in
+// parallel, each issuing range requests to TorBox independently.
+// Since the source variant is `-c copy` the cost per chunk is mostly
+// HTTP latency (1-2 s), so 4 in flight cuts wall-time roughly 3-4×
+// vs sequential without saturating TorBox's per-IP limits.
+//
+// If 4 chunks have failed (likely a TorBox rate-limit or 5xx), we
+// stop spawning more — no point burning CDN budget.
 func (h *Handler) prebakeHLSChunks(sess *hlsSession, count int) {
 	if sess == nil {
 		return
 	}
+	start := time.Now()
+
+	sem := make(chan struct{}, hlsPrebakeConcurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var done, failed int
+
 	for i := 0; i < count; i++ {
 		path := h.hlsChunkCacheVariantPath(sess.id, "source", i)
 		if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+			mu.Lock()
+			done++
+			mu.Unlock()
 			continue
 		}
-		if err := h.bakeOneHLSChunk(sess, "source", i); err != nil {
-			log.Printf("hls prebake: source chunk %d failed: %v", i, err)
-			return
+		mu.Lock()
+		bail := failed >= 4
+		mu.Unlock()
+		if bail {
+			break
 		}
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(n int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := h.bakeOneHLSChunk(sess, "source", n); err != nil {
+				mu.Lock()
+				failed++
+				mu.Unlock()
+				log.Printf("hls prebake: source chunk %d failed: %v", n, err)
+				return
+			}
+			mu.Lock()
+			done++
+			mu.Unlock()
+		}(i)
 	}
-	log.Printf("hls prebake: session %s warmed %d source chunks", sess.id, count)
+	wg.Wait()
+
+	log.Printf("hls prebake: session %s warmed %d/%d source chunks in %s",
+		sess.id, done, count, time.Since(start).Round(100*time.Millisecond))
 }
 
 // bakeOneHLSChunk runs ffmpeg synchronously to generate one .ts segment
@@ -1192,9 +1249,15 @@ func (h *Handler) bakeOneHLSChunk(sess *hlsSession, variantName string, n int) e
 		"-hide_banner",
 		"-loglevel", "error",
 		"-ss", fmt.Sprintf("%.3f", startSec),
+	}
+	// HTTP demuxer resilience — applies whenever the input is a URL.
+	if strings.HasPrefix(inputPath, "http://") || strings.HasPrefix(inputPath, "https://") {
+		args = append(args, ffmpegHTTPInputFlags()...)
+	}
+	args = append(args,
 		"-i", inputPath,
 		"-t", fmt.Sprintf("%.3f", segDur),
-	}
+	)
 	// Video filter for downscale (720p) goes before the video codec.
 	if variant.Scale != "" {
 		args = append(args, "-vf", variant.Scale)
