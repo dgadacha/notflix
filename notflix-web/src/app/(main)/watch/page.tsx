@@ -1244,14 +1244,18 @@ function Player({
                         // in the last minute doesn't trigger a refetch.
                         backBufferLength: 60,
 
-                        // Initial bandwidth estimate: 5 Mbps. ABR uses
-                        // this to pick the starting level before it has
-                        // measured the connection itself. Below the
-                        // 1080p bitrate so the player starts on 720p
-                        // for users on cellular, then ramps up.
-                        abrEwmaDefaultEstimate: 5_000_000,
-                        // Auto-pick the start level via the EWMA above
-                        // instead of always starting at the highest.
+                        // Initial bandwidth estimate: 50 Mbps. Bias the
+                        // first chunk to the SOURCE variant — it's the
+                        // one we prebake (`-c copy`, instant) so the
+                        // player starts immediately. ABR will downshift
+                        // to 720p on the second/third chunk if the
+                        // measured bandwidth turns out to be lower.
+                        // Starting on 720p was waiting 5-10 s for the
+                        // first libx264 encode to finish; not worth it
+                        // when source is ready.
+                        abrEwmaDefaultEstimate: 50_000_000,
+                        // Pick the highest level (source variant) at
+                        // startup. ABR takes over from chunk 1 onwards.
                         startLevel: -1,
                         // Prefetch the next fragment while the current
                         // one is still playing → smoother handover.
