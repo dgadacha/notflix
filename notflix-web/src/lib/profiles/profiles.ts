@@ -319,6 +319,38 @@ export function useProfileHistoryUpsert() {
     )
 }
 
+/** Body shape for the bulk "mark whole series watched" endpoint. */
+export type MarkSeriesWatchedBody = {
+    tmdbId: number
+    title: string
+    posterPath: string
+    backdropUrl: string
+    seasons: Array<{ season: number; episodes: number }>
+}
+
+/** Hook bound to the active profile: marks every (season, episode)
+ *  pair of a TV series as watched in one server-side transaction.
+ *  Invalidates the history cache on completion so Continue Watching
+ *  drops the show from its rail. */
+export function useMarkSeriesWatched() {
+    const uid = useActiveProfileId()
+    const queryClient = useQueryClient()
+    return React.useCallback(
+        async (body: MarkSeriesWatchedBody) => {
+            if (!uid) return { marked: 0 }
+            const r = await fetch(`/api/v1/profiles/${encodeURIComponent(uid)}/history/mark-series`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            })
+            const j = await r.json()
+            queryClient.invalidateQueries({ queryKey: [...QK_HISTORY(uid)] })
+            return (j.data ?? j) as { marked: number }
+        },
+        [uid, queryClient],
+    )
+}
+
 /**
  * Mutate the cached history list in place — moves the matching row to
  * the front (or inserts it) so the "Reprendre la lecture" rail re-sorts

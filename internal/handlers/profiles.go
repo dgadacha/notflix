@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"log"
 	"strconv"
 
 	"notflix/internal/database/models"
@@ -123,6 +124,72 @@ func (h *Handler) HandleClearHistory(c echo.Context) error {
 		return RespondErr(c, err)
 	}
 	return RespondOK(c, true)
+}
+
+// HandleMarkSeriesWatched — POST /api/v1/profiles/:uid/history/mark-series
+//
+// Mass-upserts a watch history row per (season, episode) pair so the
+// whole series shows as finished. Body:
+//
+//	{
+//	  tmdbId, title, posterPath, backdropUrl,
+//	  seasons: [{season: 1, episodes: 10}, {season: 2, episodes: 8}, ...]
+//	}
+//
+// Each row is written with currentTime == duration == 3600 (sentinel
+// "finished" — the Continue Watching filter trims rows where the
+// remaining is under 60 s). Returns {marked: count}.
+//
+// We don't fetch real episode durations from TMDB — the cost of N TMDB
+// /tv/:id/season/:N calls isn't worth it just to bake an accurate
+// duration into rows that exist solely to be filtered out of the
+// "in progress" rail.
+func (h *Handler) HandleMarkSeriesWatched(c echo.Context) error {
+	uid := c.Param("uid")
+	var body struct {
+		TMDBID      int    `json:"tmdbId"`
+		Title       string `json:"title"`
+		PosterPath  string `json:"posterPath"`
+		BackdropURL string `json:"backdropUrl"`
+		Seasons     []struct {
+			Season   int `json:"season"`
+			Episodes int `json:"episodes"`
+		} `json:"seasons"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return RespondErr(c, err)
+	}
+	if body.TMDBID == 0 || len(body.Seasons) == 0 {
+		return c.JSON(400, map[string]any{"error": "tmdbId + seasons required"})
+	}
+
+	marked := 0
+	for _, s := range body.Seasons {
+		if s.Episodes <= 0 || s.Season <= 0 {
+			continue
+		}
+		for ep := 1; ep <= s.Episodes; ep++ {
+			item := &models.ProfileWatchHistory{
+				ProfileUID:  uid,
+				TMDBID:      body.TMDBID,
+				MediaType:   "tv",
+				Season:      s.Season,
+				Episode:     ep,
+				CurrentTime: 3600,
+				Duration:    3600,
+				Title:       body.Title,
+				PosterPath:  body.PosterPath,
+				BackdropURL: body.BackdropURL,
+			}
+			if _, err := h.App.Database.UpsertWatchHistory(item); err != nil {
+				// Keep going — one bad row shouldn't fail the whole batch.
+				log.Printf("mark series: upsert S%dE%d failed: %v", s.Season, ep, err)
+				continue
+			}
+			marked++
+		}
+	}
+	return RespondOK(c, map[string]any{"marked": marked})
 }
 
 func (h *Handler) HandleDeleteHistoryByMedia(c echo.Context) error {

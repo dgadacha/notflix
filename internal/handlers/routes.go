@@ -107,6 +107,7 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	p.GET("/:uid/history", h.HandleListHistory)
 	p.PUT("/:uid/history", h.HandleUpsertHistory)
 	p.POST("/:uid/history", h.HandleUpsertHistory) // sendBeacon-compatible alias
+	p.POST("/:uid/history/mark-series", h.HandleMarkSeriesWatched)
 	p.DELETE("/:uid/history", h.HandleClearHistory)
 	p.DELETE("/:uid/history/:mediaType/:tmdbId", h.HandleDeleteHistoryByMedia)
 

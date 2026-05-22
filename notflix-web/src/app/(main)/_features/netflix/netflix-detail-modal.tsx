@@ -23,6 +23,7 @@ import {
     listEntryKey,
     useActiveProfileId,
     useActiveProfileListStatusMap,
+    useMarkSeriesWatched,
     useProfileListActions,
 } from "@/lib/profiles/profiles"
 import {
@@ -252,6 +253,20 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
                                     { value: "background", label: t("modal.sub_prep_background", "Lecture immédiate") },
                                 ]}
                                 onChange={(v) => setSubPrepMode(v as typeof subPrepMode)}
+                            />
+                        )}
+
+                        {/* TV-only: bulk mark every episode of every
+                            season as watched. Hidden in single-user
+                            mode since the action targets the active
+                            profile's history. */}
+                        {type === "tv" && seasons.length > 0 && (
+                            <MarkSeriesWatchedButton
+                                tmdbId={data.id}
+                                title={title}
+                                posterPath={data.poster_path ?? ""}
+                                backdropUrl={data.backdrop_path ?? ""}
+                                seasons={seasons}
                             />
                         )}
                     </div>
@@ -619,6 +634,89 @@ function PrefSelect<T extends string>({
                 ))}
             </select>
         </label>
+    )
+}
+
+/**
+ * Mark-whole-series-watched button. TV-only. Confirms before firing
+ * the bulk upsert (it's destructive in the sense that it stamps every
+ * episode as finished, which the user might not be able to undo
+ * cleanly later without per-episode deletion).
+ */
+function MarkSeriesWatchedButton({
+    tmdbId,
+    title,
+    posterPath,
+    backdropUrl,
+    seasons,
+}: {
+    tmdbId: number
+    title: string
+    posterPath: string
+    backdropUrl: string
+    seasons: { season_number: number; episode_count: number }[]
+}) {
+    const { t } = useTranslation()
+    const markSeries = useMarkSeriesWatched()
+    const profileUid = useActiveProfileId()
+    const [busy, setBusy] = React.useState(false)
+    const [done, setDone] = React.useState<number | null>(null)
+
+    if (!profileUid) return null
+
+    const totalEpisodes = seasons.reduce((acc, s) => acc + (s.episode_count || 0), 0)
+    if (totalEpisodes === 0) return null
+
+    const onClick = async () => {
+        const confirmed = window.confirm(
+            t(
+                "modal.mark_watched_confirm",
+                "Marquer les {{n}} épisodes de « {{title}} » comme vus ?",
+                { n: totalEpisodes, title },
+            ),
+        )
+        if (!confirmed) return
+        setBusy(true)
+        setDone(null)
+        try {
+            const res = await markSeries({
+                tmdbId,
+                title,
+                posterPath,
+                backdropUrl,
+                seasons: seasons
+                    .filter(s => s.season_number > 0 && s.episode_count > 0)
+                    .map(s => ({ season: s.season_number, episodes: s.episode_count })),
+            })
+            setDone(res?.marked ?? 0)
+        } finally {
+            setBusy(false)
+        }
+    }
+
+    return (
+        <div className="flex flex-col gap-1">
+            <button
+                type="button"
+                onClick={onClick}
+                disabled={busy}
+                className={cn(
+                    "inline-flex items-center gap-1.5 px-3 py-2 rounded-md",
+                    "bg-white/10 hover:bg-white/15 text-white text-sm font-semibold",
+                    "transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
+                )}
+            >
+                <BiCheck className="size-5" />
+                {busy
+                    ? t("modal.mark_watched_busy", "Marquage…")
+                    : t("modal.mark_watched", "Marquer toute la série vue")}
+            </button>
+            {done !== null && (
+                <span className="text-[10px] text-emerald-300/80">
+                    {t("modal.mark_watched_done", "✓ {{n}} épisodes marqués", { n: done })}
+                </span>
+            )}
+        </div>
     )
 }
 
