@@ -10,6 +10,7 @@ import { DropdownMenu, DropdownMenuItem, DropdownMenuSeparator } from "@/compone
 import { useCurrentUser, useLogout } from "@/lib/auth"
 import { usePathname, useRouter } from "@/lib/navigation"
 import { useActiveProfile, useProfileActions } from "@/lib/profiles/profiles"
+import { useQuery } from "@tanstack/react-query"
 import React from "react"
 import { useTranslation } from "react-i18next"
 import { BiLogOut, BiShield, BiUser } from "react-icons/bi"
@@ -88,9 +89,112 @@ export function NetflixTopBar() {
                     <FiSearch className="size-5" />
                 </SeaLink>
 
+                <TorBoxBadge />
+
                 <ProfileDropdown />
             </div>
         </header>
+    )
+}
+
+// ---------------------------------------------------------------------------
+// TorBox status badge
+// ---------------------------------------------------------------------------
+
+type TorBoxStatus = {
+    configured: boolean
+    email?: string
+    plan?: number
+    planName?: string
+    isSubscribed?: boolean
+    premiumExpiresAt?: string
+    totalDownloaded?: number
+    cooldownUntil?: string
+}
+
+function useTorBoxStatus() {
+    return useQuery<TorBoxStatus>({
+        queryKey: ["torbox", "status"],
+        queryFn: async () => {
+            const r = await fetch("/api/v1/torbox/status")
+            if (!r.ok) throw new Error(`torbox ${r.status}`)
+            const j = await r.json()
+            return (j.data ?? j) as TorBoxStatus
+        },
+        refetchInterval: 5 * 60_000, // 5 min — plan / expiry barely changes
+        staleTime: 60_000,
+    })
+}
+
+function formatBytes(n: number): string {
+    if (!n || n < 0) return ""
+    const units = ["B", "KB", "MB", "GB", "TB"]
+    let v = n, u = 0
+    while (v >= 1024 && u < units.length - 1) {
+        v /= 1024
+        u++
+    }
+    return `${v.toFixed(v < 10 ? 1 : 0)} ${units[u]}`
+}
+
+function daysUntil(iso?: string): number | null {
+    if (!iso) return null
+    const t = Date.parse(iso)
+    if (isNaN(t)) return null
+    return Math.floor((t - Date.now()) / 86_400_000)
+}
+
+function TorBoxBadge() {
+    const router = useRouter()
+    const { t } = useTranslation()
+    const { data, isLoading } = useTorBoxStatus()
+
+    if (isLoading || !data || !data.configured) return null
+
+    const cooldownActive = data.cooldownUntil
+        ? Date.parse(data.cooldownUntil) > Date.now()
+        : false
+    const days = daysUntil(data.premiumExpiresAt)
+    const expiringSoon = data.isSubscribed && days !== null && days >= 0 && days < 7
+    const expired = data.isSubscribed === false || (days !== null && days < 0)
+
+    const status: "ok" | "warn" | "down" = cooldownActive || expired
+        ? "down"
+        : expiringSoon
+            ? "warn"
+            : "ok"
+
+    const dotColor = status === "down" ? "bg-red-400" : status === "warn" ? "bg-amber-400" : "bg-emerald-400"
+
+    const tooltipParts: string[] = []
+    if (data.planName) tooltipParts.push(data.planName)
+    if (days !== null) {
+        if (days < 0) tooltipParts.push(t("nav.torbox_expired", "expiré"))
+        else tooltipParts.push(t("nav.torbox_days_left", "{{n}} j restants", { n: days }))
+    }
+    if (cooldownActive) tooltipParts.push(t("nav.torbox_cooldown", "rate-limit actif"))
+    if (data.totalDownloaded && data.totalDownloaded > 0) {
+        tooltipParts.push(t("nav.torbox_total_downloaded", "{{x}} téléchargés", { x: formatBytes(data.totalDownloaded) }))
+    }
+
+    return (
+        <button
+            type="button"
+            onClick={() => router.push("/settings")}
+            title={tooltipParts.join(" · ")}
+            className={cn(
+                "hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full",
+                "bg-white/5 hover:bg-white/10 border border-white/10 transition-colors shrink-0",
+                "text-[11px] font-semibold text-white/90",
+            )}
+            aria-label="TorBox status"
+        >
+            <span className={cn("size-1.5 rounded-full", dotColor)} />
+            <span className="hidden lg:inline">TorBox</span>
+            {data.planName && (
+                <span className="hidden lg:inline text-white/60">· {data.planName}</span>
+            )}
+        </button>
     )
 }
 

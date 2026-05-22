@@ -122,11 +122,18 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, co
 // -----------------------------------------------------------------------------
 
 type User struct {
-	ID                int    `json:"id"`
-	Email             string `json:"email"`
-	Plan              int    `json:"plan"`
-	IsSubscribed      bool   `json:"is_subscribed"`
-	PremiumExpiresAt  string `json:"premium_expires_at"`
+	ID               int    `json:"id"`
+	Email            string `json:"email"`
+	Plan             int    `json:"plan"` // 0 free, 1 standard, 2 pro, 3 essential
+	IsSubscribed     bool   `json:"is_subscribed"`
+	PremiumExpiresAt string `json:"premium_expires_at"`
+
+	// Quota / usage. These fields are best-effort: TorBox occasionally
+	// renames or omits them in their response shape, so omitempty
+	// keeps unset values out of the JSON we forward to the UI.
+	TotalDownloaded int64  `json:"total_downloaded,omitempty"` // bytes lifetime
+	CooldownUntil   string `json:"cooldown_until,omitempty"`   // ISO timestamp when current rate-limit ends
+	Server          int    `json:"server,omitempty"`           // server id user is bound to
 }
 
 func (c *Client) Ping(ctx context.Context) (*User, error) {

@@ -121,9 +121,29 @@ func (h *Handler) HandleTorBoxStatus(c echo.Context) error {
 		"configured":       true,
 		"email":            u.Email,
 		"plan":             u.Plan,
+		"planName":         torboxPlanName(u.Plan),
 		"isSubscribed":     u.IsSubscribed,
 		"premiumExpiresAt": u.PremiumExpiresAt,
+		"totalDownloaded":  u.TotalDownloaded,
+		"cooldownUntil":    u.CooldownUntil,
 	})
+}
+
+// torboxPlanName maps the integer plan id TorBox returns to its label.
+// Source: torbox.app/plans — values stable as of 2026.
+func torboxPlanName(plan int) string {
+	switch plan {
+	case 0:
+		return "Free"
+	case 1:
+		return "Essential"
+	case 2:
+		return "Pro"
+	case 3:
+		return "Standard"
+	default:
+		return ""
+	}
 }
 
 func (h *Handler) HandleTorBoxCheckCached(c echo.Context) error {
