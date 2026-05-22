@@ -48,6 +48,8 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	admin := v1.Group("/admin", h.RequireAdmin)
 	admin.GET("/config", h.HandleGetServerConfig)
 	admin.PUT("/config", h.HandleUpdateServerConfig)
+	admin.GET("/backup", h.HandleBackupExport)
+	admin.POST("/backup/restore", h.HandleBackupRestore)
 
 	// YouTube embed availability check — gracefully degrade the
 	// trailer modal when a video is geoblocked / removed / age-gated.

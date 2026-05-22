@@ -49,7 +49,7 @@ import {
     BiShield,
     BiUser,
 } from "react-icons/bi"
-import { LuActivity, LuArrowRight, LuGlobe, LuKey, LuPlay, LuServer, LuUsers } from "react-icons/lu"
+import { LuActivity, LuArrowRight, LuDownload, LuGlobe, LuKey, LuPlay, LuServer, LuUpload, LuUsers } from "react-icons/lu"
 
 export function NetflixSettings() {
     const { t } = useTranslation()
@@ -143,6 +143,12 @@ export function NetflixSettings() {
             {me?.isAdmin && (
                 <Section icon={<LuActivity className="size-5" />} title={t("settings.prowlarr_health", "État Prowlarr")}>
                     <ProwlarrHealthPanel />
+                </Section>
+            )}
+
+            {me?.isAdmin && (
+                <Section icon={<LuDownload className="size-5" />} title={t("settings.backup", "Sauvegarde")}>
+                    <BackupPanel />
                 </Section>
             )}
 
@@ -923,6 +929,163 @@ function NavRow({
                 {cta}
                 <LuArrowRight className="size-3.5" />
             </button>
+        </div>
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Backup / Restore
+// ---------------------------------------------------------------------------
+
+function BackupPanel() {
+    const { t } = useTranslation()
+    const fileInputRef = React.useRef<HTMLInputElement>(null)
+    const [busy, setBusy] = React.useState<"" | "export" | "import">("")
+    const [feedback, setFeedback] = React.useState<{ kind: "ok" | "err"; msg: string } | null>(null)
+    const [includeConfig, setIncludeConfig] = React.useState(true)
+
+    const doExport = async () => {
+        setBusy("export")
+        setFeedback(null)
+        try {
+            const r = await fetch("/api/v1/admin/backup")
+            if (!r.ok) throw new Error(`export ${r.status}`)
+            // Build a download from the response body.
+            const blob = await r.blob()
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement("a")
+            a.href = url
+            const cd = r.headers.get("content-disposition") || ""
+            const m = /filename="([^"]+)"/.exec(cd)
+            a.download = m?.[1] ?? `notflix-backup-${new Date().toISOString().slice(0, 10)}.json`
+            document.body.appendChild(a)
+            a.click()
+            a.remove()
+            URL.revokeObjectURL(url)
+            setFeedback({ kind: "ok", msg: t("settings.backup_export_ok", "Sauvegarde téléchargée.") })
+        } catch (e) {
+            setFeedback({ kind: "err", msg: (e as Error).message })
+        } finally {
+            setBusy("")
+        }
+    }
+
+    const doImport = async (file: File) => {
+        setBusy("import")
+        setFeedback(null)
+        try {
+            const body = await file.text()
+            const url = "/api/v1/admin/backup/restore" + (includeConfig ? "?config=1" : "")
+            const r = await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body,
+            })
+            const j = await r.json()
+            if (!r.ok) throw new Error(j.error ?? `restore ${r.status}`)
+            const d = j.data ?? j
+            setFeedback({
+                kind: "ok",
+                msg: t(
+                    "settings.backup_import_ok",
+                    "Restauration réussie · {{p}} profils, {{h}} entrées d'historique, {{l}} entrées de listes{{c}}.",
+                    {
+                        p: d.profiles ?? 0,
+                        h: d.history ?? 0,
+                        l: d.listItems ?? 0,
+                        c: d.configKeys ? t("settings.backup_import_config", ", clés serveur restaurées") : "",
+                    },
+                ),
+            })
+        } catch (e) {
+            setFeedback({ kind: "err", msg: (e as Error).message })
+        } finally {
+            setBusy("")
+        }
+    }
+
+    const onPickFile = () => fileInputRef.current?.click()
+
+    return (
+        <div className="space-y-3">
+            <p className="text-[10px] text-[--muted]/70 leading-relaxed">
+                {t(
+                    "settings.backup_hint",
+                    "Exporte un fichier JSON contenant les profils, l'historique, les listes et les clés serveur. Garde-le quelque part de sûr — c'est ta sauvegarde si la base SQLite est perdue.",
+                )}
+            </p>
+
+            <div className="flex flex-wrap gap-2">
+                <button
+                    type="button"
+                    onClick={doExport}
+                    disabled={busy !== ""}
+                    className={cn(
+                        "inline-flex items-center gap-2 px-3 py-2 rounded-md text-sm font-semibold",
+                        "bg-white/10 hover:bg-white/15 text-white transition-colors",
+                        "disabled:opacity-50 disabled:cursor-not-allowed",
+                    )}
+                >
+                    <LuDownload className="size-4" />
+                    {busy === "export"
+                        ? t("settings.backup_exporting", "Export en cours…")
+                        : t("settings.backup_export", "Exporter la sauvegarde")}
+                </button>
+
+                <button
+                    type="button"
+                    onClick={onPickFile}
+                    disabled={busy !== ""}
+                    className={cn(
+                        "inline-flex items-center gap-2 px-3 py-2 rounded-md text-sm font-semibold",
+                        "bg-brand-500/20 hover:bg-brand-500/30 text-brand-100 transition-colors",
+                        "disabled:opacity-50 disabled:cursor-not-allowed",
+                    )}
+                >
+                    <LuUpload className="size-4" />
+                    {busy === "import"
+                        ? t("settings.backup_importing", "Restauration en cours…")
+                        : t("settings.backup_import", "Restaurer une sauvegarde")}
+                </button>
+                <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="application/json,.json"
+                    className="hidden"
+                    onChange={(e) => {
+                        const f = e.target.files?.[0]
+                        if (f) void doImport(f)
+                        // Reset so the same file can be re-uploaded.
+                        e.target.value = ""
+                    }}
+                />
+            </div>
+
+            <label className="flex items-center gap-2 text-xs text-[--muted] cursor-pointer select-none pt-1">
+                <input
+                    type="checkbox"
+                    checked={includeConfig}
+                    onChange={(e) => setIncludeConfig(e.target.checked)}
+                    className="accent-brand-500"
+                />
+                {t(
+                    "settings.backup_restore_config",
+                    "Restaurer aussi les clés serveur (TMDB / TorBox / Prowlarr / Anthropic) depuis la sauvegarde",
+                )}
+            </label>
+
+            {feedback && (
+                <p
+                    className={cn(
+                        "text-xs rounded-md px-3 py-2 border",
+                        feedback.kind === "ok"
+                            ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-200"
+                            : "bg-red-500/10 border-red-500/30 text-red-200",
+                    )}
+                >
+                    {feedback.msg}
+                </p>
+            )}
         </div>
     )
 }
