@@ -1664,8 +1664,24 @@ function codecStringFor(videoCodec: string, audioCodec: string): string {
         case "vorbis":
             parts.push("vorbis")
             break
-        // AC3/EAC3/DTS/TrueHD/FLAC → not browser-decodable on most
-        // platforms. Skip to keep canPlayType honest.
+        case "ac3":
+            // Safari + Edge on macOS/Windows decode AC3 natively;
+            // Chrome/Firefox return "" so canPlayType filters them
+            // out and we fall back to HLS automatically. Adding the
+            // codec string just OPENS the door for the browsers that
+            // can — it never silently breaks the ones that can't.
+            parts.push("ac-3")
+            break
+        case "eac3":
+            parts.push("ec-3")
+            break
+        case "flac":
+            // Native in Chrome, Firefox, Safari (≥ 11), Edge.
+            parts.push("flac")
+            break
+        // DTS / TrueHD / DTS-HD → not natively supported by any
+        // browser. Leave the codec string off so canPlayType reports ""
+        // and the HLS transmux path handles the audio re-encode.
     }
     return parts.join(",")
 }
