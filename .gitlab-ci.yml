@@ -37,6 +37,7 @@ build:image:
     - docker pull "$IMAGE:latest" 2>/dev/null || true     # warm the layer cache
     - docker build
         --cache-from "$IMAGE:latest"
+        --build-arg CACHE_DATE=$(date +%s)
         --tag "$IMAGE:$CI_COMMIT_SHORT_SHA"
         --tag "$IMAGE:$CI_COMMIT_REF_SLUG"
         $( [ "$CI_COMMIT_TAG" ] && echo "--tag $IMAGE:$CI_COMMIT_TAG" )

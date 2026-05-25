@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"strings"
 
 	"notflix/internal/core"
 	"notflix/internal/handlers"
@@ -60,11 +61,21 @@ func main() {
 	h := handlers.New(app)
 	handlers.RegisterRoutes(e, h)
 
-	// Static frontend — served from the embedded FS. Anything that isn't
-	// /api/* gets the SPA index.html (client-side router takes over).
+	// Static frontend — served from the embedded FS.
+	// Strategy: try to serve the exact file first (covers /static/*, favicons,
+	// SVG, manifest.json, apple-touch-icon.png …). If not found, fall back
+	// to index.html so the client-side router handles deep links.
 	webFS, _ := fs.Sub(embeddedWeb, "web")
-	e.GET("/static/*", echo.WrapHandler(http.FileServer(http.FS(webFS))))
+	fileServer := http.FileServer(http.FS(webFS))
 	e.GET("/*", func(c echo.Context) error {
+		name := strings.TrimLeft(c.Request().URL.Path, "/")
+		if name == "" {
+			name = "index.html"
+		}
+		if _, err := webFS.Open(name); err == nil {
+			fileServer.ServeHTTP(c.Response(), c.Request())
+			return nil
+		}
 		idx, err := fs.ReadFile(webFS, "index.html")
 		if err != nil {
 			return c.String(http.StatusInternalServerError, "web build missing — run `make build-web` first")

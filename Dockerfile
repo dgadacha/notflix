@@ -21,9 +21,9 @@ COPY notflix-web/package.json notflix-web/package-lock.json* ./
 RUN npm install --no-audit --no-fund
 
 COPY notflix-web/ ./
-# Bypass tsgo — many pre-existing strict-null warnings that don't block runtime;
-# bundle via rsbuild directly. Output lands in /app/notflix-web/dist (rsbuild
-# default).
+# ARG bust de cache : passer --build-arg CACHE_DATE=$(date +%s) pour forcer
+# un rebuild complet du frontend même si les layers Docker sont en cache.
+ARG CACHE_DATE=2026-05-25
 RUN npx --yes rsbuild build
 
 ############################
