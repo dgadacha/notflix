@@ -120,3 +120,4 @@ skills*.json
 .github/prompts/
 .github/skills/
 *.agent.md
+gen_icons.py
