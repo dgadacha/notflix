@@ -45,15 +45,16 @@ spec:
           port: 43212
 
     # Cloudflare Tunnel → Notflix (accès internet via notflix.nc-maiz.org)
-    # Le tunnel se connecte DIRECTEMENT au Service notflix:80, sans passer
-    # par Traefik — il faut donc une règle séparée sur le port 80.
+    # Le tunnel connecte Service notflix:80 → kube-proxy DNAT → pod:43212.
+    # La NetworkPolicy s'évalue APRÈS le DNAT (niveau pod), donc le port
+    # ici doit être 43212 (port du conteneur), pas 80 (port du Service).
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: cloudflared
       ports:
         - protocol: TCP
-          port: 80
+          port: 43212
 
 ---
 # ── EGRESS ───────────────────────────────────────────────────────────────────
