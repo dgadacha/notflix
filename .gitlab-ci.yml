@@ -75,6 +75,7 @@ deploy:k8s:
     - kubectl apply -f k8s/pvc.yaml
     - kubectl apply -f k8s/service.yaml
     - kubectl apply -f k8s/ingress.yaml
+    - kubectl apply -f k8s/networkpolicy.yaml
     - kubectl apply -f k8s/deployment.yaml
     # Force the deployment to use this exact build (the Deployment manifest
     # references :latest — we bump to the SHA-tagged image so the rollout

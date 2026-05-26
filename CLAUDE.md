@@ -19,17 +19,17 @@ The Go binary serves both the React SPA (embedded via `//go:embed`) and the API.
 
 ## Repo / git
 
-- **Origin remote** = <https://github.com/dgadacha/notflix>.
+- **Origin remote** = <https://gitlab.com/kidnar/notflix> (GitLab, groupe `kidnar`).
 - **Branch** = `main` only. No force-push.
-- Commits use `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`.
-- **Sibling project**: Kuro is at `~/Documents/seanime` with its own `CLAUDE.md` (anime fork, port 43211, GitLab CI auto-deploy). Don't conflate the two — they share architectural DNA but their backends, deploy pipelines and remotes are fully separate.
+- Commits use `Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>`.
+- **Sibling project**: Kuro est dans le namespace `kuro` avec son propre pipeline GitLab CI (port 43211). Ne pas confondre les deux — même ADN architectural, pipelines et remotes entièrement séparés.
 - HEREDOC pattern for commit messages:
   ```sh
   git commit -m "$(cat <<'EOF'
   Subject line
 
   Body.
-  Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+  Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
   EOF
   )"
   ```
@@ -47,15 +47,55 @@ make clean    # nuke artifacts (datadir untouched)
 
 The Makefile `backend` target auto-sources `.env` (gitignored) so the Go process gets `NOTFLIX_TMDB_API_KEY` / `NOTFLIX_TORBOX_API_KEY` / `NOTFLIX_PROWLARR_URL` / `NOTFLIX_PROWLARR_API_KEY` without polluting the user's shell.
 
-### Container / k8s deploy — single-service (existing path)
+### Container / k8s deploy — GitLab CI (voie principale)
+
+Chaque `git push` sur `main` déclenche automatiquement :
+1. **`build:image`** — build Docker multi-stage sur le runner `salon` (self-hosted),
+   push vers `registry.gitlab.com/kidnar/notflix:<SHA>` + `:latest`.
+2. **`deploy:k8s`** — `kubectl apply` via l'agent GitLab installé dans le namespace
+   `notflix`, puis `set image` avec le SHA exact + rollout watch (180 s).
 
 ```sh
-make docker             # build image
-make docker-push        # push to registry.gitlab.com/kidnar/notflix:latest
-make deploy             # build + push + apply k8s/*.yaml + rollout restart
+git push                # déclenche build + deploy automatiquement
 ```
 
-Manifests under `k8s/`. Namespace `notflix`. Single PVC `notflix-data` (30 Gi). User runs Prowlarr + FlareSolverr separately.
+Manifests sous `k8s/`. Namespace `notflix`. PVC `notflix-data` (30 Gi).
+Prowlarr externe dans le namespace `streaming-apps`.
+
+Infrastructure one-shot (à ne refaire que si le cluster est réinitialisé) :
+```sh
+# Namespace + RBAC agent + PVC
+kubectl apply -f k8s/namespace.yaml
+kubectl apply -f .gitlab/agents/notflix/notflix-agent-rbac.yaml
+kubectl apply -f k8s/pvc.yaml
+
+# Agent GitLab (token dans /appli/.tokens/notflix-agent)
+helm install notflix-agent gitlab/gitlab-agent -n notflix \
+  --set config.token=$(cat /appli/.tokens/notflix-agent) \
+  --set config.kasAddress=wss://kas.gitlab.com \
+  --set rbac.create=false --set serviceAccount.create=false \
+  --set serviceAccount.name=gitlab-agent
+
+# Secrets API (à renseigner une seule fois, survivent aux déploiements)
+kubectl edit secret notflix-secrets -n notflix
+# → NOTFLIX_TMDB_API_KEY, NOTFLIX_TORBOX_API_KEY, NOTFLIX_PROWLARR_API_KEY
+#   NOTFLIX_ANTHROPIC_API_KEY, NOTFLIX_ADMIN_USERNAME, NOTFLIX_ADMIN_PASSWORD
+
+# Secret pull registry (copié depuis le namespace kuro)
+kubectl get secret gitlab-registry -n kuro -o json \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); \
+    d['metadata']={'name':'gitlab-registry','namespace':'notflix'}; \
+    d.pop('status',None); print(json.dumps(d))" \
+  | kubectl apply -f -
+```
+
+### Container / k8s deploy — manuel (make, dev/test seulement)
+
+```sh
+make docker             # build image localement
+make docker-push        # push vers registry.gitlab.com/kidnar/notflix:latest
+make deploy             # build + push + apply k8s/*.yaml + rollout restart
+```
 
 ### Container / k8s deploy — all-in-one bundle (★ shipped)
 
@@ -169,6 +209,7 @@ Manifests under `k8s/bundle/`. Dedicated namespace `notflix-bundle` so it coexis
 │   └── README.md                          # bundle docs + caveats
 ├── k8s/                                   # single-service manifests (namespace `notflix`)
 │   ├── namespace.yaml · pvc.yaml · deployment.yaml · service.yaml · ingress.yaml
+│   └── networkpolicy.yaml                 # ★ zero-trust : ingress Traefik-only + egress DNS/Prowlarr/Internet
 ├── k8s/bundle/                            # ★ bundle manifests (namespace `notflix-bundle`)
 │   ├── namespace.yaml · pvc.yaml · deployment.yaml · service.yaml · ingress.yaml
 │   └── migrate.sh                         # k8s PVC OR Docker volume → bundle PVC, via `kubectl exec | tar`
@@ -221,6 +262,44 @@ Manifests under `k8s/bundle/`. Dedicated namespace `notflix-bundle` so it coexis
 
 - **i18n cleanup** — residual `anime`/`épisode` strings in `en.json` / `fr.json` plus the orphan `modal.trailer*` keys left after the trailer removal.
 - **Anthropic invoice safety** — current Claude calls are bounded but unbounded *per content cache miss*. Per-install hard cap would prevent runaway costs if the cache TTL changed.
+
+## Déploiement k8s — NetworkPolicy
+
+Modèle **zero-trust** : toute connexion est bloquée par défaut dès qu'une NetworkPolicy existe.
+`k8s/networkpolicy.yaml` contient deux policies pour le pod `app=notflix` :
+
+| Policy | Direction | Source / Dest | Port |
+|---|---|---|---|
+| `notflix-ingress-allow` | Ingress | Traefik (`kube-system`, `app.kubernetes.io/name=traefik`) | TCP 43212 |
+| `notflix-egress-allow` | Egress | kube-dns | UDP+TCP 53 |
+| | Egress | Prowlarr (`streaming-apps`, `app=prowlarr`) | TCP 80 |
+| | Egress | Internet (excl. RFC-1918 + 10/8) | TCP 80, 443 |
+
+Les pods de l'agent GitLab (`app.kubernetes.io/name=gitlab-agent`) ne sont **pas** sélectionnés par ces policies — Helm gère leur isolation.
+
+> Si tu ajoutes un Ingress HTTPS (Cloudflare tunnel inclus), pas de changement côté NetworkPolicy : le trafic entre Traefik et le pod reste TCP 43212.
+> Si tu déploies un FlareSolverr séparé dans un autre namespace, ajoute une règle egress explicite.
+
+## CI/CD GitLab — pipeline
+
+Fichier : `.gitlab-ci.yml`
+
+```
+push main
+  └─ build:image  (runner salon, docker:27.3-dind)
+  │    docker build --build-arg CACHE_DATE=$(date +%s)   ← bust cache rsbuild
+  │    push :SHA + :main + :latest
+  └─ deploy:k8s  (runner salon, bitnami/kubectl)
+       kubectl apply pvc / service / ingress / deployment / networkpolicy
+       kubectl set image → :SHA
+       rollout status --timeout=180s
+```
+
+**Cache Docker** : `ARG CACHE_DATE` dans le Dockerfile invalide le layer rsbuild à chaque build pour garantir que les assets publics (SVG, PNG, manifest) sont toujours frais.
+
+**Accès cluster** : agent `kidnar/notflix:notflix` (Helm `notflix-agent`, namespace `notflix`), RBAC namespace-scoped (`k8s/notflix-agent-rbac.yaml`).
+
+**Secrets API** : gérés manuellement via `kubectl edit secret notflix-secrets -n notflix`. Le CI ne les écrase jamais (les valeurs dans `deployment.yaml` sont des placeholders vides).
 
 ## Streaming pipeline cheat-sheet
 
