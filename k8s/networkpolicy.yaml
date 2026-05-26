@@ -5,7 +5,8 @@
 # besoin.
 #
 # Trafic autorisé en ENTRÉE :
-#   • Traefik (kube-system) → notflix:43212  (HTTP des navigateurs)
+#   • Traefik (kube-system) → notflix:43212  (HTTP des navigateurs via Ingress)
+#   • cloudflared (cloudflared) → notflix:80 (tunnel Cloudflare direct, sans Traefik)
 #
 # Trafic autorisé en SORTIE :
 #   • kube-dns (kube-system):53 UDP+TCP       (résolution DNS)
@@ -31,7 +32,7 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # Traefik → Notflix (port applicatif)
+    # Traefik → Notflix (port applicatif, accès LAN via notflix.maiz.lan)
     - from:
         - namespaceSelector:
             matchLabels:
@@ -42,6 +43,17 @@ spec:
       ports:
         - protocol: TCP
           port: 43212
+
+    # Cloudflare Tunnel → Notflix (accès internet via notflix.nc-maiz.org)
+    # Le tunnel se connecte DIRECTEMENT au Service notflix:80, sans passer
+    # par Traefik — il faut donc une règle séparée sur le port 80.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflared
+      ports:
+        - protocol: TCP
+          port: 80
 
 ---
 # ── EGRESS ───────────────────────────────────────────────────────────────────
