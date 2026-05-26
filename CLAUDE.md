@@ -268,16 +268,19 @@ Manifests under `k8s/bundle/`. Dedicated namespace `notflix-bundle` so it coexis
 Modèle **zero-trust** : toute connexion est bloquée par défaut dès qu'une NetworkPolicy existe.
 `k8s/networkpolicy.yaml` contient deux policies pour le pod `app=notflix` :
 
-| Policy | Direction | Source / Dest | Port |
+| Policy | Direction | Source / Dest | Port pod |
 |---|---|---|---|
-| `notflix-ingress-allow` | Ingress | Traefik (`kube-system`, `app.kubernetes.io/name=traefik`) | TCP 43212 |
+| `notflix-ingress-allow` | Ingress | Traefik (`kube-system`, `app.kubernetes.io/name=traefik`) | TCP **43212** |
+| `notflix-ingress-allow` | Ingress | Cloudflare Tunnel (`cloudflared`, tous pods) | TCP **43212** |
 | `notflix-egress-allow` | Egress | kube-dns | UDP+TCP 53 |
-| | Egress | Prowlarr (`streaming-apps`, `app=prowlarr`) | TCP 80 |
+| | Egress | Prowlarr (`streaming-apps`, `app=prowlarr`) | TCP **9696** |
 | | Egress | Internet (excl. RFC-1918 + 10/8) | TCP 80, 443 |
 
 Les pods de l'agent GitLab (`app.kubernetes.io/name=gitlab-agent`) ne sont **pas** sélectionnés par ces policies — Helm gère leur isolation.
 
-> Si tu ajoutes un Ingress HTTPS (Cloudflare tunnel inclus), pas de changement côté NetworkPolicy : le trafic entre Traefik et le pod reste TCP 43212.
+> ⚠️ **Piège DNAT** : les ports dans une NetworkPolicy s'appliquent au niveau du **pod** (après le DNAT de kube-proxy), PAS au niveau du Service.
+> Exemple : Service `prowlarr:80 → pod:9696` → la règle egress doit spécifier **9696**, pas 80.
+> Même logique pour l'ingress : Service `notflix:80 → pod:43212` → toutes les règles ingress utilisent **43212**.
 > Si tu déploies un FlareSolverr séparé dans un autre namespace, ajoute une règle egress explicite.
 
 ## CI/CD GitLab — pipeline
@@ -431,7 +434,7 @@ bash k8s/bundle/migrate.sh --skip-prowlarr            # Notflix only
 
 ## Who is the user
 
-Dylan (`encheres.nc@gmail.com`). French. JS/React background — explain Go errors plainly and propose pragmatic fixes. Likes Netflix UX, hates clutter, prefers simplicity over configurability. Self-hosts on a homelab cluster (`nc-maiz.org` via Cloudflare Tunnel), but Notflix isn't deployed there yet — currently local-only validation.
+Dylan (`encheres.nc@gmail.com`). French. JS/React background — explain Go errors plainly and propose pragmatic fixes. Likes Netflix UX, hates clutter, prefers simplicity over configurability. Self-hosts on a homelab cluster (`nc-maiz.org` via Cloudflare Tunnel, `maiz.lan` via Traefik). Notflix est déployé en production sur le cluster k3s `salon` (namespace `notflix`), accessible sur `notflix.nc-maiz.org` (Cloudflare) et `notflix.maiz.lan` (LAN Traefik).
 
 ## Roadmap notes for future Claude sessions
 
@@ -453,5 +456,5 @@ Dylan (`encheres.nc@gmail.com`). French. JS/React background — explain Go erro
 ### Operational
 
 - **`air` for Go hot-reload** so the user stops having to Ctrl+C `make dev` after every backend edit.
-- **GitLab CI mirroring** — push triggers a docker build + push to `registry.gitlab.com/kidnar/notflix*` automatically (Kuro has this; Notflix doesn't yet).
-- **Public hostname** for the bundle — currently `notflix-bundle.maiz.local` (in-LAN only). Wire it through Cloudflare Tunnel + DNS CNAME for public access. Reuse the `kuro.nc-maiz.org` pattern.
+- **GitLab CI mirroring** ✅ — opérationnel : push → build + push `registry.gitlab.com/kidnar/notflix:<SHA>` + deploy kubectl.
+- **Public hostname** ✅ — `notflix.nc-maiz.org` via Cloudflare Tunnel, opérationnel.
