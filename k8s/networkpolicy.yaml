@@ -10,7 +10,7 @@
 #
 # Trafic autorisé en SORTIE :
 #   • kube-dns (kube-system):53 UDP+TCP       (résolution DNS)
-#   • prowlarr.streaming-apps:80              (recherche de releases)
+#   • prowlarr.streaming-apps:9696            (recherche de releases, port pod réel)
 #   • Internet HTTPS (:443) et HTTP (:80)     (TMDB, TorBox, Claude API)
 #     → cluster pod CIDR 10.42.0.0/16 exclu pour ne pas ouvrir de backdoor
 #       intra-cluster non explicite
@@ -79,6 +79,8 @@ spec:
           port: 53
 
     # 2) Prowlarr (streaming-apps) — recherche de releases torrent
+    # Service prowlarr:80 → kube-proxy DNAT → pod:9696 (port réel de Prowlarr).
+    # NetworkPolicy évaluée APRÈS le DNAT → port cible = 9696.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -88,7 +90,7 @@ spec:
               app: prowlarr
       ports:
         - protocol: TCP
-          port: 80
+          port: 9696
 
     # 3) Internet — TMDB (api.themoviedb.org, image.tmdb.org),
     #    TorBox (api.torbox.app), Claude API (api.anthropic.com)
