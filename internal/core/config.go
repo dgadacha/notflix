@@ -52,6 +52,13 @@ type Config struct {
 	Data struct {
 		Dir string // resolved at boot
 	}
+	Library struct {
+		// Absolute path the local-library scanner walks. Empty when
+		// disabled — the scanner refuses to run, the home rail hides
+		// itself. Settable from /settings → admin UI; the env var
+		// NOTFLIX_LIBRARY_DIR is the boot-time fallback.
+		Dir string
+	}
 }
 
 func (c *Config) PortStr() string { return strconv.Itoa(c.Server.Port) }
@@ -97,6 +104,11 @@ func loadConfig() (*Config, error) {
 	// real values in `.env` and reset the password from the admin UI.
 	cfg.Auth.AdminUsername = firstNonEmpty(os.Getenv("NOTFLIX_ADMIN_USERNAME"), "admin")
 	cfg.Auth.AdminPassword = firstNonEmpty(os.Getenv("NOTFLIX_ADMIN_PASSWORD"), "admin")
+
+	// Local library scanner — empty by default, the user opts in via
+	// the settings UI (or the env var if they prefer the bootstrap
+	// path for containerised deploys).
+	cfg.Library.Dir = os.Getenv("NOTFLIX_LIBRARY_DIR")
 
 	return cfg, nil
 }

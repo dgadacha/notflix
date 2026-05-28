@@ -79,6 +79,20 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	pr.GET("/search/movie", h.HandleSearchMovie)
 	pr.GET("/search/tv", h.HandleSearchTV)
 
+	// Local library — scan a host directory, match files against TMDB,
+	// stream them with HTTP Range. Stream is open to any logged-in
+	// user; mutations (set dir, trigger scan, list-all incl. orphans)
+	// are admin-gated.
+	lib := v1.Group("/local-library")
+	lib.GET("", h.HandleListLocalLibrary)
+	lib.GET("/stream/:id", h.HandleStreamLocalFile)
+	libAdmin := v1.Group("/local-library", h.RequireAdmin)
+	libAdmin.GET("/all", h.HandleListAllLocalFiles)
+	libAdmin.GET("/dir", h.HandleGetLibraryDir)
+	libAdmin.PUT("/dir", h.HandleSetLibraryDir)
+	libAdmin.POST("/scan", h.HandleScanLocalLibrary)
+	libAdmin.GET("/scan/status", h.HandleScanStatus)
+
 	// Stream transmux — pipes a TorBox URL through ffmpeg to swap the
 	// audio codec for AAC. Used as a fallback when the browser can't
 	// decode the source audio (DDP / DTS / TrueHD on non-Apple Chrome).

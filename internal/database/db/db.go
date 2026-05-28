@@ -31,6 +31,7 @@ func Open(path string) (*Database, error) {
 		&models.ProfileWatchHistory{},
 		&models.ProfileListEntry{},
 		&models.TMDBCacheEntry{},
+		&models.LocalFile{},
 	); err != nil {
 		return nil, err
 	}
@@ -370,4 +371,87 @@ func (db *Database) GetSettings(keys []string) (map[string]string, error) {
 		out[r.Key] = r.Value
 	}
 	return out, nil
+}
+
+// -----------------------------------------------------------------------------
+// Local library
+// -----------------------------------------------------------------------------
+
+// ListMatchedLocalFiles returns every scanned file that successfully
+// resolved to a TMDB id. Used by the home rail; orphan files (TMDBID
+// == 0) are filtered out so the user only sees playable cards.
+func (db *Database) ListMatchedLocalFiles() ([]*models.LocalFile, error) {
+	var res []*models.LocalFile
+	err := db.gormdb.
+		Where("tmdb_id > 0").
+		Order("scanned_at DESC").
+		Find(&res).Error
+	return res, err
+}
+
+// ListAllLocalFiles returns the full scan output (matched + orphan).
+// Used by the admin settings panel to surface unmatched files so the
+// user can rename them.
+func (db *Database) ListAllLocalFiles() ([]*models.LocalFile, error) {
+	var res []*models.LocalFile
+	err := db.gormdb.Order("scanned_at DESC").Find(&res).Error
+	return res, err
+}
+
+func (db *Database) GetLocalFile(id uint) (*models.LocalFile, error) {
+	var f models.LocalFile
+	if err := db.gormdb.First(&f, id).Error; err != nil {
+		return nil, err
+	}
+	return &f, nil
+}
+
+// UpsertLocalFile is keyed by Path. Idempotent re-scans update the
+// metadata + scanned_at without churning ids.
+func (db *Database) UpsertLocalFile(f *models.LocalFile) (*models.LocalFile, error) {
+	err := db.gormdb.
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "path"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"size_bytes", "scanned_at",
+				"parsed_title", "parsed_year",
+				"tmdb_id", "media_type", "title",
+				"poster_path", "backdrop_path", "overview", "year",
+				"updated_at",
+			}),
+		}).
+		Create(f).Error
+	if err != nil {
+		return nil, err
+	}
+	var refreshed models.LocalFile
+	if err := db.gormdb.Where("path = ?", f.Path).First(&refreshed).Error; err != nil {
+		return nil, err
+	}
+	return &refreshed, nil
+}
+
+// DeleteLocalFilesNotIn removes rows whose path is no longer present
+// on disk. Caller passes the set of paths actually seen on the last
+// scan; everything else gets removed.
+func (db *Database) DeleteLocalFilesNotIn(paths []string) (int64, error) {
+	if len(paths) == 0 {
+		// Empty scan → wipe the table. The caller is responsible for
+		// only invoking this when the scan actually traversed the
+		// directory (don't call after a failed walk).
+		res := db.gormdb.Where("1 = 1").Delete(&models.LocalFile{})
+		return res.RowsAffected, res.Error
+	}
+	res := db.gormdb.Where("path NOT IN ?", paths).Delete(&models.LocalFile{})
+	return res.RowsAffected, res.Error
+}
+
+// CountLocalFiles returns (matched, total). Used by the settings UI
+// "Bibliothèque : N films, M non reconnus" line.
+func (db *Database) CountLocalFiles() (matched, total int64, err error) {
+	if err = db.gormdb.Model(&models.LocalFile{}).Count(&total).Error; err != nil {
+		return
+	}
+	err = db.gormdb.Model(&models.LocalFile{}).Where("tmdb_id > 0").Count(&matched).Error
+	return
 }

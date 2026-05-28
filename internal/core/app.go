@@ -36,6 +36,7 @@ const (
 	SettingProwlarrAPIKey  = "prowlarr_api_key"
 	SettingAnthropicAPIKey = "anthropic_api_key"
 	SettingAnthropicModel  = "anthropic_model"
+	SettingLibraryDir      = "local_library_dir"
 )
 
 func New() (*App, error) {
@@ -113,6 +114,7 @@ func overlaySettingsOnto(database *db.Database, cfg *Config) {
 		SettingProwlarrAPIKey,
 		SettingAnthropicAPIKey,
 		SettingAnthropicModel,
+		SettingLibraryDir,
 	})
 	if err != nil {
 		return
@@ -135,6 +137,21 @@ func overlaySettingsOnto(database *db.Database, cfg *Config) {
 	if v := rows[SettingAnthropicModel]; v != "" {
 		cfg.Anthropic.Model = v
 	}
+	if v := rows[SettingLibraryDir]; v != "" {
+		cfg.Library.Dir = v
+	}
+}
+
+// ApplyLibraryDir is the hot-swap path the admin UI hits when the user
+// changes the local-library directory. Persists to the settings table
+// and updates the in-memory config. Empty string clears the setting
+// (the env var, if any, becomes the source of truth on next reboot).
+func (a *App) ApplyLibraryDir(dir string) error {
+	if err := a.Database.SetSetting(SettingLibraryDir, dir); err != nil {
+		return err
+	}
+	a.Config.Library.Dir = dir
+	return nil
 }
 
 // ApplyServerConfig writes the admin-mutable keys to the settings

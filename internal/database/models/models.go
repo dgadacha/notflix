@@ -95,6 +95,38 @@ type ProfileListEntry struct {
 	PosterPath string `gorm:"column:poster_path;size:255" json:"posterPath"`
 }
 
+// LocalFile is one video file discovered by the local-library scanner.
+//
+// One row per absolute path. `Path` is uniquely indexed so re-scanning
+// upserts cleanly. TMDB metadata is denormalised into the row at scan
+// time so the home rail and the watch page can render without an
+// extra round-trip to /tmdb/movie/<id> per card.
+//
+// For movies, Season/Episode stay 0. TV support is intentionally left
+// out of the MVP — episode parsing (S01E01 vs " - 01 " vs 1x01) is
+// noisy enough that mixing it with movie scanning early causes a lot
+// of wrong matches. Add it later in a separate scanner mode.
+type LocalFile struct {
+	BaseModel
+	Path      string    `gorm:"column:path;uniqueIndex;size:1024;not null" json:"path"`
+	SizeBytes int64     `gorm:"column:size_bytes;not null" json:"sizeBytes"`
+	ScannedAt time.Time `gorm:"column:scanned_at;index" json:"scannedAt"`
+	// Parsed from the filename — kept around so we can re-match when
+	// TMDB metadata is stale or the title was edited.
+	ParsedTitle string `gorm:"column:parsed_title;size:255" json:"parsedTitle"`
+	ParsedYear  int    `gorm:"column:parsed_year" json:"parsedYear"`
+	// TMDB match — 0 when matching failed. The frontend hides these
+	// "orphan" rows from the home rail but the admin scan summary
+	// still counts them.
+	TMDBID       int    `gorm:"column:tmdb_id;index" json:"tmdbId"`
+	MediaType    string `gorm:"column:media_type;size:8" json:"mediaType"` // "movie" reserved for TV later
+	Title        string `gorm:"column:title;size:255" json:"title"`
+	PosterPath   string `gorm:"column:poster_path;size:255" json:"posterPath"`
+	BackdropPath string `gorm:"column:backdrop_path;size:255" json:"backdropPath"`
+	Overview     string `gorm:"column:overview;type:text" json:"overview"`
+	Year         int    `gorm:"column:year" json:"year"`
+}
+
 // TMDBCacheEntry persists TMDB API responses so home/detail pages stay
 // snappy across restarts and survive bursts beyond the 30 s in-memory
 // window of tmdb.Client. URLHash is sha256(path + sorted query params
