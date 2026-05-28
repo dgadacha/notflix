@@ -3,6 +3,7 @@ package library
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -239,6 +240,20 @@ func convertOne(ctx context.Context, mkvPath string) (outcome, errMsg string) {
 		// silently lost the VFF after conversion.
 		"-map", "0:a?",
 	}
+
+	// Subtitles — map only TEXT-based subtitle streams. MP4 supports
+	// mov_text natively; PGS / DVDSUB (bitmap subs from Blu-ray /
+	// DVD rips) can't be converted to mov_text so we skip them
+	// silently rather than letting ffmpeg fail the whole conversion.
+	textSubs := probeTextSubtitleStreams(ctx, mkvPath)
+	for _, idx := range textSubs {
+		args = append(args, "-map", fmt.Sprintf("0:s:%d", idx))
+	}
+	if len(textSubs) > 0 {
+		args = append(args, "-c:s", "mov_text")
+		log.Printf("convert: %s — %d text sub track(s)",
+			filepath.Base(mkvPath), len(textSubs))
+	}
 	// HEVC in MP4 needs the `hvc1` brand to play in Chrome/Safari.
 	// Without `-tag:v hvc1`, ffmpeg writes `hev1` which the browsers
 	// silently refuse. For non-HEVC sources the tag is auto (avc1
@@ -387,6 +402,57 @@ func probeFirstStreamCodec(ctx context.Context, path, selector string) string {
 func isHEVC(codec string) bool {
 	c := strings.ToLower(codec)
 	return c == "hevc" || c == "h265" || c == "h.265"
+}
+
+// probeTextSubtitleStreams returns the subtitle-stream indices (s:N)
+// that are text-based and can therefore be remuxed to mov_text inside
+// an MP4 container.
+//
+// Skipped codecs:
+//   - hdmv_pgs_subtitle (PGS — Blu-ray bitmaps)
+//   - dvd_subtitle      (VobSub — DVD bitmaps)
+//   - dvb_subtitle      (TV-broadcast bitmaps)
+//
+// Kept codecs: subrip (srt), ass / ssa, mov_text, webvtt, text.
+//
+// Returning a per-subtitle-stream index (not a global stream index)
+// matches ffmpeg's `-map 0:s:N` selector syntax.
+func probeTextSubtitleStreams(ctx context.Context, path string) []int {
+	cmd := exec.CommandContext(ctx, "ffprobe",
+		"-v", "error",
+		"-select_streams", "s",
+		"-show_entries", "stream=codec_name",
+		"-of", "json",
+		path,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var probe struct {
+		Streams []struct {
+			CodecName string `json:"codec_name"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(out, &probe); err != nil {
+		return nil
+	}
+	textCodecs := map[string]bool{
+		"subrip":   true,
+		"srt":      true,
+		"ass":      true,
+		"ssa":      true,
+		"mov_text": true,
+		"webvtt":   true,
+		"text":     true,
+	}
+	var indices []int
+	for i, s := range probe.Streams {
+		if textCodecs[strings.ToLower(s.CodecName)] {
+			indices = append(indices, i)
+		}
+	}
+	return indices
 }
 
 // freeBytesAt returns the number of bytes available to a non-root
