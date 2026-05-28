@@ -36,6 +36,7 @@ import {
     useTMDBSeason,
     yearOf,
 } from "@/lib/tmdb"
+import { useLocalLibrary, type LocalFile } from "@/app/(main)/_features/netflix/netflix-local-library"
 import { useSearchMovie, type Release } from "@/lib/notflix-api"
 import { useNetflixPersonModal } from "@/app/(main)/_features/netflix/netflix-person-modal"
 import { atom, useAtom, useSetAtom } from "jotai"
@@ -111,6 +112,19 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
     const [subLang, setSubLang] = useSubtitleLangPref()
     const [subPrepMode, setSubPrepMode] = useSubPrepMode()
 
+    // Local-library awareness. If the title we're showing has files on
+    // disk, the Lecture button + episode rows route to /watch?localId
+    // instead of triggering the Prowlarr+TorBox flow. Without this, the
+    // user clicks a card on the Bibliothèque locale rail → modal →
+    // Lecture → and the player starts searching torrents for a file
+    // that's already there, which is both confusing and wasteful.
+    const { data: allLocal } = useLocalLibrary()
+    const localFilesForTitle = React.useMemo(() => {
+        if (!allLocal || allLocal.length === 0) return [] as LocalFile[]
+        return allLocal.filter(f => f.tmdbId === target.id)
+    }, [allLocal, target.id])
+    const hasLocal = localFilesForTitle.length > 0
+
     // TV series: track which season we're showing in the episode list.
     // Episode is no longer a separate piece of state — the user clicks an
     // episode row to launch it. The big "Lecture" button still launches
@@ -157,7 +171,17 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
 
     // Build the /watch URL with current prefs + (for TV) the requested
     // season/episode. Movies omit the season/episode params entirely.
+    //
+    // Local-library short-circuit: if we already have the requested
+    // (movie OR episode) on disk, route via /watch?localId=N. The watch
+    // page detects localId and skips the entire Prowlarr+TorBox flow.
+    // Without this short-circuit, opening a film from the local rail
+    // would (re-)search torrents which is both wasteful and confusing.
     const buildWatchUrl = (season?: number, episode?: number) => {
+        const localId = pickLocalFileId(localFilesForTitle, type, season, episode)
+        if (localId != null) {
+            return `/watch?localId=${localId}`
+        }
         const params = new URLSearchParams({ id: String(data.id), type })
         if (quality !== "auto") params.set("quality", quality)
         if (audio !== "auto") params.set("audio", audio)
@@ -211,6 +235,28 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
                                 ? `${t("modal.play", "Lecture")} · S${selectedSeason}E1`
                                 : t("modal.play", "Lecture")}
                         </Button>
+                        {/* "LOCAL" badge — surfaces when at least one file
+                            for this title is on disk. Tells the user the
+                            Lecture button will play from /api/v1/local-library
+                            instead of triggering a Prowlarr search. */}
+                        {hasLocal && (
+                            <span
+                                className={cn(
+                                    "inline-flex items-center gap-1 px-2 py-1 rounded-md",
+                                    "bg-emerald-500/15 border border-emerald-500/40 text-emerald-300",
+                                    "text-[10px] font-bold uppercase tracking-wider",
+                                )}
+                                title={t("modal.local_available", "Disponible dans ta bibliothèque locale")}
+                            >
+                                <span className="size-1.5 rounded-full bg-emerald-400" />
+                                {t("modal.local_badge", "Local")}
+                                {type === "tv" && localFilesForTitle.length > 1 && (
+                                    <span className="text-emerald-300/70 font-normal">
+                                        · {localFilesForTitle.length} ép.
+                                    </span>
+                                )}
+                            </span>
+                        )}
 
                         {/* "Ma liste" toggle — adds/removes from the active
                             profile's list. Only rendered when a profile is
@@ -331,6 +377,39 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
             )}
         </div>
     )
+}
+
+/** pickLocalFileId chooses which on-disk file (if any) covers a given
+ *  TMDB id + (season, episode) tuple. Used by the detail modal's
+ *  buildWatchUrl to short-circuit the Prowlarr+TorBox flow when we
+ *  already have the file locally.
+ *
+ *  - Movies: takes the first matching row (callers pre-filter by tmdbId).
+ *  - TV: prefers an exact (season, episode) match, falls back to any
+ *    file from the same season, otherwise returns null so the cloud
+ *    flow can still launch a search.
+ *
+ *  Returns null when no usable local file exists — the caller treats
+ *  that as "no local copy, behave as before". */
+function pickLocalFileId(
+    files: LocalFile[],
+    type: "movie" | "tv",
+    season?: number,
+    episode?: number,
+): number | null {
+    if (!files || files.length === 0) return null
+    if (type === "movie") {
+        return files[0].id
+    }
+    if (season != null && episode != null) {
+        const exact = files.find(f => f.season === season && f.episode === episode)
+        if (exact) return exact.id
+    }
+    if (season != null) {
+        const inSeason = files.find(f => f.season === season)
+        if (inSeason) return inSeason.id
+    }
+    return null
 }
 
 // ---------------------------------------------------------------------------
