@@ -17,6 +17,7 @@ import { NetflixDetailModal } from "@/app/(main)/_features/netflix/netflix-detai
 import { NetflixLogin } from "@/app/(main)/_features/netflix/netflix-login"
 import { NetflixPersonModal } from "@/app/(main)/_features/netflix/netflix-person-modal"
 import { NetflixTopBar } from "@/app/(main)/_features/netflix/netflix-top-bar"
+import { useLocalLibraryEvents } from "@/app/(main)/_features/netflix/use-local-library-events"
 import { RouteFallback } from "@/components/shared/loading-overlay-with-logo"
 import { AppLayout, AppLayoutContent, AppSidebarProvider } from "@/components/ui/app-layout"
 import { useCurrentUser } from "@/lib/auth"
@@ -50,6 +51,11 @@ export const MainLayout = ({ children }: { children: React.ReactNode }) => {
 // profile-gate logic on the public login screen.
 function AuthenticatedShell({ children }: { children: React.ReactNode }) {
     useProfileGate()
+    // Listen for "a new file landed in your library" SSE pushes from
+    // the backend's fsnotify watcher. Fires a toast + invalidates the
+    // home rail / settings counters when an event arrives. No-op for
+    // unauthenticated users (the inner hook bails out).
+    useLocalLibraryEvents()
 
     return (
         <>

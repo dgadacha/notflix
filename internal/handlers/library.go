@@ -1,14 +1,13 @@
 package handlers
 
 import (
-	"context"
-	"log"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"notflix/internal/core"
@@ -133,46 +132,20 @@ func (h *Handler) HandleSetLibraryDir(c echo.Context) error {
 // -----------------------------------------------------------------------------
 // Scan trigger + last-report
 // -----------------------------------------------------------------------------
-
-// One scan at a time, process-wide. Concurrent POSTs are coalesced;
-// the second caller gets a 409 instead of stepping on the first.
-// lastReport is the most recent finished scan, exposed by /scan/status.
-var (
-	scanMu     sync.Mutex
-	scanInFlight bool
-	scanFlightMu sync.Mutex
-	lastReport *library.ScanReport
-)
-
-func tryAcquireScan() bool {
-	scanFlightMu.Lock()
-	defer scanFlightMu.Unlock()
-	if scanInFlight {
-		return false
-	}
-	scanInFlight = true
-	return true
-}
-
-func releaseScan() {
-	scanFlightMu.Lock()
-	scanInFlight = false
-	scanFlightMu.Unlock()
-}
+//
+// Scan coordination state lives in internal/library (runner.go) so both
+// this handler AND the fsnotify watcher can trigger scans through the
+// same lock. The handler is now a thin shim that just calls
+// library.TryRunInBackground and translates the bool result to HTTP.
 
 // HandleScanLocalLibrary — POST /api/v1/local-library/scan
 //
-// Fire-and-forget: the scan runs in a goroutine and the HTTP request
-// returns immediately with `{started: true}`. The frontend polls
-// /scan/status every ~1.5 s to render the progress bar, and reads the
-// final ScanReport from `lastReport` once `running` flips back to
-// false.
+// Fire-and-forget: returns 202 with {started: true}. The scan runs in
+// a goroutine inside library.TryRunInBackground. The frontend polls
+// /scan/status every ~1.5 s to render the progress bar.
 //
-// This avoids two failure modes the sync version had:
-//   - 10-min HTTP request hanging across proxies / Cloudflare Tunnel
-//   - The UI's spinner with no progress info on large libraries
-//
-// 409 when a scan is already running.
+// 409 when a scan is already running (either another manual trigger,
+// or the watcher auto-scan firing concurrently).
 func (h *Handler) HandleScanLocalLibrary(c echo.Context) error {
 	dir := h.App.Config.Library.Dir
 	if dir == "" {
@@ -180,41 +153,11 @@ func (h *Handler) HandleScanLocalLibrary(c echo.Context) error {
 			"error": "library dir not configured — set it first via PUT /local-library/dir",
 		})
 	}
-
-	if !tryAcquireScan() {
+	if !library.TryRunInBackground(dir, h.App.TMDB, h.App.Database, "manual") {
 		return c.JSON(http.StatusConflict, map[string]any{
 			"error": "scan already in progress",
 		})
 	}
-
-	// Detach from the request context — the request returns
-	// immediately, the scan keeps running. Bounded at 30 min to cover
-	// even pathologically big libraries (10 k files on a slow disk +
-	// cold TMDB cache).
-	go func() {
-		defer releaseScan()
-		scanMu.Lock()
-		defer scanMu.Unlock()
-
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-		defer cancel()
-
-		rep, err := library.Scan(ctx, dir, h.App.TMDB, h.App.Database)
-		if err != nil {
-			log.Printf("library scan: %v", err)
-			// Keep the partial report around so the UI can show what
-			// finished before the error.
-			if rep != nil {
-				lastReport = rep
-			}
-			return
-		}
-		lastReport = rep
-		log.Printf("library scan: done — %d matched, %d unmatched, %d removed in %.1fs",
-			rep.Matched, rep.Unmatched, rep.Removed,
-			float64(rep.DurationMs)/1000)
-	}()
-
 	return c.JSON(http.StatusAccepted, map[string]any{
 		"started": true,
 		"dir":     dir,
@@ -227,14 +170,77 @@ func (h *Handler) HandleScanLocalLibrary(c echo.Context) error {
 // scan is running, plus the last finished scan's report. The settings
 // panel polls this every ~1.5 s to render a live progress bar.
 func (h *Handler) HandleScanStatus(c echo.Context) error {
-	scanFlightMu.Lock()
-	running := scanInFlight
-	scanFlightMu.Unlock()
 	return RespondOK(c, map[string]any{
-		"running":    running,
+		"running":    library.IsRunning(),
 		"progress":   library.Progress(),
-		"lastReport": lastReport,
+		"lastReport": library.LastReport(),
+		"trigger":    library.LastTrigger(),
 	})
+}
+
+// HandleLibraryEvents — GET /api/v1/local-library/events
+//
+// Server-Sent Events stream. Every time the fsnotify watcher detects a
+// new file landing in the library dir AND the scanner resolves it to a
+// TMDB match, one event of shape:
+//
+//	data: {"kind":"added","title":"Dune","mediaType":"movie", … }\n\n
+//
+// is pushed down this stream. The frontend opens an EventSource on
+// this endpoint and renders a toast per event.
+//
+// The connection is held open by writing a heartbeat comment line every
+// 15 s — Cloudflare Tunnel + browser idle timers would otherwise drop
+// the socket after ~60 s of silence.
+func (h *Handler) HandleLibraryEvents(c echo.Context) error {
+	resp := c.Response()
+	resp.Header().Set("Content-Type", "text/event-stream")
+	resp.Header().Set("Cache-Control", "no-cache")
+	resp.Header().Set("Connection", "keep-alive")
+	resp.Header().Set("X-Accel-Buffering", "no") // disable nginx/CF buffering
+	resp.WriteHeader(http.StatusOK)
+	flusher, ok := resp.Writer.(http.Flusher)
+	if !ok {
+		return fmt.Errorf("streaming not supported")
+	}
+
+	ch, cleanup := library.Subscribe()
+	defer cleanup()
+
+	// Initial comment so curl shows something immediately and so
+	// EventSource fires `open` on connect (it waits for first byte).
+	if _, err := fmt.Fprintf(resp, ": library-events stream open\n\n"); err != nil {
+		return nil
+	}
+	flusher.Flush()
+
+	ctx := c.Request().Context()
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-heartbeat.C:
+			if _, err := fmt.Fprintf(resp, ": ping\n\n"); err != nil {
+				return nil
+			}
+			flusher.Flush()
+		case ev, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			payload, err := json.Marshal(ev)
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(resp, "data: %s\n\n", payload); err != nil {
+				return nil
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 // -----------------------------------------------------------------------------

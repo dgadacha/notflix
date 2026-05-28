@@ -86,6 +86,10 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	lib := v1.Group("/local-library")
 	lib.GET("", h.HandleListLocalLibrary)
 	lib.GET("/stream/:id", h.HandleStreamLocalFile)
+	// SSE stream — pushes "a new file landed in your library" events
+	// to every logged-in browser. Doesn't need admin: the toast is
+	// useful for all viewers (even if only the admin can trigger scans).
+	lib.GET("/events", h.HandleLibraryEvents)
 	libAdmin := v1.Group("/local-library", h.RequireAdmin)
 	libAdmin.GET("/all", h.HandleListAllLocalFiles)
 	libAdmin.GET("/dir", h.HandleGetLibraryDir)

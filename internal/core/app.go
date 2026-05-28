@@ -3,11 +3,13 @@ package core
 import (
 	"log"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"notflix/internal/anthropic"
 	"notflix/internal/database/db"
 	"notflix/internal/database/models"
+	"notflix/internal/library"
 	"notflix/internal/prowlarr"
 	"notflix/internal/tmdb"
 	"notflix/internal/torbox"
@@ -24,6 +26,12 @@ type App struct {
 	TorBox    *torbox.Client
 	Prowlarr  *prowlarr.Client
 	Anthropic *anthropic.Client
+
+	// libraryWatcher is started when Library.Dir is non-empty (either
+	// at boot or after ApplyLibraryDir hot-swaps the path). nil if no
+	// library dir is configured.
+	libWatcherMu sync.Mutex
+	libWatcher   *library.Watcher
 }
 
 // Setting keys used by the admin UI to override env-var defaults.
@@ -77,7 +85,41 @@ func New() (*App, error) {
 	// just frees the rows.
 	go app.tmdbCacheReaper()
 
+	// Watch the local library directory for new files. Best-effort —
+	// a watcher failure is logged but doesn't abort startup (the user
+	// can always trigger manual scans from the settings UI).
+	app.startLibraryWatcher()
+
 	return app, nil
+}
+
+// startLibraryWatcher arms the fsnotify watcher on the configured
+// library directory. No-op if the dir is empty. Replaces any
+// previously-running watcher (so ApplyLibraryDir can call this on
+// every dir change).
+func (a *App) startLibraryWatcher() {
+	a.libWatcherMu.Lock()
+	defer a.libWatcherMu.Unlock()
+
+	if a.libWatcher != nil {
+		a.libWatcher.Stop()
+		a.libWatcher = nil
+	}
+	dir := a.Config.Library.Dir
+	if dir == "" {
+		return
+	}
+	w, err := library.NewWatcher(dir, a.TMDB, a.Database)
+	if err != nil {
+		log.Printf("library watcher: %v (auto-scan disabled until next dir change)", err)
+		return
+	}
+	if err := w.Start(); err != nil {
+		log.Printf("library watcher: start: %v", err)
+		_ = w
+		return
+	}
+	a.libWatcher = w
 }
 
 // tmdbCacheReaper drops expired TMDB cache rows on a 1 h ticker.
@@ -151,6 +193,9 @@ func (a *App) ApplyLibraryDir(dir string) error {
 		return err
 	}
 	a.Config.Library.Dir = dir
+	// Re-arm the fsnotify watcher on the new dir (or stop it if dir
+	// was cleared). Same goroutine model as startup.
+	a.startLibraryWatcher()
 	return nil
 }
 
@@ -217,6 +262,12 @@ func (a *App) bootstrapAdmin() error {
 }
 
 func (a *App) Close() {
+	a.libWatcherMu.Lock()
+	if a.libWatcher != nil {
+		a.libWatcher.Stop()
+		a.libWatcher = nil
+	}
+	a.libWatcherMu.Unlock()
 	if a.Database != nil {
 		_ = a.Database.Close()
 	}
