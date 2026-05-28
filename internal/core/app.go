@@ -45,6 +45,11 @@ const (
 	SettingAnthropicAPIKey = "anthropic_api_key"
 	SettingAnthropicModel  = "anthropic_model"
 	SettingLibraryDir      = "local_library_dir"
+	// SettingLibraryAutoConvert — when "true", any successful scan
+	// (manual or fsnotify-triggered) chain-triggers the MKV→MP4
+	// batch converter. Default off so existing installs keep their
+	// behaviour until the admin opts in.
+	SettingLibraryAutoConvert = "library_auto_convert"
 )
 
 func New() (*App, error) {
@@ -89,6 +94,20 @@ func New() (*App, error) {
 	// a watcher failure is logged but doesn't abort startup (the user
 	// can always trigger manual scans from the settings UI).
 	app.startLibraryWatcher()
+
+	// Chain MKV→MP4 batch conversion after every successful scan
+	// when the admin opts in. The hook itself checks the toggle on
+	// every fire (no in-memory cache to refresh on settings change).
+	// TryStartConvertBatch is a no-op if a batch is already running,
+	// so back-to-back scans don't stack convert jobs.
+	library.SetAfterScanHook(func() {
+		if !app.AutoConvertEnabled() {
+			return
+		}
+		if library.TryStartConvertBatch(app.Database) {
+			log.Printf("library auto-convert: kicked off batch after scan")
+		}
+	})
 
 	return app, nil
 }
@@ -182,6 +201,26 @@ func overlaySettingsOnto(database *db.Database, cfg *Config) {
 	if v := rows[SettingLibraryDir]; v != "" {
 		cfg.Library.Dir = v
 	}
+}
+
+// AutoConvertEnabled reads the toggle from the settings table.
+// Defaults to false on read errors or unset rows.
+func (a *App) AutoConvertEnabled() bool {
+	rows, err := a.Database.GetSettings([]string{SettingLibraryAutoConvert})
+	if err != nil {
+		return false
+	}
+	return rows[SettingLibraryAutoConvert] == "true"
+}
+
+// ApplyAutoConvert persists the toggle. The next scan completion
+// hook reads it fresh, so there's no in-memory cache to refresh.
+func (a *App) ApplyAutoConvert(enabled bool) error {
+	val := "false"
+	if enabled {
+		val = "true"
+	}
+	return a.Database.SetSetting(SettingLibraryAutoConvert, val)
 }
 
 // ApplyLibraryDir is the hot-swap path the admin UI hits when the user

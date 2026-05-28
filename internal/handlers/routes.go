@@ -102,6 +102,11 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	libAdmin.POST("/convert", h.HandleConvertMKVs)
 	libAdmin.GET("/convert/status", h.HandleConvertStatus)
 	libAdmin.POST("/convert/cancel", h.HandleConvertCancel)
+	// Auto-convert toggle: when ON, each successful scan chain-
+	// triggers the batch converter (no-op if a batch is already
+	// running, so back-to-back scans don't stack jobs).
+	libAdmin.GET("/auto-convert", h.HandleGetAutoConvert)
+	libAdmin.PUT("/auto-convert", h.HandleSetAutoConvert)
 
 	// Stream transmux — pipes a TorBox URL through ffmpeg to swap the
 	// audio codec for AAC. Used as a fallback when the browser can't

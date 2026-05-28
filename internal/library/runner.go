@@ -25,7 +25,31 @@ var (
 	runnerReportMu    sync.RWMutex        // protects runnerLastReport
 	runnerLastReport  *ScanReport         // most recent finished scan
 	runnerLastTrigger string              // "manual" | "auto" | "" if no scan yet
+
+	// afterScanHook is called after every successful scan (manual
+	// or auto). Wired by core.New() to optionally chain-trigger the
+	// MKV→MP4 batch converter. Nil if the host app doesn't set it.
+	afterScanHookMu sync.Mutex
+	afterScanHook   func()
 )
+
+// SetAfterScanHook installs (or clears) the post-scan callback. The
+// hook is called from inside the scan goroutine, so it should not
+// block — typically it just kicks off another goroutine.
+func SetAfterScanHook(f func()) {
+	afterScanHookMu.Lock()
+	afterScanHook = f
+	afterScanHookMu.Unlock()
+}
+
+func callAfterScanHook() {
+	afterScanHookMu.Lock()
+	h := afterScanHook
+	afterScanHookMu.Unlock()
+	if h != nil {
+		h()
+	}
+}
 
 // tryAcquire flips runnerInFlight to true if it wasn't already. The
 // caller MUST call release() when done.
@@ -114,32 +138,36 @@ func TryRunInBackground(dir string, t TMDBSearcher, store *db.Database, trigger 
 			trigger, rep.Matched, rep.Unmatched, rep.Removed,
 			float64(rep.DurationMs)/1000)
 
-		// Publish events only for auto-triggered scans. Manual scans
-		// don't need toasts — the user already SEES the progress bar
-		// and the matched/unmatched counts in the panel.
-		if trigger != "auto" {
-			return
-		}
-		after, err := store.ListMatchedLocalFiles()
-		if err != nil {
-			log.Printf("library scan: post-diff query failed: %v", err)
-			return
-		}
-		for _, f := range after {
-			if _, known := before[f.Path]; known {
-				continue
+		// Toasts only for auto-triggered scans — manual scans
+		// already show the progress bar + matched/unmatched in the
+		// settings panel.
+		if trigger == "auto" {
+			after, err := store.ListMatchedLocalFiles()
+			if err != nil {
+				log.Printf("library scan: post-diff query failed: %v", err)
+			} else {
+				for _, f := range after {
+					if _, known := before[f.Path]; known {
+						continue
+					}
+					Publish(LibraryEvent{
+						Kind:      "added",
+						Title:     pickEventTitle(f.Title, f.ParsedTitle),
+						MediaType: f.MediaType,
+						TMDBID:    f.TMDBID,
+						Path:      f.Path,
+						Season:    f.Season,
+						Episode:   f.Episode,
+						At:        time.Now(),
+					})
+				}
 			}
-			Publish(LibraryEvent{
-				Kind:      "added",
-				Title:     pickEventTitle(f.Title, f.ParsedTitle),
-				MediaType: f.MediaType,
-				TMDBID:    f.TMDBID,
-				Path:      f.Path,
-				Season:    f.Season,
-				Episode:   f.Episode,
-				At:        time.Now(),
-			})
 		}
+
+		// Fire the after-scan hook. Both manual and auto scans
+		// trigger it — the hook itself decides what to do (in
+		// practice: kick off the MKV→MP4 batch if the toggle is on).
+		callAfterScanHook()
 	}()
 	return true
 }

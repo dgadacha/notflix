@@ -1501,6 +1501,19 @@ function useConvertStatus() {
     })
 }
 
+function useAutoConvert() {
+    return useQuery<{ enabled: boolean }>({
+        queryKey: ["library", "auto-convert"],
+        queryFn: async () => {
+            const r = await fetch("/api/v1/local-library/auto-convert")
+            if (!r.ok) throw new Error(`auto-convert ${r.status}`)
+            const j = await r.json()
+            return (j.data ?? j) as { enabled: boolean }
+        },
+        staleTime: 60_000,
+    })
+}
+
 function LibraryPanel() {
     const { t } = useTranslation()
     const qc = useQueryClient()
@@ -1535,6 +1548,7 @@ function LibraryPanel() {
     const wasRunningRef = React.useRef(false)
     const { data: status } = useScanStatus(true)
     const { data: convertStatus } = useConvertStatus()
+    const { data: autoConvert } = useAutoConvert()
     // OR-style. Either flag being true means a scan is in progress:
     //   status.running          — backend's scanInFlight flag (flips
     //                             on the POST, before any state-prep)
@@ -1544,6 +1558,23 @@ function LibraryPanel() {
     const running = (status?.running ?? false) || (status?.progress?.running ?? false)
     const converting = convertStatus?.running ?? false
     const [convertErr, setConvertErr] = React.useState<string | null>(null)
+    const autoConvertEnabled = autoConvert?.enabled ?? false
+
+    const toggleAutoConvert = async () => {
+        const next = !autoConvertEnabled
+        // Optimistic flip so the checkbox feels instantaneous.
+        qc.setQueryData<{ enabled: boolean }>(["library", "auto-convert"], { enabled: next })
+        try {
+            await fetch("/api/v1/local-library/auto-convert", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ enabled: next }),
+            })
+        } catch {
+            // Rollback on failure.
+            qc.invalidateQueries({ queryKey: ["library", "auto-convert"] })
+        }
+    }
 
     React.useEffect(() => {
         if (dirData && !editing) setDraft(dirData.dir)
@@ -1800,6 +1831,26 @@ function LibraryPanel() {
                         <span className="text-red-300 text-xs">{convertErr}</span>
                     )}
                 </div>
+
+                {/* Auto-convert toggle. Chain-triggers the batch after
+                    every successful scan (manual OR fsnotify-auto). */}
+                <label className="flex items-start gap-2 cursor-pointer select-none pt-1">
+                    <input
+                        type="checkbox"
+                        checked={autoConvertEnabled}
+                        onChange={toggleAutoConvert}
+                        className="accent-brand-500 mt-0.5"
+                    />
+                    <span className="text-[11px] text-white/80 leading-snug">
+                        {t("settings.library_auto_convert", "Convertir automatiquement les MKV après chaque scan")}
+                        <span className="block text-[10px] text-[--muted] mt-0.5">
+                            {t(
+                                "settings.library_auto_convert_hint",
+                                "Dès qu'un fichier est ajouté à la bibliothèque ou que tu cliques « Scanner maintenant », un batch MKV → MP4 démarre en arrière-plan.",
+                            )}
+                        </span>
+                    </span>
+                </label>
 
                 {running && status?.progress && (
                     <ScanProgressBar progress={status.progress} />

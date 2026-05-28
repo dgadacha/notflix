@@ -333,6 +333,30 @@ func (h *Handler) HandleStreamLocalFile(c echo.Context) error {
 // MKV → MP4 batch conversion
 // -----------------------------------------------------------------------------
 
+// HandleGetAutoConvert — GET /api/v1/local-library/auto-convert
+//
+// Returns whether the after-scan auto-convert toggle is enabled.
+func (h *Handler) HandleGetAutoConvert(c echo.Context) error {
+	return RespondOK(c, map[string]any{"enabled": h.App.AutoConvertEnabled()})
+}
+
+// HandleSetAutoConvert — PUT /api/v1/local-library/auto-convert
+//
+// Persists the auto-convert toggle. The after-scan hook reads the
+// setting fresh on every fire so the change applies immediately.
+func (h *Handler) HandleSetAutoConvert(c echo.Context) error {
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return RespondErr(c, err)
+	}
+	if err := h.App.ApplyAutoConvert(body.Enabled); err != nil {
+		return RespondErr(c, err)
+	}
+	return RespondOK(c, map[string]any{"enabled": body.Enabled})
+}
+
 // HandleConvertMKVs — POST /api/v1/local-library/convert
 //
 // Kicks off a batch that walks every .mkv row in the DB, remuxes it
