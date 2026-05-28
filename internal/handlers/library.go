@@ -486,6 +486,11 @@ type localAudioTrack struct {
 
 type localProbeResp struct {
 	Duration  float64           `json:"duration"`
+	// IsAnime reflects the TMDB-driven classifier (genre 16 +
+	// original_language=ja). The player uses it to auto-activate
+	// the French subtitle track when the user is watching the
+	// VO of an anime.
+	IsAnime   bool              `json:"isAnime"`
 	Audio     []localAudioTrack `json:"audio,omitempty"`
 	Subtitles []localSubTrack   `json:"subtitles,omitempty"`
 }
@@ -520,6 +525,11 @@ func (h *Handler) HandleProbeLocalFile(c echo.Context) error {
 	resp := localProbeResp{
 		Audio:     []localAudioTrack{},
 		Subtitles: []localSubTrack{},
+	}
+	// Compute the anime flag from the LocalFile row — drives the
+	// frontend's auto-activate-FR-subtitles behaviour.
+	if f, err := h.App.Database.GetLocalFile(uint(id)); err == nil && f != nil {
+		resp.IsAnime = h.App.IsAnime(f.MediaType, f.TMDBID)
 	}
 	var probe struct {
 		Format struct {

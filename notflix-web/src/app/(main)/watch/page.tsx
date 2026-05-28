@@ -2096,7 +2096,11 @@ type LocalSubTrack = {
     codec?: string
     title?: string
 }
-type LocalProbe = { duration: number; subtitles?: LocalSubTrack[] }
+type LocalProbe = {
+    duration: number
+    isAnime?: boolean
+    subtitles?: LocalSubTrack[]
+}
 
 function useLocalFileProbe(localId: number) {
     return useQuery<LocalProbe>({
@@ -2158,6 +2162,32 @@ function LocalWatch({ localId }: { localId: number }) {
         v.addEventListener("loadedmetadata", onLoaded, { once: true })
         return () => v.removeEventListener("loadedmetadata", onLoaded)
     }, [resumeSec])
+
+    // Auto-activate the French subtitle track when watching an anime —
+    // pairs with the "anime audio → JP" preference so you get the VO
+    // with VF subtitles without touching the CC menu. Looks for the
+    // first sub whose lang matches fr/fre/fra. Skips when no anime,
+    // no subs, or no FR track present.
+    React.useEffect(() => {
+        if (!probe?.isAnime) return
+        const v = videoRef.current
+        if (!v || subs.length === 0) return
+        const FR_CODES = ["fre", "fra", "fr"]
+        const frIdx = subs.findIndex(s => FR_CODES.includes((s.lang || "").toLowerCase()))
+        if (frIdx < 0) return
+        // textTracks correspond 1:1 with the <track> elements rendered
+        // below (same order). Wait for loadedmetadata so tracks are
+        // attached before we flip the mode.
+        const enable = () => {
+            const tracks = v.textTracks
+            if (frIdx < tracks.length) {
+                tracks[frIdx].mode = "showing"
+            }
+        }
+        if (v.textTracks.length > 0) enable()
+        v.addEventListener("loadedmetadata", enable, { once: true })
+        return () => v.removeEventListener("loadedmetadata", enable)
+    }, [probe?.isAnime, subs])
 
     if (isLoading) {
         return (
