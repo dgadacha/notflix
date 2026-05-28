@@ -185,10 +185,13 @@ func convertOne(ctx context.Context, mkvPath string) (outcome, errMsg string) {
 		return "skipped", ""
 	}
 
-	// Probe the source audio codec so we know whether we can copy or
-	// have to re-encode.
+	// Probe both audio and video codecs so we can pick the right
+	// flags. Video matters for HEVC: the MP4 brand defaults to
+	// `hev1` but Chrome / Safari need `hvc1` to play HEVC tracks.
 	audio := probeAudioCodec(ctx, mkvPath)
-	log.Printf("convert: %s (audio=%q)", filepath.Base(mkvPath), audio)
+	video := probeVideoCodec(ctx, mkvPath)
+	log.Printf("convert: %s (video=%q audio=%q)",
+		filepath.Base(mkvPath), video, audio)
 
 	args := []string{
 		"-hide_banner",
@@ -198,7 +201,14 @@ func convertOne(ctx context.Context, mkvPath string) (outcome, errMsg string) {
 		"-c:v", "copy", // bit-perfect video copy
 		"-map_metadata", "0",
 		"-map", "0:v:0",
-		"-map", "0:a:0",
+		"-map", "0:a:0?", // optional audio map — files without an audio track skip the audio side
+	}
+	// HEVC in MP4 needs the `hvc1` brand to play in Chrome/Safari.
+	// Without `-tag:v hvc1`, ffmpeg writes `hev1` which the browsers
+	// silently refuse. For non-HEVC sources the tag is auto (avc1
+	// for H.264, etc) — only apply it when we know we're on HEVC.
+	if isHEVC(video) {
+		args = append(args, "-tag:v", "hvc1")
 	}
 	if strings.EqualFold(audio, "aac") {
 		// Pure container change. Should take a few seconds for any
@@ -258,9 +268,20 @@ func convertOne(ctx context.Context, mkvPath string) (outcome, errMsg string) {
 // case, eg "aac" / "ac3" / "eac3" / "dts" / "truehd"), or "" if
 // ffprobe fails. Used to pick between -c:a copy and -c:a aac.
 func probeAudioCodec(ctx context.Context, path string) string {
+	return probeFirstStreamCodec(ctx, path, "a:0")
+}
+
+// probeVideoCodec returns the first video stream's codec name (lower
+// case, eg "h264" / "hevc" / "av1"). Drives the HEVC brand fix
+// (`-tag:v hvc1`) inside convertOne.
+func probeVideoCodec(ctx context.Context, path string) string {
+	return probeFirstStreamCodec(ctx, path, "v:0")
+}
+
+func probeFirstStreamCodec(ctx context.Context, path, selector string) string {
 	cmd := exec.CommandContext(ctx, "ffprobe",
 		"-v", "error",
-		"-select_streams", "a:0",
+		"-select_streams", selector,
 		"-show_entries", "stream=codec_name",
 		"-of", "default=noprint_wrappers=1:nokey=1",
 		path,
@@ -270,4 +291,11 @@ func probeAudioCodec(ctx context.Context, path string) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.ToLower(string(out)))
+}
+
+// isHEVC matches the ffprobe names for H.265 / HEVC streams. ffprobe
+// usually reports "hevc" but some builds say "h265" — accept both.
+func isHEVC(codec string) bool {
+	c := strings.ToLower(codec)
+	return c == "hevc" || c == "h265" || c == "h.265"
 }

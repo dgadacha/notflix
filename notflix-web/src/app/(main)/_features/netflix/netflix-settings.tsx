@@ -2007,6 +2007,20 @@ function ConvertProgressBar({
                     </span>
                 )}
             </div>
+            {/* Live error list during the batch — so the user sees
+                WHY things are failing without waiting for the summary. */}
+            {progress.errors && progress.errors.length > 0 && (
+                <details open className="pt-1">
+                    <summary className="text-red-300/80 text-[10px] cursor-pointer">
+                        {t("settings.library_convert_show_errors", "Détail des erreurs")} ({progress.errors.length})
+                    </summary>
+                    <ul className="mt-1 space-y-0.5 text-[10px] text-red-300/70 font-mono max-h-32 overflow-y-auto">
+                        {progress.errors.map((e, i) => (
+                            <li key={i} className="break-all">{e}</li>
+                        ))}
+                    </ul>
+                </details>
+            )}
         </div>
     )
 }
