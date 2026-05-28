@@ -20,6 +20,7 @@ import {
     useActiveProfileId,
 } from "@/lib/profiles/profiles"
 import { tmdbImage } from "@/lib/tmdb"
+import { useQuery } from "@tanstack/react-query"
 import * as React from "react"
 import { useTranslation } from "react-i18next"
 import { BiPlay } from "react-icons/bi"
@@ -115,9 +116,37 @@ export function NetflixContinueWatching() {
     )
 }
 
+/** Fetches the TMDB still image path for a specific TV episode.
+ *  Used to show the right thumbnail on a "Reprendre la lecture" card
+ *  (so S4E7 of Demon Slayer shows that episode's still instead of the
+ *  whole show's backdrop). Cached aggressively — stills don't change. */
+function useEpisodeStill(tmdbId: number, season: number, episode: number, enabled: boolean) {
+    return useQuery<string | null>({
+        queryKey: ["tmdb", "episode-still", tmdbId, season, episode],
+        queryFn: async () => {
+            const r = await fetch(`/api/v1/tmdb/tv/${tmdbId}/season/${season}/episode/${episode}`)
+            if (!r.ok) return null
+            const j = await r.json()
+            const data = j.data ?? j
+            const path = (data?.still_path as string) || ""
+            return path || null
+        },
+        enabled: enabled && tmdbId > 0 && season > 0 && episode > 0,
+        staleTime: 24 * 60 * 60_000, // 1 day — TMDB stills are stable
+    })
+}
+
 function ResumeCard({ entry, onClick }: { entry: ProfileWatchEntry; onClick: () => void }) {
     const { t } = useTranslation()
+    const isTVEpisode = entry.mediaType === "tv" && entry.season > 0 && entry.episode > 0
+    const { data: stillPath } = useEpisodeStill(
+        entry.tmdbId, entry.season, entry.episode, isTVEpisode,
+    )
+    // Priorité au still de l'épisode pour les séries → le backdrop
+    // de la série → le poster. Le still est plus représentatif :
+    // chaque carte montre la scène où l'utilisateur va reprendre.
     const img =
+        (stillPath ? tmdbImage("w780", stillPath) : null) ||
         tmdbImage("w780", entry.backdropUrl) ||
         tmdbImage("w500", entry.posterPath) ||
         ""

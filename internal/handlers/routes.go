@@ -111,6 +111,11 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	// running, so back-to-back scans don't stack jobs).
 	libAdmin.GET("/auto-convert", h.HandleGetAutoConvert)
 	libAdmin.PUT("/auto-convert", h.HandleSetAutoConvert)
+	// Preferred audio language pair (default + anime). The converter
+	// reorders MP4 audio tracks so the preferred language lands at
+	// track 0 → browsers play it first without any client switching.
+	libAdmin.GET("/audio-langs", h.HandleGetAudioLangPrefs)
+	libAdmin.PUT("/audio-langs", h.HandleSetAudioLangPrefs)
 
 	// Stream transmux — pipes a TorBox URL through ffmpeg to swap the
 	// audio codec for AAC. Used as a fallback when the browser can't

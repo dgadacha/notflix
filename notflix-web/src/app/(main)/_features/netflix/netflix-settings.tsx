@@ -1514,6 +1514,38 @@ function useAutoConvert() {
     })
 }
 
+type AudioLangs = { default: string; anime: string }
+
+function useAudioLangs() {
+    return useQuery<AudioLangs>({
+        queryKey: ["library", "audio-langs"],
+        queryFn: async () => {
+            const r = await fetch("/api/v1/local-library/audio-langs")
+            if (!r.ok) throw new Error(`audio-langs ${r.status}`)
+            const j = await r.json()
+            return (j.data ?? j) as AudioLangs
+        },
+        staleTime: 60_000,
+    })
+}
+
+// Top 10-ish languages that cover ~all releases the user is likely to
+// see. ISO 639-2/B codes (the same form ffmpeg's MKV/MP4 stream tags
+// use). The empty value "" = don't override, keep source order.
+const AUDIO_LANG_OPTIONS: { value: string; label: string }[] = [
+    { value: "", label: "Ne pas réordonner" },
+    { value: "fre", label: "Français" },
+    { value: "eng", label: "English" },
+    { value: "jpn", label: "日本語 (VO anime)" },
+    { value: "spa", label: "Español" },
+    { value: "ger", label: "Deutsch" },
+    { value: "ita", label: "Italiano" },
+    { value: "kor", label: "한국어" },
+    { value: "chi", label: "中文" },
+    { value: "por", label: "Português" },
+    { value: "rus", label: "Русский" },
+]
+
 function LibraryPanel() {
     const { t } = useTranslation()
     const qc = useQueryClient()
@@ -1549,6 +1581,7 @@ function LibraryPanel() {
     const { data: status } = useScanStatus(true)
     const { data: convertStatus } = useConvertStatus()
     const { data: autoConvert } = useAutoConvert()
+    const { data: audioLangs } = useAudioLangs()
     // OR-style. Either flag being true means a scan is in progress:
     //   status.running          — backend's scanInFlight flag (flips
     //                             on the POST, before any state-prep)
@@ -1559,6 +1592,20 @@ function LibraryPanel() {
     const converting = convertStatus?.running ?? false
     const [convertErr, setConvertErr] = React.useState<string | null>(null)
     const autoConvertEnabled = autoConvert?.enabled ?? false
+
+    const setAudioLangs = async (def: string, anime: string) => {
+        qc.setQueryData<AudioLangs>(["library", "audio-langs"], { default: def, anime })
+        try {
+            await fetch("/api/v1/local-library/audio-langs", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ default: def, anime }),
+            })
+            qc.invalidateQueries({ queryKey: ["library", "audio-langs"] })
+        } catch {
+            qc.invalidateQueries({ queryKey: ["library", "audio-langs"] })
+        }
+    }
 
     const toggleAutoConvert = async () => {
         const next = !autoConvertEnabled
@@ -1851,6 +1898,55 @@ function LibraryPanel() {
                         </span>
                     </span>
                 </label>
+
+                {/* Préférences langue audio — la conversion réordonne
+                    les pistes pour mettre la langue choisie en track 0,
+                    ce qui force le browser à la jouer par défaut. */}
+                <div className="space-y-2 pt-2">
+                    <p className="text-[10px] uppercase tracking-wider text-[--muted] font-semibold">
+                        {t("settings.library_audio_prefs", "Langue audio par défaut")}
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <label className="space-y-1">
+                            <span className="text-[10px] text-white/70 block">
+                                {t("settings.library_audio_default", "Films & séries")}
+                            </span>
+                            <select
+                                value={audioLangs?.default ?? "fre"}
+                                onChange={(e) => setAudioLangs(e.target.value, audioLangs?.anime ?? "jpn")}
+                                className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white outline-none focus:border-brand-500"
+                            >
+                                {AUDIO_LANG_OPTIONS.map(o => (
+                                    <option key={o.value} value={o.value} className="bg-black">
+                                        {o.label}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+                        <label className="space-y-1">
+                            <span className="text-[10px] text-white/70 block">
+                                {t("settings.library_audio_anime", "Animés (TMDB anime JP)")}
+                            </span>
+                            <select
+                                value={audioLangs?.anime ?? "jpn"}
+                                onChange={(e) => setAudioLangs(audioLangs?.default ?? "fre", e.target.value)}
+                                className="w-full bg-black/40 border border-white/10 rounded-md px-2 py-1.5 text-xs text-white outline-none focus:border-brand-500"
+                            >
+                                {AUDIO_LANG_OPTIONS.map(o => (
+                                    <option key={o.value} value={o.value} className="bg-black">
+                                        {o.label}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+                    </div>
+                    <p className="text-[10px] text-[--muted]/70 leading-relaxed">
+                        {t(
+                            "settings.library_audio_hint",
+                            "Appliqué lors de la conversion MKV → MP4. Les pistes sont réordonnées sans réencodage (pas de drift, pas de perte qualité). Les MP4 déjà convertis ne sont pas affectés tant qu'ils ne sont pas re-convertis.",
+                        )}
+                    </p>
+                </div>
 
                 {running && status?.progress && (
                     <ScanProgressBar progress={status.progress} />

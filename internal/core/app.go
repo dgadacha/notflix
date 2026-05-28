@@ -1,8 +1,11 @@
 package core
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +53,18 @@ const (
 	// batch converter. Default off so existing installs keep their
 	// behaviour until the admin opts in.
 	SettingLibraryAutoConvert = "library_auto_convert"
+	// SettingLibraryAudioLangDefault — preferred audio language
+	// (ISO 639-2 code, e.g. "fre"/"eng"/"jpn"/"spa") for non-anime
+	// titles. The converter reorders MP4 audio tracks so this lang
+	// lands at track 0, which means browsers (Chrome especially)
+	// play it by default without any UI plumbing. "" = leave the
+	// source order untouched.
+	SettingLibraryAudioLangDefault = "library_audio_lang_default"
+	// SettingLibraryAudioLangAnime — same but applied when the
+	// title is detected as a Japanese animation (TMDB genre +
+	// original_language check). Lets the user run films in VF and
+	// anime in VO simultaneously.
+	SettingLibraryAudioLangAnime = "library_audio_lang_anime"
 )
 
 func New() (*App, error) {
@@ -104,7 +119,7 @@ func New() (*App, error) {
 		if !app.AutoConvertEnabled() {
 			return
 		}
-		if library.TryStartConvertBatch(app.Database) {
+		if library.TryStartConvertBatch(app.Database, app.NewAudioLangPicker()) {
 			log.Printf("library auto-convert: kicked off batch after scan")
 		}
 	})
@@ -176,6 +191,8 @@ func overlaySettingsOnto(database *db.Database, cfg *Config) {
 		SettingAnthropicAPIKey,
 		SettingAnthropicModel,
 		SettingLibraryDir,
+		SettingLibraryAudioLangDefault,
+		SettingLibraryAudioLangAnime,
 	})
 	if err != nil {
 		return
@@ -221,6 +238,96 @@ func (a *App) ApplyAutoConvert(enabled bool) error {
 		val = "true"
 	}
 	return a.Database.SetSetting(SettingLibraryAutoConvert, val)
+}
+
+// AudioLangPrefs reads the (default, anime) preferred audio language
+// codes from the settings table. Empty strings mean "leave the source
+// order untouched" — the converter then maps tracks in original order.
+// Sensible defaults: fre for the general case, jpn for anime.
+func (a *App) AudioLangPrefs() (def, anime string) {
+	rows, err := a.Database.GetSettings([]string{
+		SettingLibraryAudioLangDefault,
+		SettingLibraryAudioLangAnime,
+	})
+	if err != nil {
+		return "fre", "jpn"
+	}
+	def = rows[SettingLibraryAudioLangDefault]
+	anime = rows[SettingLibraryAudioLangAnime]
+	if def == "" {
+		def = "fre"
+	}
+	if anime == "" {
+		anime = "jpn"
+	}
+	return def, anime
+}
+
+// ApplyAudioLangPrefs persists both preferences in a single call. Pass
+// "" to either field to clear the override (the default code applies
+// on next read).
+func (a *App) ApplyAudioLangPrefs(def, anime string) error {
+	if err := a.Database.SetSetting(SettingLibraryAudioLangDefault, strings.ToLower(strings.TrimSpace(def))); err != nil {
+		return err
+	}
+	return a.Database.SetSetting(SettingLibraryAudioLangAnime, strings.ToLower(strings.TrimSpace(anime)))
+}
+
+// IsAnime is a best-effort check: does this TMDB title look like
+// Japanese animation? We require BOTH genre 16 (Animation) AND
+// original_language == "ja" so US cartoons / Pixar films don't get
+// labelled "anime" and converted to a Japanese audio they don't have.
+//
+// Returns false on any TMDB error or unrecognised mediaType — that's
+// the safe default (no special treatment, falls back to the general
+// preferred lang).
+func (a *App) IsAnime(mediaType string, tmdbID int) bool {
+	if tmdbID <= 0 {
+		return false
+	}
+	var endpoint string
+	switch mediaType {
+	case "tv":
+		endpoint = fmt.Sprintf("tv/%d", tmdbID)
+	case "movie":
+		endpoint = fmt.Sprintf("movie/%d", tmdbID)
+	default:
+		return false
+	}
+	var data struct {
+		OriginalLanguage string `json:"original_language"`
+		Genres           []struct {
+			ID int `json:"id"`
+		} `json:"genres"`
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := a.TMDB.GetJSON(ctx, endpoint, nil, &data); err != nil {
+		return false
+	}
+	if data.OriginalLanguage != "ja" {
+		return false
+	}
+	for _, g := range data.Genres {
+		if g.ID == 16 { // 16 = Animation in TMDB
+			return true
+		}
+	}
+	return false
+}
+
+// NewAudioLangPicker returns a closure that maps a LocalFile to the
+// preferred audio language code. Calls IsAnime once per file. Used
+// by both the manual /convert handler and the auto-trigger hook —
+// keeps the "what lang for this file" policy in a single place.
+func (a *App) NewAudioLangPicker() func(*models.LocalFile) string {
+	def, anime := a.AudioLangPrefs()
+	return func(f *models.LocalFile) string {
+		if a.IsAnime(f.MediaType, f.TMDBID) {
+			return anime
+		}
+		return def
+	}
 }
 
 // ApplyLibraryDir is the hot-swap path the admin UI hits when the user

@@ -79,7 +79,12 @@ func ConvertSnapshot() ConvertProgress {
 
 // TryStartConvertBatch kicks off a batch in a goroutine. Returns false
 // if a batch is already running.
-func TryStartConvertBatch(store *db.Database) bool {
+//
+// pickLang (optional, may be nil) lets the caller decide which audio
+// language to put first per file. Used to play films in VF and anime
+// in VO from the same library — without re-encoding, just by
+// reordering the audio map.
+func TryStartConvertBatch(store *db.Database, pickLang func(*models.LocalFile) string) bool {
 	convertMu.Lock()
 	if convertState.Running {
 		convertMu.Unlock()
@@ -93,7 +98,7 @@ func TryStartConvertBatch(store *db.Database) bool {
 	}
 	convertMu.Unlock()
 
-	go runConvertBatch(ctx, store)
+	go runConvertBatch(ctx, store, pickLang)
 	return true
 }
 
@@ -106,7 +111,7 @@ func CancelConvertBatch() {
 	}
 }
 
-func runConvertBatch(ctx context.Context, store *db.Database) {
+func runConvertBatch(ctx context.Context, store *db.Database, pickLang func(*models.LocalFile) string) {
 	defer func() {
 		convertMu.Lock()
 		convertState.Running = false
@@ -153,7 +158,14 @@ func runConvertBatch(ctx context.Context, store *db.Database) {
 		convertState.CurrentFileDur = 0
 		convertMu.Unlock()
 
-		outcome, errMsg := convertOne(ctx, f.Path)
+		// Decide audio order per file. nil picker = leave order
+		// untouched (legacy behaviour).
+		preferredLang := ""
+		if pickLang != nil {
+			preferredLang = pickLang(f)
+		}
+
+		outcome, errMsg := convertOne(ctx, f.Path, preferredLang)
 
 		convertMu.Lock()
 		switch outcome {
@@ -185,7 +197,7 @@ func runConvertBatch(ctx context.Context, store *db.Database) {
 //   - Returns "skipped" → a .mp4 with the same basename already exists
 //                         (we don't overwrite, the user can clean up)
 //   - Returns "failed"  → ffmpeg/output/delete error; errMsg explains
-func convertOne(ctx context.Context, mkvPath string) (outcome, errMsg string) {
+func convertOne(ctx context.Context, mkvPath, preferredAudioLang string) (outcome, errMsg string) {
 	srcInfo, err := os.Stat(mkvPath)
 	if err != nil {
 		return "failed", "source missing: " + err.Error()
@@ -232,13 +244,25 @@ func convertOne(ctx context.Context, mkvPath string) (outcome, errMsg string) {
 		"-c:v", "copy", // bit-perfect video copy
 		"-map_metadata", "0",
 		"-map", "0:v:0",
-		// `-map 0:a?` keeps ALL audio tracks (?  = no-op when there
-		// are none). Releases tagged "MULTi" / "VFF+VO" typically
-		// pack the French and English tracks side-by-side; the old
-		// `-map 0:a:0?` dropped everything past the first track,
-		// which for some release groups was actually the VO and
-		// silently lost the VFF after conversion.
-		"-map", "0:a?",
+	}
+
+	// Audio mapping. We always map ALL audio tracks (no language
+	// dropped — keeps VF, VO etc all available), but REORDER so the
+	// preferred language lands at a:0. Chrome and Firefox play the
+	// first audio track by default, so this means the user's chosen
+	// lang plays automatically without any client-side switching.
+	//
+	// If no preferred lang was provided, or no matching track was
+	// found, we fall back to the source order via `-map 0:a?`.
+	audioOrder := orderAudioByPreference(ctx, mkvPath, preferredAudioLang)
+	if len(audioOrder) > 0 {
+		for _, idx := range audioOrder {
+			args = append(args, "-map", fmt.Sprintf("0:a:%d", idx))
+		}
+		log.Printf("convert: %s — audio order [%s], preferred=%q",
+			filepath.Base(mkvPath), joinInts(audioOrder), preferredAudioLang)
+	} else {
+		args = append(args, "-map", "0:a?")
 	}
 
 	// Subtitles — map only TEXT-based subtitle streams. MP4 supports
@@ -402,6 +426,138 @@ func probeFirstStreamCodec(ctx context.Context, path, selector string) string {
 func isHEVC(codec string) bool {
 	c := strings.ToLower(codec)
 	return c == "hevc" || c == "h265" || c == "h.265"
+}
+
+// orderAudioByPreference returns the audio-stream indices (a:N) in
+// the order they should be muxed into the output MP4. The preferred
+// language (ISO 639-2 code) lands at a:0; the rest follow in source
+// order.
+//
+// Returns nil if:
+//   - preferredLang is empty (caller falls back to `-map 0:a?`)
+//   - ffprobe fails or finds no audio
+// In both cases the caller proceeds with default source ordering.
+func orderAudioByPreference(ctx context.Context, path, preferredLang string) []int {
+	if strings.TrimSpace(preferredLang) == "" {
+		return nil
+	}
+	streams := probeAudioStreams(ctx, path)
+	if len(streams) == 0 {
+		return nil
+	}
+	prefLower := strings.ToLower(strings.TrimSpace(preferredLang))
+	preferredIdx := -1
+	for _, s := range streams {
+		if matchLangCode(s.Lang, prefLower) {
+			preferredIdx = s.Idx
+			break
+		}
+	}
+	if preferredIdx < 0 {
+		// Preferred language not present in this file. Leave source
+		// order alone — telling the caller to use `-map 0:a?`.
+		return nil
+	}
+	out := make([]int, 0, len(streams))
+	out = append(out, preferredIdx)
+	for _, s := range streams {
+		if s.Idx != preferredIdx {
+			out = append(out, s.Idx)
+		}
+	}
+	return out
+}
+
+type audioStreamInfo struct {
+	Idx  int
+	Lang string
+	Codec string
+}
+
+// probeAudioStreams returns one entry per audio stream in source order
+// (a:0 first, a:1 second, …). Lang is the ISO code from the stream's
+// language tag, lower-cased, or "" if untagged.
+func probeAudioStreams(ctx context.Context, path string) []audioStreamInfo {
+	cmd := exec.CommandContext(ctx, "ffprobe",
+		"-v", "error",
+		"-select_streams", "a",
+		"-show_entries", "stream=codec_name:stream_tags=language",
+		"-of", "json",
+		path,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var probe struct {
+		Streams []struct {
+			CodecName string `json:"codec_name"`
+			Tags      struct {
+				Language string `json:"language"`
+			} `json:"tags"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(out, &probe); err != nil {
+		return nil
+	}
+	res := make([]audioStreamInfo, 0, len(probe.Streams))
+	for i, s := range probe.Streams {
+		res = append(res, audioStreamInfo{
+			Idx:   i,
+			Lang:  strings.ToLower(strings.TrimSpace(s.Tags.Language)),
+			Codec: strings.ToLower(s.CodecName),
+		})
+	}
+	return res
+}
+
+// matchLangCode is forgiving across the two ISO 639 variants. ffmpeg
+// usually writes 639-2/B ("fre"/"ger"/"jpn") but some encoders use
+// 639-2/T ("fra"/"deu"/"jpn") or 639-1 ("fr"/"de"/"ja").
+func matchLangCode(streamLang, want string) bool {
+	if streamLang == "" || want == "" {
+		return false
+	}
+	if streamLang == want {
+		return true
+	}
+	// Alias map: code (any of these) → all of these.
+	aliases := [][]string{
+		{"fre", "fra", "fr"},
+		{"eng", "en"},
+		{"jpn", "ja"},
+		{"spa", "es"},
+		{"ger", "deu", "de"},
+		{"ita", "it"},
+		{"chi", "zho", "zh"},
+		{"kor", "ko"},
+		{"por", "pt"},
+		{"rus", "ru"},
+	}
+	for _, group := range aliases {
+		inWant := false
+		inStream := false
+		for _, code := range group {
+			if code == want {
+				inWant = true
+			}
+			if code == streamLang {
+				inStream = true
+			}
+		}
+		if inWant && inStream {
+			return true
+		}
+	}
+	return false
+}
+
+func joinInts(xs []int) string {
+	parts := make([]string, len(xs))
+	for i, x := range xs {
+		parts[i] = strconv.Itoa(x)
+	}
+	return strings.Join(parts, ",")
 }
 
 // probeTextSubtitleStreams returns the subtitle-stream indices (s:N)

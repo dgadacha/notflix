@@ -360,6 +360,36 @@ func (h *Handler) HandleSetAutoConvert(c echo.Context) error {
 	return RespondOK(c, map[string]any{"enabled": body.Enabled})
 }
 
+// HandleGetAudioLangPrefs — GET /api/v1/local-library/audio-langs
+// Returns the two preferred audio language codes (default + anime).
+func (h *Handler) HandleGetAudioLangPrefs(c echo.Context) error {
+	def, anime := h.App.AudioLangPrefs()
+	return RespondOK(c, map[string]any{
+		"default": def,
+		"anime":   anime,
+	})
+}
+
+// HandleSetAudioLangPrefs — PUT /api/v1/local-library/audio-langs
+// Body: {"default":"fre","anime":"jpn"} (ISO 639-2 codes).
+func (h *Handler) HandleSetAudioLangPrefs(c echo.Context) error {
+	var body struct {
+		Default string `json:"default"`
+		Anime   string `json:"anime"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return RespondErr(c, err)
+	}
+	if err := h.App.ApplyAudioLangPrefs(body.Default, body.Anime); err != nil {
+		return RespondErr(c, err)
+	}
+	def, anime := h.App.AudioLangPrefs()
+	return RespondOK(c, map[string]any{
+		"default": def,
+		"anime":   anime,
+	})
+}
+
 // HandleConvertMKVs — POST /api/v1/local-library/convert
 //
 // Kicks off a batch that walks every .mkv row in the DB, remuxes it
@@ -373,7 +403,7 @@ func (h *Handler) HandleConvertMKVs(c echo.Context) error {
 			"error": "library dir not configured",
 		})
 	}
-	if !library.TryStartConvertBatch(h.App.Database) {
+	if !library.TryStartConvertBatch(h.App.Database, h.App.NewAudioLangPicker()) {
 		return c.JSON(http.StatusConflict, map[string]any{
 			"error": "conversion already running",
 		})
