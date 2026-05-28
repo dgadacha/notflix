@@ -59,22 +59,31 @@ import { FiLoader } from "react-icons/fi"
 
 type Phase = "searching" | "picking" | "preparing" | "preparing_subs" | "playing" | "error"
 
+/** Top-level /watch route. Picks between the local-library player and
+ *  the full TMDB → Prowlarr → TorBox flow based on the URL params.
+ *
+ *  This indirection exists for a Rules-of-Hooks reason: TanStack Router
+ *  reuses the same component instance for the /watch route across
+ *  search-param changes. If we did the localId branch + early return
+ *  inside the same component as the TorBox flow, the hook count would
+ *  swing from "3" (localId mode) to "~25" (TorBox mode) between
+ *  renders, and React errors out with "Rendered more hooks than during
+ *  the previous render". By dispatching to a sub-component, each one
+ *  has a stable hook count. */
 export default function WatchPage() {
-    const { t } = useTranslation()
-    const router = useRouter()
     const searchParams = useSearchParams()
-
-    // ── Local library branch ────────────────────────────────────────
-    // /watch?localId=N skips the whole TMDB-detail → Prowlarr → TorBox
-    // flow entirely. The file lives on disk; we stream it directly
-    // through the local-library endpoint with native <video src>.
-    // Anything more elaborate (HLS transmux of local files for browser-
-    // unfriendly codecs) is a follow-up.
     const localIdParam = searchParams.get("localId")
     const localIdNum = localIdParam ? parseInt(localIdParam, 10) : NaN
     if (!Number.isNaN(localIdNum)) {
         return <LocalWatch localId={localIdNum} />
     }
+    return <TorBoxWatchPage />
+}
+
+function TorBoxWatchPage() {
+    const { t } = useTranslation()
+    const router = useRouter()
+    const searchParams = useSearchParams()
 
     const idParam = searchParams.get("id")
     const typeParam = (searchParams.get("type") as "movie" | "tv" | null) ?? "movie"
