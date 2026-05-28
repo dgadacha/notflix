@@ -366,6 +366,7 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
                     selectedSeason={selectedSeason}
                     onChangeSeason={setSelectedSeason}
                     onPickEpisode={onPlayEpisode}
+                    localFiles={localFilesForTitle}
                 />
             )}
 
@@ -479,12 +480,16 @@ function EpisodeList({
     selectedSeason,
     onChangeSeason,
     onPickEpisode,
+    localFiles,
 }: {
     tvId: number
     seasons: SeasonSummary[]
     selectedSeason: number
     onChangeSeason: (n: number) => void
     onPickEpisode: (season: number, episode: number) => void
+    /** Files on disk for the same TMDB show — used to tag rows with
+     *  a "Local" badge. Empty array when nothing is scanned. */
+    localFiles: LocalFile[]
 }) {
     const { t } = useTranslation()
     const { data: seasonDetail, isLoading, isFetching } = useTMDBSeason(tvId, selectedSeason)
@@ -523,21 +528,38 @@ function EpisodeList({
                 </p>
             ) : (
                 <ul className="-mx-1">
-                    {episodes.map(ep => (
-                        <li key={ep.id}>
-                            <EpisodeRow
-                                episode={ep}
-                                onClick={() => onPickEpisode(selectedSeason, ep.episode_number)}
-                            />
-                        </li>
-                    ))}
+                    {episodes.map(ep => {
+                        // O(n × m) but episode lists are small (~24 max)
+                        // and localFiles is filtered to this show.
+                        const isLocal = localFiles.some(
+                            f => f.season === selectedSeason && f.episode === ep.episode_number,
+                        )
+                        return (
+                            <li key={ep.id}>
+                                <EpisodeRow
+                                    episode={ep}
+                                    isLocal={isLocal}
+                                    onClick={() => onPickEpisode(selectedSeason, ep.episode_number)}
+                                />
+                            </li>
+                        )
+                    })}
                 </ul>
             )}
         </section>
     )
 }
 
-function EpisodeRow({ episode, onClick }: { episode: TMDBEpisode; onClick: () => void }) {
+function EpisodeRow({
+    episode,
+    onClick,
+    isLocal,
+}: {
+    episode: TMDBEpisode
+    onClick: () => void
+    isLocal?: boolean
+}) {
+    const { t } = useTranslation()
     const thumb = tmdbImage("w300", episode.still_path)
     // Mark episodes whose air_date is still in the future — they exist in
     // TMDB's catalogue but Prowlarr won't have a release for them yet.
@@ -578,6 +600,25 @@ function EpisodeRow({ episode, onClick }: { episode: TMDBEpisode; onClick: () =>
                 {episode.runtime != null && episode.runtime > 0 && (
                     <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/80 text-white text-[10px] font-semibold">
                         {episode.runtime} min
+                    </span>
+                )}
+                {/* "LOCAL" badge — top-left. Tells the user this episode
+                    will play from disk instead of triggering Prowlarr.
+                    Matches the green-on-dark style of the "Local" pill
+                    next to the main Lecture button. */}
+                {isLocal && (
+                    <span
+                        className={cn(
+                            "absolute top-1 left-1 inline-flex items-center gap-1",
+                            "px-1.5 py-0.5 rounded",
+                            "bg-emerald-500/85 text-white",
+                            "text-[9px] font-bold uppercase tracking-wider",
+                            "shadow-[0_1px_2px_rgba(0,0,0,0.6)]",
+                        )}
+                        title={t("modal.local_available", "Disponible dans ta bibliothèque locale")}
+                    >
+                        <span className="size-1 rounded-full bg-white" />
+                        {t("modal.local_badge", "Local")}
                     </span>
                 )}
             </div>
