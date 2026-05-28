@@ -86,6 +86,10 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	lib := v1.Group("/local-library")
 	lib.GET("", h.HandleListLocalLibrary)
 	lib.GET("/stream/:id", h.HandleStreamLocalFile)
+	// Single-pipe ffmpeg transmux — for MKV with non-native audio
+	// (AC3/EAC3/DTS) where direct stream wouldn't play. Bypasses HLS
+	// chunking entirely; the browser gets a continuous fMP4 stream.
+	lib.GET("/transmux/:id", h.HandleTransmuxLocalFile)
 	// SSE stream — pushes "a new file landed in your library" events
 	// to every logged-in browser. Doesn't need admin: the toast is
 	// useful for all viewers (even if only the admin can trigger scans).

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -327,6 +328,148 @@ func (h *Handler) HandleStreamLocalFile(c echo.Context) error {
 	// since the row is unique per path. Re-scan would change the id.
 	c.Response().Header().Set("Cache-Control", "private, max-age=86400")
 	return c.File(absFile)
+}
+
+// -----------------------------------------------------------------------------
+// Pipe transmux — single-pipe ffmpeg for local files
+// -----------------------------------------------------------------------------
+
+// HandleTransmuxLocalFile — GET /api/v1/local-library/transmux/:id
+//
+// Single-pipe ffmpeg → fragmented MP4 streamed straight to the browser.
+// Used for local MKV files whose audio codec (AC3/EAC3/DTS/TrueHD) the
+// browser can't decode natively.
+//
+// Why a single pipe instead of HLS chunked:
+//   - HLS chunked with `-c:v copy` requires every segment to start on
+//     a keyframe. Source keyframes rarely align to multiples of the
+//     segment duration → boundaries fall mid-GOP → missing frames,
+//     visible skips. The chunked path also spawns one ffmpeg per
+//     segment which adds CPU + latency per chunk.
+//   - A single pipe reads the source linearly, copies video bit-perfect,
+//     transmuxes audio to AAC on the fly, and emits fragmented MP4
+//     boxes as they're ready. The browser plays it like any other
+//     <video src> — buffering is browser-native.
+//
+// Seek model:
+//   - Forward seek inside the buffered range: handled natively by the
+//     browser, no server involvement.
+//   - Backward seek inside the buffered range: same.
+//   - Seek OUTSIDE the buffered range: the frontend reloads the src
+//     with `?t=<targetSeconds>` so a fresh ffmpeg starts at that
+//     position. This causes a brief pause but plays from the new
+//     position cleanly.
+//
+// Audio handling: always transmuxed (`-c:a aac -b:a 192k -ac 2`)
+// with `aresample=async=1000` to keep audio aligned with video
+// timestamps across the lifetime of the stream. Video is bit-perfect
+// copied; we never re-encode the picture.
+func (h *Handler) HandleTransmuxLocalFile(c echo.Context) error {
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	f, err := h.App.Database.GetLocalFile(uint(id))
+	if err != nil {
+		return c.NoContent(http.StatusNotFound)
+	}
+
+	// Re-anchor under the configured library dir (same security check
+	// as the raw stream endpoint).
+	configuredDir := strings.TrimSpace(h.App.Config.Library.Dir)
+	if configuredDir == "" {
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{
+			"error": "library dir not configured",
+		})
+	}
+	absDir, err := filepath.Abs(configuredDir)
+	if err != nil {
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	absFile, err := filepath.Abs(f.Path)
+	if err != nil {
+		return c.NoContent(http.StatusInternalServerError)
+	}
+	rel, err := filepath.Rel(absDir, absFile)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return c.JSON(http.StatusForbidden, map[string]any{
+			"error": "file outside configured library dir",
+		})
+	}
+	if _, err := os.Stat(absFile); err != nil {
+		return c.JSON(http.StatusNotFound, map[string]any{
+			"error": "file no longer exists on disk",
+		})
+	}
+
+	// Parse the seek-to position. 0 = start of file.
+	startSec := 0.0
+	if t := c.QueryParam("t"); t != "" {
+		if v, err := strconv.ParseFloat(t, 64); err == nil && v > 0 {
+			startSec = v
+		}
+	}
+
+	// Stream headers. No Range support — a pipe can't seek backwards.
+	// The frontend handles "seek outside buffer" by reloading the src
+	// with a new ?t= value, which spawns a fresh ffmpeg at that
+	// position.
+	resp := c.Response()
+	resp.Header().Set("Content-Type", "video/mp4")
+	resp.Header().Set("Cache-Control", "no-cache, no-store")
+	resp.Header().Set("Accept-Ranges", "none")
+	resp.WriteHeader(http.StatusOK)
+
+	args := []string{
+		"-hide_banner",
+		"-loglevel", "error",
+	}
+	if startSec > 0 {
+		// -ss before -i = fast seek (keyframe-aligned). Off by a few
+		// hundred ms typically, which is fine for "user seeked here".
+		args = append(args, "-ss", fmt.Sprintf("%.3f", startSec))
+	}
+	args = append(args,
+		"-i", absFile,
+		// Video: bit-perfect copy. We never re-encode the picture.
+		"-c:v", "copy",
+		// Audio: transmux to AAC stereo with drift correction so the
+		// audio doesn't slide against the video over time.
+		"-c:a", "aac",
+		"-b:a", "192k",
+		"-ac", "2",
+		"-af", "aresample=async=1000",
+		// fMP4 streaming flags:
+		//   empty_moov         : no leading moov; metadata in fragments
+		//   frag_keyframe      : new fragment on every video keyframe
+		//   default_base_moof  : timestamps relative to moof (not file)
+		//   omit_tfhd_offset   : don't write absolute byte offsets
+		"-movflags", "+frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset",
+		// Force fragment cadence even when the source has long GOPs.
+		// One second = decent UX without too many tiny fragments.
+		"-frag_duration", "1000000",
+		"-f", "mp4",
+		"pipe:1",
+	)
+
+	ctx := c.Request().Context()
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	cmd.Stdout = resp.Writer
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		// If the context was cancelled (client disconnected), that's
+		// expected and not really an error.
+		if ctx.Err() != nil {
+			return nil
+		}
+		// We've already written 200 OK + started piping, so we can't
+		// return a JSON error. Just log + close.
+		fmt.Printf("transmux %d: ffmpeg failed: %v | %s\n", id, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // Compile-time link check: ensure core.SettingLibraryDir is exported

@@ -2079,96 +2079,95 @@ function LocalWatch({ localId }: { localId: number }) {
     const { data: file, isLoading, error } = useLocalFile(localId)
     const videoRef = React.useRef<HTMLVideoElement>(null)
 
-    // HLS session bootstrap. We always go through the transmux pipeline
-    // for local files: MKV releases routinely carry AC-3 / E-AC-3 / DTS
-    // audio that Chrome and Firefox can't decode natively (video plays,
-    // audio is silent). HLS re-encodes the audio to AAC server-side
-    // with -c:v copy, so the video stream is bit-perfect and the audio
-    // works everywhere. ~1 s of ffmpeg cold-start, then on-demand
-    // chunks like the TorBox flow.
-    const [playlistUrl, setPlaylistUrl] = React.useState<string | null>(null)
-    const [startErr, setStartErr] = React.useState<string | null>(null)
+    // Single-pipe ffmpeg transmux instead of HLS chunked. The HLS
+    // chunked path was buggy on MKV with non-AAC audio:
+    //   - chunks didn't always start on a keyframe → visible skips
+    //   - one ffmpeg per chunk → buffering spikes between segments
+    //   - audio drifted progressively against video over time
+    //
+    // The new pipe endpoint reads the source linearly, copies video
+    // bit-perfect, transmuxes audio to AAC on the fly, and emits
+    // fragmented MP4 boxes directly to <video src>. The browser
+    // handles buffering natively.
+    //
+    // Seek model:
+    //   - Inside the buffered range → browser-native, instant.
+    //   - Outside the buffered range → we detect it via the `seeking`
+    //     event, reload the src with ?t=<targetSec> so a fresh ffmpeg
+    //     starts at that position. Causes a ~1 s pause but plays
+    //     cleanly from the new spot.
+    //
+    // playOffsetSec is the t= currently passed to the server. Time
+    // shown / accumulated client-side is video.currentTime + offset.
+    const [playOffsetSec, setPlayOffsetSec] = React.useState(resumeSec)
+    const transmuxUrl = `/api/v1/local-library/transmux/${localId}${
+        playOffsetSec > 0 ? `?t=${playOffsetSec}` : ""
+    }`
+
+    // Attach the src and play. We DON'T put the URL in the JSX
+    // <video src={...}> because that would let React tear it down /
+    // rebuild on every render; instead we manage it imperatively so
+    // a seek-reload doesn't bounce the entire element.
     React.useEffect(() => {
-        let cancelled = false
-        setPlaylistUrl(null)
-        setStartErr(null)
-        ;(async () => {
-            try {
-                const r = await fetch("/api/v1/stream/hls/start", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ localId }),
-                })
-                if (!r.ok) {
-                    const j = await r.json().catch(() => ({}))
-                    throw new Error(j.error ?? `hls/start ${r.status}`)
+        const v = videoRef.current
+        if (!v) return
+        v.src = transmuxUrl
+        v.load()
+        const onCanPlay = () => {
+            // play() returns a promise that rejects if autoplay is
+            // blocked — swallow it, the controls let the user click.
+            void v.play().catch(() => {})
+        }
+        v.addEventListener("canplay", onCanPlay, { once: true })
+        return () => v.removeEventListener("canplay", onCanPlay)
+    }, [transmuxUrl])
+
+    // Out-of-buffer seek detection. When the user grabs the timeline
+    // and drops it outside `video.buffered`, we reload the source
+    // with a new ?t= so ffmpeg restarts at that position.
+    React.useEffect(() => {
+        const v = videoRef.current
+        if (!v) return
+        const onSeeking = () => {
+            const target = v.currentTime
+            const buf = v.buffered
+            let inBuffer = false
+            for (let i = 0; i < buf.length; i++) {
+                // Tiny epsilon so a seek to exactly the edge counts
+                // as in-buffer.
+                if (target >= buf.start(i) - 0.1 && target <= buf.end(i) + 0.1) {
+                    inBuffer = true
+                    break
                 }
-                const j = await r.json()
-                const data = j.data ?? j
-                if (cancelled) return
-                setPlaylistUrl(data.playlistUrl as string)
-            } catch (e) {
-                if (!cancelled) setStartErr((e as Error).message)
             }
-        })()
-        return () => { cancelled = true }
-    }, [localId])
-
-    // Attach hls.js (or native HLS on Safari) once we have the
-    // playlist URL. Same config patterns as the TorBox Player —
-    // generous buffer, instant start on source variant, retry on
-    // transient chunk errors.
-    React.useEffect(() => {
-        const video = videoRef.current
-        if (!video || !playlistUrl) return
-        let hls: Hls | null = null
-        if (Hls.isSupported()) {
-            hls = new Hls({
-                maxBufferLength: 120,
-                maxMaxBufferLength: 240,
-                backBufferLength: 60,
-                abrEwmaDefaultEstimate: 50_000_000,
-                startLevel: -1,
-                startFragPrefetch: true,
-                fragLoadingTimeOut: 60_000,
-                manifestLoadingTimeOut: 30_000,
-                levelLoadingTimeOut: 30_000,
-                fragLoadingMaxRetry: 6,
-                fragLoadingMaxRetryTimeout: 60_000,
-            })
-            hls.loadSource(playlistUrl)
-            hls.attachMedia(video)
-            hls.on(Hls.Events.ERROR, (_, data) => {
-                if (!data.fatal) return
-                console.error("[Notflix] local hls fatal", data)
-            })
-        } else {
-            // Safari + iOS Chrome have native HLS.
-            video.src = playlistUrl
+            if (!inBuffer) {
+                // Translate target time (which is relative to the
+                // current ffmpeg pipe, which itself started at
+                // playOffsetSec) into an absolute file timestamp.
+                const absolute = target + 0 // pipe always starts at 0 with -ss applied server-side
+                setPlayOffsetSec(Math.max(0, Math.floor(absolute)))
+            }
         }
-        return () => {
-            hls?.destroy()
-            video.removeAttribute("src")
-            video.load()
-        }
-    }, [playlistUrl])
+        v.addEventListener("seeking", onSeeking)
+        return () => v.removeEventListener("seeking", onSeeking)
+    }, [])
 
-    // Resume position — applied once on the first loadedmetadata.
-    const resumeRef = React.useRef(resumeSec)
-    React.useEffect(() => { resumeRef.current = resumeSec }, [resumeSec])
+    // Resume position from URL ?t= — only on the very first mount.
+    // Subsequent reloads (via the seek-out-of-buffer path) already
+    // start at the desired position thanks to ?t= on the URL itself.
+    const initialResumeRef = React.useRef(resumeSec)
     React.useEffect(() => {
         const v = videoRef.current
         if (!v) return
         const onLoaded = () => {
-            const r = resumeRef.current
-            if (r > 0 && Number.isFinite(v.duration) && r < v.duration) {
-                v.currentTime = r
-                resumeRef.current = 0
-            }
+            // After a reload-with-?t=, currentTime is 0 (the pipe's
+            // local time). No client-side seek needed — the server
+            // already started at the right place.
+            initialResumeRef.current = 0
         }
         v.addEventListener("loadedmetadata", onLoaded)
         return () => v.removeEventListener("loadedmetadata", onLoaded)
-    }, [playlistUrl])
+    }, [transmuxUrl])
 
     if (isLoading) {
         return (
@@ -2241,26 +2240,10 @@ function LocalWatch({ localId }: { localId: number }) {
                 <div className="absolute top-3 right-3 z-[60] bg-black/70 backdrop-blur-sm rounded-md px-3 py-1.5 text-white text-xs font-semibold max-w-[60vw] truncate">
                     {displayTitle}
                 </div>
-                {/* Bootstrap states — before hls.js attaches we either
-                    show a spinner (waiting on /hls/start) or an error
-                    panel. Once playlistUrl is set the <video> element
-                    takes over. */}
-                {!playlistUrl && !startErr && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 z-[40] pointer-events-none">
-                        <div className="size-10 rounded-full border-4 border-white/10 border-t-brand-500 animate-spin" />
-                        <p className="text-white/70 text-xs">
-                            {t("watch.local_preparing", "Préparation du flux…")}
-                        </p>
-                    </div>
-                )}
-                {startErr && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 z-[40] px-6 text-center">
-                        <p className="text-red-300 text-sm font-semibold">
-                            {t("watch.local_hls_failed", "Préparation du flux échouée")}
-                        </p>
-                        <p className="text-[--muted] text-xs max-w-md break-words">{startErr}</p>
-                    </div>
-                )}
+                {/* No bootstrap spinner — the <video> element shows
+                    its own loading state through the controls and
+                    starts piping data as soon as ffmpeg flushes the
+                    init segment (~ 1 s). */}
                 <video
                     ref={videoRef}
                     autoPlay
