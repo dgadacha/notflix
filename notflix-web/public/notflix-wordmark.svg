@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 552 140" role="img" aria-label="Notflix">
+  <!--
+    Notflix wordmark — original geometric construction.
+
+    Bold condensed sans-serif drawn as paths so it renders identically
+    across browsers without depending on any installed typeface.
+
+    Design choices (deliberately distinct from any specific streaming
+    brand's existing logo):
+      - 90° square corners throughout (no curved bottoms, no skew)
+      - Uniform stroke widths: 24 for verticals, ~22 for horizontals
+      - Letter widths: 80 for the standard glyphs, 24 for the I
+      - Letter spacing: 8 px between glyphs
+      - Cap height: 140
+      - Single fill colour #E50914 (the project's brand red)
+
+    Aspect ratio ≈ 3.94 : 1 — fits well in a navbar at h-7 (28 px) or
+    h-9 (36 px) with width:auto.
+  -->
+  <g fill="#E50914">
+    <!-- N -->
+    <path d="M0 0 L24 0 L56 100 L56 0 L80 0 L80 140 L56 140 L24 40 L24 140 L0 140 Z"/>
+    <!-- O — rectangular ring via even-odd fill -->
+    <path fill-rule="evenodd" d="M88 0 L168 0 L168 140 L88 140 Z M112 24 L112 116 L144 116 L144 24 Z"/>
+    <!-- T -->
+    <path d="M176 0 L256 0 L256 24 L228 24 L228 140 L204 140 L204 24 L176 24 Z"/>
+    <!-- F -->
+    <path d="M264 0 L344 0 L344 24 L288 24 L288 58 L324 58 L324 82 L288 82 L288 140 L264 140 Z"/>
+    <!-- L -->
+    <path d="M352 0 L376 0 L376 116 L432 116 L432 140 L352 140 Z"/>
+    <!-- I -->
+    <path d="M440 0 L464 0 L464 140 L440 140 Z"/>
+    <!-- X — two crossing parallelograms -->
+    <path d="M472 0 L498 0 L552 140 L526 140 Z M526 0 L552 0 L498 140 L472 140 Z"/>
+  </g>
+</svg>

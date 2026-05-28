@@ -52,9 +52,20 @@ export function NetflixTopBar() {
             )}
         >
             <div className="flex items-center h-16 lg:h-[68px] px-3 sm:px-6 lg:px-12 gap-2 sm:gap-4 lg:gap-10">
-                <SeaLink href="/" className="flex items-center gap-2 shrink-0">
-                    <img src="/notflix-logo.svg" alt="Notflix" className="size-8 lg:size-9" />
-                    <span className="hidden sm:inline text-lg lg:text-xl font-extrabold text-white tracking-tight">NOTFLIX</span>
+                <SeaLink href="/" className="flex items-center shrink-0">
+                    {/* On mobile (< sm) the N mark is enough — keeps the
+                        navbar compact. From sm up we show the wordmark
+                        which already says "NOTFLIX" in its glyphs. */}
+                    <img
+                        src="/notflix-logo.svg"
+                        alt="Notflix"
+                        className="size-8 sm:hidden"
+                    />
+                    <img
+                        src="/notflix-wordmark.svg"
+                        alt="Notflix"
+                        className="hidden sm:block h-7 lg:h-9 w-auto"
+                    />
                 </SeaLink>
 
                 {/* Nav links hidden < sm — the bottom tab bar takes over. */}
