@@ -54,7 +54,7 @@ import { useRouter, useSearchParams } from "@/lib/navigation"
 import { toast } from "sonner"
 import React from "react"
 import { useTranslation } from "react-i18next"
-import { BiArrowBack, BiPlay, BiRefresh, BiSolidCheckCircle } from "react-icons/bi"
+import { BiArrowBack, BiExitFullscreen, BiFullscreen, BiPause, BiPlay, BiRefresh, BiSolidCheckCircle, BiVolumeFull, BiVolumeMute } from "react-icons/bi"
 import { FiLoader } from "react-icons/fi"
 
 type Phase = "searching" | "picking" | "preparing" | "preparing_subs" | "playing" | "error"
@@ -2071,103 +2071,246 @@ function useLocalFile(id: number) {
     })
 }
 
+/**
+ * LocalScrubBar — Netflix-style timeline with buffered indicator.
+ * Click anywhere to seek; the parent decides if the target is in the
+ * current pipe's buffer (instant) or needs a pipe restart.
+ */
+function LocalScrubBar({
+    currentAbs,
+    bufferedAbsEnd,
+    duration,
+    onSeek,
+}: {
+    currentAbs: number
+    bufferedAbsEnd: number
+    duration: number
+    onSeek: (absSec: number) => void
+}) {
+    const barRef = React.useRef<HTMLDivElement>(null)
+    const [hoverPct, setHoverPct] = React.useState<number | null>(null)
+
+    const pctOf = (v: number) =>
+        duration > 0 ? Math.max(0, Math.min(100, (v / duration) * 100)) : 0
+    const playedPct = pctOf(currentAbs)
+    const bufferedPct = pctOf(bufferedAbsEnd)
+
+    const handleClick = (e: React.MouseEvent) => {
+        const bar = barRef.current
+        if (!bar || duration <= 0) return
+        const r = bar.getBoundingClientRect()
+        const pct = (e.clientX - r.left) / r.width
+        onSeek(pct * duration)
+    }
+    const handleMove = (e: React.MouseEvent) => {
+        const bar = barRef.current
+        if (!bar) return
+        const r = bar.getBoundingClientRect()
+        const pct = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * 100
+        setHoverPct(pct)
+    }
+
+    return (
+        <div
+            ref={barRef}
+            onClick={handleClick}
+            onMouseMove={handleMove}
+            onMouseLeave={() => setHoverPct(null)}
+            className="relative h-1.5 hover:h-2 bg-white/20 rounded-full cursor-pointer transition-all group/bar"
+        >
+            {/* Buffered ahead. */}
+            <div
+                className="absolute inset-y-0 left-0 bg-white/40 rounded-full"
+                style={{ width: `${bufferedPct}%` }}
+            />
+            {/* Played. */}
+            <div
+                className="absolute inset-y-0 left-0 bg-brand-500 rounded-full"
+                style={{ width: `${playedPct}%` }}
+            />
+            {/* Hover position indicator. */}
+            {hoverPct !== null && (
+                <div
+                    className="absolute inset-y-0 w-px bg-white/70 pointer-events-none"
+                    style={{ left: `${hoverPct}%` }}
+                />
+            )}
+            {/* Scrub handle. */}
+            <div
+                className="absolute size-3 rounded-full bg-brand-500 shadow-md -translate-x-1/2 -translate-y-1/4 opacity-0 group-hover/bar:opacity-100 transition-opacity"
+                style={{ left: `${playedPct}%` }}
+            />
+        </div>
+    )
+}
+
+type LocalProbe = { duration: number; audioCodec: string; videoCodec: string }
+
+function useLocalFileProbe(localId: number) {
+    return useQuery<LocalProbe>({
+        queryKey: ["local-library", "probe", localId],
+        queryFn: async () => {
+            const r = await fetch(`/api/v1/local-library/probe/${localId}`)
+            if (!r.ok) throw new Error(`probe ${r.status}`)
+            const j = await r.json()
+            return (j.data ?? j) as LocalProbe
+        },
+        staleTime: 60 * 60_000, // duration doesn't change for a static file
+    })
+}
+
+function fmtTime(sec: number): string {
+    if (!Number.isFinite(sec) || sec < 0) return "0:00"
+    const s = Math.floor(sec)
+    const h = Math.floor(s / 3600)
+    const m = Math.floor((s % 3600) / 60)
+    const r = s % 60
+    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`
+    return `${m}:${String(r).padStart(2, "0")}`
+}
+
 function LocalWatch({ localId }: { localId: number }) {
     const { t } = useTranslation()
     const router = useRouter()
     const searchParams = useSearchParams()
     const resumeSec = parseInt(searchParams.get("t") ?? "0", 10) || 0
     const { data: file, isLoading, error } = useLocalFile(localId)
+    const { data: probe } = useLocalFileProbe(localId)
     const videoRef = React.useRef<HTMLVideoElement>(null)
+    const containerRef = React.useRef<HTMLDivElement>(null)
 
-    // Single-pipe ffmpeg transmux instead of HLS chunked. The HLS
-    // chunked path was buggy on MKV with non-AAC audio:
-    //   - chunks didn't always start on a keyframe → visible skips
-    //   - one ffmpeg per chunk → buffering spikes between segments
-    //   - audio drifted progressively against video over time
-    //
-    // The new pipe endpoint reads the source linearly, copies video
-    // bit-perfect, transmuxes audio to AAC on the fly, and emits
-    // fragmented MP4 boxes directly to <video src>. The browser
-    // handles buffering natively.
-    //
-    // Seek model:
-    //   - Inside the buffered range → browser-native, instant.
-    //   - Outside the buffered range → we detect it via the `seeking`
-    //     event, reload the src with ?t=<targetSec> so a fresh ffmpeg
-    //     starts at that position. Causes a ~1 s pause but plays
-    //     cleanly from the new spot.
-    //
-    // playOffsetSec is the t= currently passed to the server. Time
-    // shown / accumulated client-side is video.currentTime + offset.
+    // ABSOLUTE timeline = playOffsetSec (where the current ffmpeg pipe
+    // started in the source file) + video.currentTime (offset within
+    // the pipe's output). The custom UI displays + manipulates
+    // ABSOLUTE time; the <video> element only knows pipe-local time.
     const [playOffsetSec, setPlayOffsetSec] = React.useState(resumeSec)
+    const [videoLocalSec, setVideoLocalSec] = React.useState(0)
+    const [bufferedAbsEnd, setBufferedAbsEnd] = React.useState(0)
+    const [playing, setPlaying] = React.useState(false)
+    const [volume, setVolume] = React.useState(1)
+    const [muted, setMuted] = React.useState(false)
+    const [fullscreen, setFullscreen] = React.useState(false)
+    const [controlsShown, setControlsShown] = React.useState(true)
+    const totalDuration = probe?.duration ?? 0
+    const absoluteCurrent = playOffsetSec + videoLocalSec
+
     const transmuxUrl = `/api/v1/local-library/transmux/${localId}${
         playOffsetSec > 0 ? `?t=${playOffsetSec}` : ""
     }`
 
-    // Attach the src and play. We DON'T put the URL in the JSX
-    // <video src={...}> because that would let React tear it down /
-    // rebuild on every render; instead we manage it imperatively so
-    // a seek-reload doesn't bounce the entire element.
+    // Attach src imperatively so a re-seek (new playOffsetSec)
+    // doesn't tear down the React element tree.
     React.useEffect(() => {
         const v = videoRef.current
         if (!v) return
         v.src = transmuxUrl
         v.load()
         const onCanPlay = () => {
-            // play() returns a promise that rejects if autoplay is
-            // blocked — swallow it, the controls let the user click.
             void v.play().catch(() => {})
         }
         v.addEventListener("canplay", onCanPlay, { once: true })
         return () => v.removeEventListener("canplay", onCanPlay)
     }, [transmuxUrl])
 
-    // Out-of-buffer seek detection. When the user grabs the timeline
-    // and drops it outside `video.buffered`, we reload the source
-    // with a new ?t= so ffmpeg restarts at that position.
+    // Wire video element events into local state.
     React.useEffect(() => {
         const v = videoRef.current
         if (!v) return
-        const onSeeking = () => {
-            const target = v.currentTime
-            const buf = v.buffered
-            let inBuffer = false
-            for (let i = 0; i < buf.length; i++) {
-                // Tiny epsilon so a seek to exactly the edge counts
-                // as in-buffer.
-                if (target >= buf.start(i) - 0.1 && target <= buf.end(i) + 0.1) {
-                    inBuffer = true
-                    break
-                }
-            }
-            if (!inBuffer) {
-                // Translate target time (which is relative to the
-                // current ffmpeg pipe, which itself started at
-                // playOffsetSec) into an absolute file timestamp.
-                const absolute = target + 0 // pipe always starts at 0 with -ss applied server-side
-                setPlayOffsetSec(Math.max(0, Math.floor(absolute)))
+        const onTime = () => {
+            setVideoLocalSec(v.currentTime)
+            if (v.buffered.length > 0) {
+                setBufferedAbsEnd(playOffsetSec + v.buffered.end(v.buffered.length - 1))
             }
         }
-        v.addEventListener("seeking", onSeeking)
-        return () => v.removeEventListener("seeking", onSeeking)
+        const onPlay = () => setPlaying(true)
+        const onPause = () => setPlaying(false)
+        v.addEventListener("timeupdate", onTime)
+        v.addEventListener("progress", onTime)
+        v.addEventListener("play", onPlay)
+        v.addEventListener("pause", onPause)
+        return () => {
+            v.removeEventListener("timeupdate", onTime)
+            v.removeEventListener("progress", onTime)
+            v.removeEventListener("play", onPlay)
+            v.removeEventListener("pause", onPause)
+        }
+    }, [playOffsetSec])
+
+    // Volume control wiring.
+    React.useEffect(() => {
+        const v = videoRef.current
+        if (!v) return
+        v.volume = volume
+        v.muted = muted
+    }, [volume, muted])
+
+    // Fullscreen state mirror.
+    React.useEffect(() => {
+        const onFsChange = () => setFullscreen(!!document.fullscreenElement)
+        document.addEventListener("fullscreenchange", onFsChange)
+        return () => document.removeEventListener("fullscreenchange", onFsChange)
     }, [])
 
-    // Resume position from URL ?t= — only on the very first mount.
-    // Subsequent reloads (via the seek-out-of-buffer path) already
-    // start at the desired position thanks to ?t= on the URL itself.
-    const initialResumeRef = React.useRef(resumeSec)
+    // Auto-hide controls after 3 s of mouse inactivity, restore on
+    // movement. Always shown when paused.
     React.useEffect(() => {
+        const el = containerRef.current
+        if (!el) return
+        let timer: ReturnType<typeof setTimeout> | null = null
+        const reveal = () => {
+            setControlsShown(true)
+            if (timer) clearTimeout(timer)
+            if (playing) {
+                timer = setTimeout(() => setControlsShown(false), 3000)
+            }
+        }
+        el.addEventListener("mousemove", reveal)
+        el.addEventListener("touchstart", reveal)
+        reveal()
+        return () => {
+            el.removeEventListener("mousemove", reveal)
+            el.removeEventListener("touchstart", reveal)
+            if (timer) clearTimeout(timer)
+        }
+    }, [playing])
+
+    // Seek handler — maps an ABSOLUTE target time to a pipe restart
+    // if the target is outside the buffered window of the current
+    // pipe; otherwise just nudges video.currentTime inside the pipe.
+    const seekToAbsolute = React.useCallback((targetAbs: number) => {
         const v = videoRef.current
         if (!v) return
-        const onLoaded = () => {
-            // After a reload-with-?t=, currentTime is 0 (the pipe's
-            // local time). No client-side seek needed — the server
-            // already started at the right place.
-            initialResumeRef.current = 0
+        const clamped = Math.max(0, Math.min(targetAbs, totalDuration - 0.5))
+        // Inside the current pipe's buffered range?
+        const localTarget = clamped - playOffsetSec
+        if (localTarget >= 0 && v.buffered.length > 0) {
+            for (let i = 0; i < v.buffered.length; i++) {
+                if (localTarget >= v.buffered.start(i) - 0.1 && localTarget <= v.buffered.end(i) + 0.1) {
+                    v.currentTime = localTarget
+                    return
+                }
+            }
         }
-        v.addEventListener("loadedmetadata", onLoaded)
-        return () => v.removeEventListener("loadedmetadata", onLoaded)
-    }, [transmuxUrl])
+        // Out of buffer → restart the pipe at the target.
+        setPlayOffsetSec(Math.max(0, Math.floor(clamped)))
+    }, [playOffsetSec, totalDuration])
+
+    const togglePlay = React.useCallback(() => {
+        const v = videoRef.current
+        if (!v) return
+        if (v.paused) void v.play().catch(() => {})
+        else v.pause()
+    }, [])
+
+    const toggleFullscreen = React.useCallback(() => {
+        const el = containerRef.current
+        if (!el) return
+        if (document.fullscreenElement) {
+            void document.exitFullscreen()
+        } else {
+            void el.requestFullscreen()
+        }
+    }, [])
 
     if (isLoading) {
         return (
@@ -2222,39 +2365,120 @@ function LocalWatch({ localId }: { localId: number }) {
                     release={null}
                 />
             )}
-            <div className="min-h-screen bg-black relative -mt-16 lg:-mt-[68px]">
-                {/* Back button — pinned top-left, drops the user back on the home. */}
+            <div
+                ref={containerRef}
+                className="min-h-screen bg-black relative -mt-16 lg:-mt-[68px] group/player select-none"
+            >
+                {/* Back button — auto-hides with the rest of the chrome. */}
                 <button
                     type="button"
                     onClick={() => router.push("/")}
                     className={cn(
                         "absolute top-3 left-3 z-[60] size-10 rounded-full",
                         "bg-black/70 hover:bg-black/90 text-white",
-                        "flex items-center justify-center backdrop-blur-sm",
+                        "flex items-center justify-center backdrop-blur-sm transition-opacity duration-200",
+                        controlsShown ? "opacity-100" : "opacity-0 pointer-events-none",
                     )}
                     aria-label={t("common.back", "Retour")}
                 >
                     <BiArrowBack className="size-5" />
                 </button>
-                {/* Title overlay top-right. */}
-                <div className="absolute top-3 right-3 z-[60] bg-black/70 backdrop-blur-sm rounded-md px-3 py-1.5 text-white text-xs font-semibold max-w-[60vw] truncate">
+                {/* Title overlay. */}
+                <div
+                    className={cn(
+                        "absolute top-3 right-3 z-[60] bg-black/70 backdrop-blur-sm rounded-md px-3 py-1.5",
+                        "text-white text-xs font-semibold max-w-[60vw] truncate transition-opacity duration-200",
+                        controlsShown ? "opacity-100" : "opacity-0 pointer-events-none",
+                    )}
+                >
                     {displayTitle}
                 </div>
-                {/* No bootstrap spinner — the <video> element shows
-                    its own loading state through the controls and
-                    starts piping data as soon as ffmpeg flushes the
-                    init segment (~ 1 s). */}
+
                 <video
                     ref={videoRef}
                     autoPlay
-                    controls
                     playsInline
-                    className="w-full h-screen object-contain bg-black"
+                    onClick={togglePlay}
+                    className="w-full h-screen object-contain bg-black cursor-pointer"
                     onError={(e) => {
                         const err = (e.currentTarget as HTMLVideoElement).error
                         console.error("[Notflix] local video error", err?.code, err?.message)
                     }}
                 />
+
+                {/* Custom controls bar — replaces native controls so
+                    the timeline reflects the FULL source duration
+                    (probed via ffprobe) instead of just the bytes
+                    received so far from the pipe. */}
+                <div
+                    className={cn(
+                        "absolute inset-x-0 bottom-0 z-[55] px-4 sm:px-8 pb-4 pt-12",
+                        "bg-gradient-to-t from-black/90 via-black/40 to-transparent",
+                        "transition-opacity duration-200",
+                        controlsShown ? "opacity-100" : "opacity-0 pointer-events-none",
+                    )}
+                >
+                    {/* Scrub bar */}
+                    <LocalScrubBar
+                        currentAbs={absoluteCurrent}
+                        bufferedAbsEnd={bufferedAbsEnd}
+                        duration={totalDuration}
+                        onSeek={seekToAbsolute}
+                    />
+                    <div className="flex items-center gap-4 mt-2 text-white">
+                        <button
+                            type="button"
+                            onClick={togglePlay}
+                            className="p-1 hover:scale-110 transition-transform"
+                            aria-label={playing ? t("watch.pause", "Pause") : t("watch.play", "Lecture")}
+                        >
+                            {playing
+                                ? <BiPause className="size-7" />
+                                : <BiPlay className="size-7" />}
+                        </button>
+                        <div className="text-xs sm:text-sm tabular-nums">
+                            <span>{fmtTime(absoluteCurrent)}</span>
+                            <span className="text-white/60"> / {fmtTime(totalDuration)}</span>
+                        </div>
+                        <div className="flex-1" />
+                        <div className="flex items-center gap-1.5">
+                            <button
+                                type="button"
+                                onClick={() => setMuted(m => !m)}
+                                className="p-1 hover:scale-110 transition-transform"
+                                aria-label={muted ? t("watch.unmute", "Activer le son") : t("watch.mute", "Couper le son")}
+                            >
+                                {muted || volume === 0
+                                    ? <BiVolumeMute className="size-5" />
+                                    : <BiVolumeFull className="size-5" />}
+                            </button>
+                            <input
+                                type="range"
+                                min={0}
+                                max={1}
+                                step={0.05}
+                                value={muted ? 0 : volume}
+                                onChange={(e) => {
+                                    const v = parseFloat(e.target.value)
+                                    setVolume(v)
+                                    setMuted(v === 0)
+                                }}
+                                className="w-20 accent-brand-500 cursor-pointer"
+                                aria-label={t("watch.volume", "Volume")}
+                            />
+                        </div>
+                        <button
+                            type="button"
+                            onClick={toggleFullscreen}
+                            className="p-1 hover:scale-110 transition-transform"
+                            aria-label={fullscreen ? t("watch.exit_fullscreen", "Quitter le plein écran") : t("watch.fullscreen", "Plein écran")}
+                        >
+                            {fullscreen
+                                ? <BiExitFullscreen className="size-5" />
+                                : <BiFullscreen className="size-5" />}
+                        </button>
+                    </div>
+                </div>
             </div>
         </>
     )

@@ -90,6 +90,10 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	// (AC3/EAC3/DTS) where direct stream wouldn't play. Bypasses HLS
 	// chunking entirely; the browser gets a continuous fMP4 stream.
 	lib.GET("/transmux/:id", h.HandleTransmuxLocalFile)
+	// ffprobe metadata (duration + codecs) so the player UI can render
+	// a correct timeline even though the transmux pipe streams
+	// progressively (no duration in the moov).
+	lib.GET("/probe/:id", h.HandleProbeLocalFile)
 	// SSE stream — pushes "a new file landed in your library" events
 	// to every logged-in browser. Doesn't need admin: the toast is
 	// useful for all viewers (even if only the admin can trigger scans).

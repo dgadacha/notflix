@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"notflix/internal/core"
@@ -440,12 +441,16 @@ func (h *Handler) HandleTransmuxLocalFile(c echo.Context) error {
 		"-b:a", "192k",
 		"-ac", "2",
 		"-af", "aresample=async=1000",
-		// fMP4 streaming flags:
-		//   empty_moov         : no leading moov; metadata in fragments
+		// fMP4 streaming flags. We deliberately DROP +empty_moov so
+		// ffmpeg writes a real moov upfront containing the mvhd with
+		// the source's total duration. Without that, the browser
+		// computes duration from fragments-seen-so-far → the timeline
+		// grows as the user watches instead of showing the real total
+		// from the start.
 		//   frag_keyframe      : new fragment on every video keyframe
 		//   default_base_moof  : timestamps relative to moof (not file)
 		//   omit_tfhd_offset   : don't write absolute byte offsets
-		"-movflags", "+frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset",
+		"-movflags", "+frag_keyframe+default_base_moof+omit_tfhd_offset",
 		// Force fragment cadence even when the source has long GOPs.
 		// One second = decent UX without too many tiny fragments.
 		"-frag_duration", "1000000",
@@ -470,6 +475,85 @@ func (h *Handler) HandleTransmuxLocalFile(c echo.Context) error {
 		fmt.Printf("transmux %d: ffmpeg failed: %v | %s\n", id, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// -----------------------------------------------------------------------------
+// Probe — total duration + codec metadata for the player UI
+// -----------------------------------------------------------------------------
+
+// HandleProbeLocalFile — GET /api/v1/local-library/probe/:id
+//
+// Returns the source duration (seconds) + audio/video codec names by
+// running ffprobe against the file on disk. The frontend uses this to
+// size the custom timeline correctly: the pipe transmux endpoint
+// streams progressively, so the browser's <video>.duration grows over
+// time. With this probe, the player UI shows the REAL duration from
+// the moment the user lands on /watch, and can map a scrub-bar click
+// at 50 % to an absolute file position.
+//
+// Cached per-file in-memory for 1 hour: ffprobe takes 100-300 ms even
+// on a local SSD and a single user can request /probe + /transmux
+// back-to-back on every play.
+type localProbeResp struct {
+	Duration   float64 `json:"duration"`   // seconds
+	AudioCodec string  `json:"audioCodec"`
+	VideoCodec string  `json:"videoCodec"`
+}
+
+var (
+	localProbeMu    sync.Mutex
+	localProbeCache = map[uint]localProbeEntry{}
+)
+type localProbeEntry struct {
+	at  time.Time
+	val localProbeResp
+}
+
+func (h *Handler) HandleProbeLocalFile(c echo.Context) error {
+	idStr := c.Param("id")
+	id64, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	id := uint(id64)
+
+	// Cache check — same id → same path → same probe.
+	localProbeMu.Lock()
+	if e, ok := localProbeCache[id]; ok && time.Since(e.at) < time.Hour {
+		localProbeMu.Unlock()
+		return RespondOK(c, e.val)
+	}
+	localProbeMu.Unlock()
+
+	f, err := h.App.Database.GetLocalFile(id)
+	if err != nil {
+		return c.NoContent(http.StatusNotFound)
+	}
+	configuredDir := strings.TrimSpace(h.App.Config.Library.Dir)
+	if configuredDir == "" {
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{
+			"error": "library dir not configured",
+		})
+	}
+	absDir, _ := filepath.Abs(configuredDir)
+	absFile, _ := filepath.Abs(f.Path)
+	rel, err := filepath.Rel(absDir, absFile)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return c.JSON(http.StatusForbidden, map[string]any{
+			"error": "file outside configured library dir",
+		})
+	}
+
+	probe := probeMediaResult(c.Request().Context(), absFile)
+	resp := localProbeResp{
+		Duration:   probe.Duration,
+		AudioCodec: probe.AudioCodec,
+		VideoCodec: probe.VideoCodec,
+	}
+	localProbeMu.Lock()
+	localProbeCache[id] = localProbeEntry{at: time.Now(), val: resp}
+	localProbeMu.Unlock()
+	return RespondOK(c, resp)
 }
 
 // Compile-time link check: ensure core.SettingLibraryDir is exported
