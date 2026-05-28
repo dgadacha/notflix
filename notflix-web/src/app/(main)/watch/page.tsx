@@ -2070,7 +2070,81 @@ function LocalWatch({ localId }: { localId: number }) {
     const { data: file, isLoading, error } = useLocalFile(localId)
     const videoRef = React.useRef<HTMLVideoElement>(null)
 
-    // Resume position — applied once on the first canplay.
+    // HLS session bootstrap. We always go through the transmux pipeline
+    // for local files: MKV releases routinely carry AC-3 / E-AC-3 / DTS
+    // audio that Chrome and Firefox can't decode natively (video plays,
+    // audio is silent). HLS re-encodes the audio to AAC server-side
+    // with -c:v copy, so the video stream is bit-perfect and the audio
+    // works everywhere. ~1 s of ffmpeg cold-start, then on-demand
+    // chunks like the TorBox flow.
+    const [playlistUrl, setPlaylistUrl] = React.useState<string | null>(null)
+    const [startErr, setStartErr] = React.useState<string | null>(null)
+    React.useEffect(() => {
+        let cancelled = false
+        setPlaylistUrl(null)
+        setStartErr(null)
+        ;(async () => {
+            try {
+                const r = await fetch("/api/v1/stream/hls/start", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ localId }),
+                })
+                if (!r.ok) {
+                    const j = await r.json().catch(() => ({}))
+                    throw new Error(j.error ?? `hls/start ${r.status}`)
+                }
+                const j = await r.json()
+                const data = j.data ?? j
+                if (cancelled) return
+                setPlaylistUrl(data.playlistUrl as string)
+            } catch (e) {
+                if (!cancelled) setStartErr((e as Error).message)
+            }
+        })()
+        return () => { cancelled = true }
+    }, [localId])
+
+    // Attach hls.js (or native HLS on Safari) once we have the
+    // playlist URL. Same config patterns as the TorBox Player —
+    // generous buffer, instant start on source variant, retry on
+    // transient chunk errors.
+    React.useEffect(() => {
+        const video = videoRef.current
+        if (!video || !playlistUrl) return
+        let hls: Hls | null = null
+        if (Hls.isSupported()) {
+            hls = new Hls({
+                maxBufferLength: 120,
+                maxMaxBufferLength: 240,
+                backBufferLength: 60,
+                abrEwmaDefaultEstimate: 50_000_000,
+                startLevel: -1,
+                startFragPrefetch: true,
+                fragLoadingTimeOut: 60_000,
+                manifestLoadingTimeOut: 30_000,
+                levelLoadingTimeOut: 30_000,
+                fragLoadingMaxRetry: 6,
+                fragLoadingMaxRetryTimeout: 60_000,
+            })
+            hls.loadSource(playlistUrl)
+            hls.attachMedia(video)
+            hls.on(Hls.Events.ERROR, (_, data) => {
+                if (!data.fatal) return
+                console.error("[Notflix] local hls fatal", data)
+            })
+        } else {
+            // Safari + iOS Chrome have native HLS.
+            video.src = playlistUrl
+        }
+        return () => {
+            hls?.destroy()
+            video.removeAttribute("src")
+            video.load()
+        }
+    }, [playlistUrl])
+
+    // Resume position — applied once on the first loadedmetadata.
     const resumeRef = React.useRef(resumeSec)
     React.useEffect(() => { resumeRef.current = resumeSec }, [resumeSec])
     React.useEffect(() => {
@@ -2085,7 +2159,7 @@ function LocalWatch({ localId }: { localId: number }) {
         }
         v.addEventListener("loadedmetadata", onLoaded)
         return () => v.removeEventListener("loadedmetadata", onLoaded)
-    }, [file?.id])
+    }, [playlistUrl])
 
     if (isLoading) {
         return (
@@ -2115,7 +2189,6 @@ function LocalWatch({ localId }: { localId: number }) {
         )
     }
 
-    const streamUrl = `/api/v1/local-library/stream/${file.id}`
     const displayTitle = file.title || file.parsedTitle || file.path
     const mediaType = (file.mediaType as "movie" | "tv") || "movie"
 
@@ -2124,9 +2197,7 @@ function LocalWatch({ localId }: { localId: number }) {
             {/* Mirror local plays into the watch-history just like the
                 TorBox flow does — Continue Watching shows them, the
                 ?t= resume URL works on re-open, and Because You
-                Watched recommendations seed from them. The release
-                fields stay empty; resume re-routes to /watch?localId
-                because tmdbId stays the same. */}
+                Watched recommendations seed from them. */}
             {file.tmdbId > 0 && (
                 <NetflixWatchHistorySaver
                     tmdbId={file.tmdbId}
@@ -2153,13 +2224,32 @@ function LocalWatch({ localId }: { localId: number }) {
                 >
                     <BiArrowBack className="size-5" />
                 </button>
-                {/* Title overlay top-right — minimal, just confirms what's playing. */}
+                {/* Title overlay top-right. */}
                 <div className="absolute top-3 right-3 z-[60] bg-black/70 backdrop-blur-sm rounded-md px-3 py-1.5 text-white text-xs font-semibold max-w-[60vw] truncate">
                     {displayTitle}
                 </div>
+                {/* Bootstrap states — before hls.js attaches we either
+                    show a spinner (waiting on /hls/start) or an error
+                    panel. Once playlistUrl is set the <video> element
+                    takes over. */}
+                {!playlistUrl && !startErr && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 z-[40] pointer-events-none">
+                        <div className="size-10 rounded-full border-4 border-white/10 border-t-brand-500 animate-spin" />
+                        <p className="text-white/70 text-xs">
+                            {t("watch.local_preparing", "Préparation du flux…")}
+                        </p>
+                    </div>
+                )}
+                {startErr && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 z-[40] px-6 text-center">
+                        <p className="text-red-300 text-sm font-semibold">
+                            {t("watch.local_hls_failed", "Préparation du flux échouée")}
+                        </p>
+                        <p className="text-[--muted] text-xs max-w-md break-words">{startErr}</p>
+                    </div>
+                )}
                 <video
                     ref={videoRef}
-                    src={streamUrl}
                     autoPlay
                     controls
                     playsInline

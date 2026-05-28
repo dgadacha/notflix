@@ -161,32 +161,79 @@ var (
 
 // HandleStreamHLSStart — POST /api/v1/stream/hls/start
 //
-// Body: {"url": "<torbox-cdn-url>", "durationSec"?: float, "audioCodec"?: string}
+// Body: one of
+//   {"url": "<torbox-cdn-url>", "durationSec"?: float, "audioCodec"?: string}
+//   {"localId": <int>}                            (local-library file)
+//
 // Returns: {"sessionId", "playlistUrl", "durationSec", "audioCodec", "subtitles"}
+//
+// The HLS pipeline transmuxes the audio to AAC, which is the universal
+// browser codec. That's the only reason local-library files take this
+// path: their video container (MKV) often holds AC-3 / E-AC-3 / DTS
+// audio that Chrome/Firefox can't decode natively, so `<video src>`
+// plays the picture but stays silent. Sending the local path through
+// the same chunk-on-demand pipeline as TorBox URLs solves it without
+// re-encoding the video (-c:v copy).
 //
 // If the caller already ffprobed the URL (e.g. /torbox/play just did it),
 // they can pass `durationSec` + `audioCodec` and the HLS handler skips
 // the re-probe — saves ~1-2s on the second hop. Subtitles are always
-// (re-)probed here so the session knows what tracks to expose via
-// /sub_<idx>.vtt — there's no piggy-back-from-caller for that yet.
+// (re-)probed here.
 func (h *Handler) HandleStreamHLSStart(c echo.Context) error {
 	var body struct {
 		URL         string  `json:"url"`
+		LocalID     uint    `json:"localId,omitempty"`
 		DurationSec float64 `json:"durationSec,omitempty"`
 		AudioCodec  string  `json:"audioCodec,omitempty"`
 	}
 	if err := c.Bind(&body); err != nil {
 		return RespondErr(c, err)
 	}
-	raw := body.URL
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
-		return c.JSON(http.StatusBadRequest, map[string]any{"error": "invalid url"})
-	}
-	if !isAllowedStreamHost(u.Host) {
-		return c.JSON(http.StatusForbidden, map[string]any{
-			"error": "host not allowed for hls: " + u.Host,
-		})
+
+	var raw string
+	if body.LocalID > 0 {
+		// Local-library mode: resolve the row's path and validate it
+		// still lives under the configured library dir. Same anchoring
+		// trick as serveStreamLocalFile — protects against a moved
+		// library dir + a stale row escaping outside it.
+		f, err := h.App.Database.GetLocalFile(body.LocalID)
+		if err != nil {
+			return c.JSON(http.StatusNotFound, map[string]any{"error": "local file not found"})
+		}
+		configuredDir := strings.TrimSpace(h.App.Config.Library.Dir)
+		if configuredDir == "" {
+			return c.JSON(http.StatusServiceUnavailable, map[string]any{
+				"error": "library dir not configured",
+			})
+		}
+		absDir, derr := filepath.Abs(configuredDir)
+		absFile, ferr := filepath.Abs(f.Path)
+		if derr != nil || ferr != nil {
+			return c.NoContent(http.StatusInternalServerError)
+		}
+		rel, relErr := filepath.Rel(absDir, absFile)
+		if relErr != nil || strings.HasPrefix(rel, "..") {
+			return c.JSON(http.StatusForbidden, map[string]any{
+				"error": "file outside configured library dir",
+			})
+		}
+		if info, sErr := os.Stat(absFile); sErr != nil || info.IsDir() {
+			return c.JSON(http.StatusNotFound, map[string]any{
+				"error": "file no longer exists on disk — re-scan",
+			})
+		}
+		raw = absFile
+	} else {
+		raw = body.URL
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			return c.JSON(http.StatusBadRequest, map[string]any{"error": "invalid url"})
+		}
+		if !isAllowedStreamHost(u.Host) {
+			return c.JSON(http.StatusForbidden, map[string]any{
+				"error": "host not allowed for hls: " + u.Host,
+			})
+		}
 	}
 
 	// Capture the data dir for the chunk-cache reaper. Once-per-process.
