@@ -76,6 +76,25 @@ var seasonEpisodeXPattern = regexp.MustCompile(`\b(\d{1,2})x(\d{2})\b`)
 // folders that don't repeat SxxExx in the folder name itself.
 var seasonOnlyPattern = regexp.MustCompile(`(?i)\bS(\d{1,3})\b`)
 
+// Natural-language season pattern for folder names that spell the
+// word out:
+//
+//   "Show.Saison.3.GROUP"           → 3
+//   "Show Season 4"                 → 4
+//   "Show.Series.2.1080p"           → 2
+//   "Show - Saison 03"              → 3
+//   "Show.Temporada.2"              → 2 (Spanish)
+//   "Show Stagione 1"               → 1 (Italian)
+//   "Show Staffel 5"                → 5 (German)
+//
+// The separator between the keyword and the number is liberal: dots,
+// underscores, dashes, spaces, or any run of non-word characters
+// (`\W+`). We also accept the keyword with or without a trailing 's'
+// for English (Seasons / Series) since rip-naming is inconsistent.
+var seasonWordPattern = regexp.MustCompile(
+	`(?i)\b(?:Saisons?|Seasons?|Series|Temporadas?|Stagioni|Stagione|Staffel)\W+(\d{1,3})\b`,
+)
+
 // Folder names we never descend into (release-group leftovers,
 // trash, behind-the-scenes featurettes — none of these are the main
 // film/episode the user wants to play).
@@ -167,6 +186,11 @@ func ExtractSeasonFromFolder(name string) int {
 		n, _ := strconv.Atoi(m[1])
 		return n
 	}
+	// "Saison.3", "Season 4", "Temporada 2"…
+	if m := seasonWordPattern.FindStringSubmatch(name); m != nil {
+		n, _ := strconv.Atoi(m[1])
+		return n
+	}
 	return 0
 }
 
@@ -180,11 +204,27 @@ func ExtractSeasonFromFolder(name string) int {
 //	                                      whole name kept — user can
 //	                                      rename)
 func FolderShowName(folder string) string {
+	// Pick the EARLIEST marker — for folders that carry multiple
+	// (eg. "Show.Saison.3.GROUP" where GROUP happens to contain S01)
+	// we want to strip starting from "Saison.3", not from a spurious
+	// later SxxExx hit. The three patterns can return different
+	// offsets, so compute all three and use the smallest non-nil one.
+	earliest := -1
 	if idx := seasonEpisodeSExEPattern.FindStringIndex(folder); idx != nil {
-		return cleanTitle(folder[:idx[0]])
+		earliest = idx[0]
 	}
 	if idx := seasonOnlyPattern.FindStringIndex(folder); idx != nil {
-		return cleanTitle(folder[:idx[0]])
+		if earliest == -1 || idx[0] < earliest {
+			earliest = idx[0]
+		}
+	}
+	if idx := seasonWordPattern.FindStringIndex(folder); idx != nil {
+		if earliest == -1 || idx[0] < earliest {
+			earliest = idx[0]
+		}
+	}
+	if earliest >= 0 {
+		return cleanTitle(folder[:earliest])
 	}
 	return cleanTitle(folder)
 }
