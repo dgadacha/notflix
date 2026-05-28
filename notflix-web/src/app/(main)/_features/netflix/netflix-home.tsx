@@ -1,5 +1,6 @@
 import { NetflixContinueWatching } from "@/app/(main)/_features/netflix/netflix-continue-watching"
 import { NetflixHero } from "@/app/(main)/_features/netflix/netflix-hero"
+import { NetflixLocalLibrary } from "@/app/(main)/_features/netflix/netflix-local-library"
 import { NetflixRow } from "@/app/(main)/_features/netflix/netflix-row"
 import { NetflixTopTen } from "@/app/(main)/_features/netflix/netflix-top-ten"
 import { useActiveProfileHistory } from "@/lib/profiles/profiles"
@@ -29,6 +30,11 @@ export function NetflixHome() {
                     component returns null when there's no in-progress
                     history. */}
                 <NetflixContinueWatching />
+                {/* Local library — scanned host directory, matched
+                    against TMDB. Self-hides when no rows. Lives high
+                    in the stack because content the user OWNS should
+                    surface before TMDB-discovered titles. */}
+                <NetflixLocalLibrary />
                 {/* Self-contained personalised row — picks the most-
                     recently-watched entry from the active profile,
                     asks TMDB for recommendations, renders or returns

@@ -27,7 +27,7 @@ import {
     useServerConfig,
     useUpdateServerConfig,
 } from "@/lib/auth"
-import { useQuery } from "@tanstack/react-query"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import {
     AudioPref,
     AUDIO_OPTIONS,
@@ -49,7 +49,7 @@ import {
     BiShield,
     BiUser,
 } from "react-icons/bi"
-import { LuActivity, LuArrowRight, LuDownload, LuGlobe, LuKey, LuPlay, LuServer, LuUpload, LuUsers } from "react-icons/lu"
+import { LuActivity, LuArrowRight, LuDownload, LuFolderOpen, LuGlobe, LuKey, LuPlay, LuRefreshCw, LuServer, LuUpload, LuUsers } from "react-icons/lu"
 
 export function NetflixSettings() {
     const { t } = useTranslation()
@@ -143,6 +143,12 @@ export function NetflixSettings() {
             {me?.isAdmin && (
                 <Section icon={<LuActivity className="size-5" />} title={t("settings.prowlarr_health", "État Prowlarr")}>
                     <ProwlarrHealthPanel />
+                </Section>
+            )}
+
+            {me?.isAdmin && (
+                <Section icon={<LuFolderOpen className="size-5" />} title={t("settings.library", "Bibliothèque locale")}>
+                    <LibraryPanel />
                 </Section>
             )}
 
@@ -1388,6 +1394,261 @@ function ProwlarrHealthPanel() {
                     </div>
                 ))}
             </div>
+        </div>
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Local library
+// ---------------------------------------------------------------------------
+
+type LibraryDirResp = { dir: string; source: "env" | "db" | "unset" }
+type ScanReport = {
+    startedAt: string
+    finishedAt: string
+    directory: string
+    filesSeen: number
+    matched: number
+    unmatched: number
+    durationMs: number
+    removed: number
+    walkError?: string
+}
+type ScanStatusResp = { running: boolean; lastReport: ScanReport | null }
+
+function useLibraryDir() {
+    return useQuery<LibraryDirResp>({
+        queryKey: ["library", "dir"],
+        queryFn: async () => {
+            const r = await fetch("/api/v1/local-library/dir")
+            if (!r.ok) throw new Error(`dir ${r.status}`)
+            const j = await r.json()
+            return (j.data ?? j) as LibraryDirResp
+        },
+        staleTime: 60_000,
+    })
+}
+
+function useScanStatus(enabled: boolean) {
+    return useQuery<ScanStatusResp>({
+        queryKey: ["library", "scan-status"],
+        queryFn: async () => {
+            const r = await fetch("/api/v1/local-library/scan/status")
+            if (!r.ok) throw new Error(`status ${r.status}`)
+            const j = await r.json()
+            return (j.data ?? j) as ScanStatusResp
+        },
+        // Poll fast while a scan is in flight so the spinner gives way
+        // to the report as soon as it lands.
+        refetchInterval: enabled ? 1500 : false,
+        staleTime: 1000,
+    })
+}
+
+function LibraryPanel() {
+    const { t } = useTranslation()
+    const qc = useQueryClient()
+    const { data: dirData, isLoading } = useLibraryDir()
+    const [editing, setEditing] = React.useState(false)
+    const [draft, setDraft] = React.useState("")
+    const [saveErr, setSaveErr] = React.useState<string | null>(null)
+    const [scanning, setScanning] = React.useState(false)
+    const [scanErr, setScanErr] = React.useState<string | null>(null)
+    const { data: status } = useScanStatus(scanning)
+
+    React.useEffect(() => {
+        if (dirData && !editing) setDraft(dirData.dir)
+    }, [dirData, editing])
+
+    // When the backend reports "running: false" + we had marked
+    // scanning=true, the scan just finished — flip back off and
+    // invalidate the home rail so any new files show up.
+    React.useEffect(() => {
+        if (scanning && status && !status.running) {
+            setScanning(false)
+            qc.invalidateQueries({ queryKey: ["local-library"] })
+        }
+    }, [scanning, status, qc])
+
+    const saveDir = async (next: string) => {
+        setSaveErr(null)
+        try {
+            const r = await fetch("/api/v1/local-library/dir", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ dir: next }),
+            })
+            const j = await r.json()
+            if (!r.ok) throw new Error(j.error ?? `dir ${r.status}`)
+            setEditing(false)
+            qc.invalidateQueries({ queryKey: ["library", "dir"] })
+        } catch (e) {
+            setSaveErr((e as Error).message)
+        }
+    }
+
+    const triggerScan = async () => {
+        setScanErr(null)
+        setScanning(true)
+        try {
+            const r = await fetch("/api/v1/local-library/scan", { method: "POST" })
+            const j = await r.json()
+            if (!r.ok) throw new Error(j.error ?? `scan ${r.status}`)
+            // The Scan response IS the report — push it into the
+            // scan-status cache so the UI updates immediately even
+            // before the next status poll lands.
+            qc.setQueryData<ScanStatusResp>(["library", "scan-status"], {
+                running: false,
+                lastReport: (j.data ?? j) as ScanReport,
+            })
+            qc.invalidateQueries({ queryKey: ["local-library"] })
+        } catch (e) {
+            setScanErr((e as Error).message)
+        } finally {
+            setScanning(false)
+        }
+    }
+
+    if (isLoading) {
+        return (
+            <div className="space-y-2">
+                <Skeleton className="h-5 w-72" />
+                <Skeleton className="h-9 w-full" />
+                <Skeleton className="h-9 w-32" />
+            </div>
+        )
+    }
+
+    const dir = dirData?.dir ?? ""
+    const source = dirData?.source ?? "unset"
+    const lastReport = status?.lastReport ?? null
+
+    return (
+        <div className="space-y-4">
+            <p className="text-[10px] text-[--muted]/70 leading-relaxed">
+                {t(
+                    "settings.library_hint",
+                    "Notflix scanne ce répertoire, parse les noms de fichiers, et match TMDB. Les films reconnus apparaissent dans la rangée « Bibliothèque locale » sur l'accueil et se lancent en direct (zéro Prowlarr, zéro TorBox).",
+                )}
+            </p>
+
+            {/* Dir row */}
+            <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                    <label className="text-sm font-semibold text-white">
+                        {t("settings.library_dir", "Répertoire")}
+                    </label>
+                    {!editing && (
+                        <span className={cn(
+                            "px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider",
+                            source === "env" ? "bg-blue-500/20 text-blue-300" :
+                                source === "db" ? "bg-emerald-500/20 text-emerald-300" :
+                                    "bg-white/10 text-white/50",
+                        )}>
+                            {source}
+                        </span>
+                    )}
+                </div>
+                {!editing ? (
+                    <div className="flex items-center gap-2">
+                        <code className="flex-1 min-w-0 truncate bg-black/40 border border-white/10 rounded px-2 py-1.5 text-xs text-white/90 font-mono">
+                            {dir || t("settings.library_dir_unset", "(non configuré)")}
+                        </code>
+                        <button
+                            type="button"
+                            onClick={() => setEditing(true)}
+                            className="px-2.5 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider bg-white/10 hover:bg-white/15 text-white"
+                        >
+                            {t("settings.library_dir_change", "Modifier")}
+                        </button>
+                    </div>
+                ) : (
+                    <div className="space-y-2">
+                        <input
+                            type="text"
+                            value={draft}
+                            onChange={(e) => setDraft(e.target.value)}
+                            placeholder="/Users/dylan/Movies"
+                            className="w-full bg-black/40 border border-white/15 rounded px-2 py-1.5 text-xs text-white font-mono outline-none focus:border-brand-500"
+                            autoFocus
+                            spellCheck={false}
+                        />
+                        <div className="flex items-center gap-2">
+                            <button
+                                type="button"
+                                onClick={() => saveDir(draft.trim())}
+                                className="px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider bg-brand-500 hover:bg-brand-400 text-white"
+                            >
+                                {t("common.save", "Enregistrer")}
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => { setEditing(false); setDraft(dir); setSaveErr(null) }}
+                                className="px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider text-white/70 hover:text-white"
+                            >
+                                {t("common.cancel", "Annuler")}
+                            </button>
+                        </div>
+                        {saveErr && (
+                            <p className="text-red-300 text-xs bg-red-500/10 border border-red-500/30 rounded px-2 py-1">
+                                {saveErr}
+                            </p>
+                        )}
+                    </div>
+                )}
+            </div>
+
+            {/* Scan row */}
+            <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-white/10">
+                <button
+                    type="button"
+                    onClick={triggerScan}
+                    disabled={!dir || scanning}
+                    className={cn(
+                        "inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider",
+                        "bg-white/10 hover:bg-white/15 text-white",
+                        "disabled:opacity-50 disabled:cursor-not-allowed",
+                    )}
+                >
+                    <LuRefreshCw className={cn("size-3.5", scanning && "animate-spin")} />
+                    {scanning
+                        ? t("settings.library_scanning", "Scan en cours…")
+                        : t("settings.library_scan", "Scanner maintenant")}
+                </button>
+                {scanErr && (
+                    <span className="text-red-300 text-xs">{scanErr}</span>
+                )}
+            </div>
+
+            {/* Last report */}
+            {lastReport && (
+                <div className="bg-black/30 border border-white/10 rounded-md p-3 space-y-1 text-xs">
+                    <p className="text-white/80 font-semibold">
+                        {t("settings.library_last_scan", "Dernier scan")}{" "}
+                        <span className="text-[--muted] font-normal">
+                            · {new Date(lastReport.finishedAt).toLocaleString()}
+                        </span>
+                    </p>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                        <Stat label={t("settings.library_seen", "Vus")} value={lastReport.filesSeen} />
+                        <Stat label={t("settings.library_matched", "Reconnus")} value={lastReport.matched} className="text-emerald-300" />
+                        <Stat label={t("settings.library_unmatched", "Inconnus")} value={lastReport.unmatched} className={lastReport.unmatched > 0 ? "text-amber-300" : ""} />
+                        <Stat label={t("settings.library_duration", "Durée")} value={`${(lastReport.durationMs / 1000).toFixed(1)}s`} />
+                    </div>
+                    {lastReport.walkError && (
+                        <p className="text-red-300 text-[11px]">⚠ {lastReport.walkError}</p>
+                    )}
+                </div>
+            )}
+        </div>
+    )
+}
+
+function Stat({ label, value, className }: { label: string; value: number | string; className?: string }) {
+    return (
+        <div>
+            <div className="text-[--muted] uppercase tracking-wider text-[9px]">{label}</div>
+            <div className={cn("text-white font-bold tabular-nums", className)}>{value}</div>
         </div>
     )
 }

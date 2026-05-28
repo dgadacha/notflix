@@ -31,6 +31,7 @@ import {
     useSearchTV,
     useTorBoxPlay,
 } from "@/lib/notflix-api"
+import { useQuery } from "@tanstack/react-query"
 import Hls from "hls.js"
 import {
     AudioPref,
@@ -62,6 +63,19 @@ export default function WatchPage() {
     const { t } = useTranslation()
     const router = useRouter()
     const searchParams = useSearchParams()
+
+    // ── Local library branch ────────────────────────────────────────
+    // /watch?localId=N skips the whole TMDB-detail → Prowlarr → TorBox
+    // flow entirely. The file lives on disk; we stream it directly
+    // through the local-library endpoint with native <video src>.
+    // Anything more elaborate (HLS transmux of local files for browser-
+    // unfriendly codecs) is a follow-up.
+    const localIdParam = searchParams.get("localId")
+    const localIdNum = localIdParam ? parseInt(localIdParam, 10) : NaN
+    if (!Number.isNaN(localIdNum)) {
+        return <LocalWatch localId={localIdNum} />
+    }
+
     const idParam = searchParams.get("id")
     const typeParam = (searchParams.get("type") as "movie" | "tv" | null) ?? "movie"
     const seasonParam = searchParams.get("season")
@@ -2004,4 +2018,158 @@ function resolveSubtitleTracks(
     }
 
     return tracks
+}
+
+// ---------------------------------------------------------------------------
+// Local-library player
+// ---------------------------------------------------------------------------
+
+/** Minimal player for files on the host disk. No Prowlarr, no TorBox,
+ *  no ffprobe ahead of time — we hand the browser the file URL and let
+ *  native <video> play whatever the codec stack supports. Most H.264 +
+ *  AAC MP4 / MKV plays fine; HEVC / DTS / AC3 are browser-dependent.
+ *
+ *  If the file doesn't play, the user sees the standard video-error
+ *  overlay and can pick a different file from the home rail. HLS
+ *  transmux of local files is a follow-up if real-world usage needs
+ *  it. */
+type LocalFileResp = {
+    id: number
+    path: string
+    title: string
+    posterPath: string
+    backdropPath: string
+    parsedTitle: string
+    year: number
+    tmdbId: number
+    mediaType: string
+    sizeBytes: number
+}
+
+function useLocalFile(id: number) {
+    return useQuery<LocalFileResp | null>({
+        queryKey: ["local-file", id],
+        queryFn: async () => {
+            // No dedicated /local-library/:id endpoint — the list call
+            // is cheap and cached, so we find the row client-side.
+            const r = await fetch("/api/v1/local-library")
+            if (!r.ok) throw new Error(`local-library ${r.status}`)
+            const j = await r.json()
+            const list = (j.data ?? j) as LocalFileResp[]
+            return list.find(f => f.id === id) ?? null
+        },
+        staleTime: 60_000,
+    })
+}
+
+function LocalWatch({ localId }: { localId: number }) {
+    const { t } = useTranslation()
+    const router = useRouter()
+    const searchParams = useSearchParams()
+    const resumeSec = parseInt(searchParams.get("t") ?? "0", 10) || 0
+    const { data: file, isLoading, error } = useLocalFile(localId)
+    const videoRef = React.useRef<HTMLVideoElement>(null)
+
+    // Resume position — applied once on the first canplay.
+    const resumeRef = React.useRef(resumeSec)
+    React.useEffect(() => { resumeRef.current = resumeSec }, [resumeSec])
+    React.useEffect(() => {
+        const v = videoRef.current
+        if (!v) return
+        const onLoaded = () => {
+            const r = resumeRef.current
+            if (r > 0 && Number.isFinite(v.duration) && r < v.duration) {
+                v.currentTime = r
+                resumeRef.current = 0
+            }
+        }
+        v.addEventListener("loadedmetadata", onLoaded)
+        return () => v.removeEventListener("loadedmetadata", onLoaded)
+    }, [file?.id])
+
+    if (isLoading) {
+        return (
+            <div className="min-h-screen bg-black flex items-center justify-center">
+                <div className="size-10 rounded-full border-4 border-white/10 border-t-brand-500 animate-spin" />
+            </div>
+        )
+    }
+
+    if (error || !file) {
+        return (
+            <div className="min-h-screen bg-black flex flex-col items-center justify-center gap-4 px-6 text-center">
+                <p className="text-white text-lg font-semibold">
+                    {t("watch.local_not_found", "Fichier local introuvable.")}
+                </p>
+                <p className="text-[--muted] text-sm">
+                    {t("watch.local_rescan_hint", "Le fichier a peut-être été déplacé. Lance un re-scan depuis les paramètres.")}
+                </p>
+                <button
+                    type="button"
+                    onClick={() => router.push("/")}
+                    className="px-4 py-2 rounded-md bg-white/10 hover:bg-white/15 text-white text-sm font-semibold"
+                >
+                    {t("common.back", "Retour")}
+                </button>
+            </div>
+        )
+    }
+
+    const streamUrl = `/api/v1/local-library/stream/${file.id}`
+    const displayTitle = file.title || file.parsedTitle || file.path
+    const mediaType = (file.mediaType as "movie" | "tv") || "movie"
+
+    return (
+        <>
+            {/* Mirror local plays into the watch-history just like the
+                TorBox flow does — Continue Watching shows them, the
+                ?t= resume URL works on re-open, and Because You
+                Watched recommendations seed from them. The release
+                fields stay empty; resume re-routes to /watch?localId
+                because tmdbId stays the same. */}
+            {file.tmdbId > 0 && (
+                <NetflixWatchHistorySaver
+                    tmdbId={file.tmdbId}
+                    mediaType={mediaType}
+                    season={undefined}
+                    episode={undefined}
+                    title={displayTitle}
+                    posterPath={file.posterPath}
+                    backdropUrl={file.backdropPath}
+                    release={null}
+                />
+            )}
+            <div className="min-h-screen bg-black relative -mt-16 lg:-mt-[68px]">
+                {/* Back button — pinned top-left, drops the user back on the home. */}
+                <button
+                    type="button"
+                    onClick={() => router.push("/")}
+                    className={cn(
+                        "absolute top-3 left-3 z-[60] size-10 rounded-full",
+                        "bg-black/70 hover:bg-black/90 text-white",
+                        "flex items-center justify-center backdrop-blur-sm",
+                    )}
+                    aria-label={t("common.back", "Retour")}
+                >
+                    <BiArrowBack className="size-5" />
+                </button>
+                {/* Title overlay top-right — minimal, just confirms what's playing. */}
+                <div className="absolute top-3 right-3 z-[60] bg-black/70 backdrop-blur-sm rounded-md px-3 py-1.5 text-white text-xs font-semibold max-w-[60vw] truncate">
+                    {displayTitle}
+                </div>
+                <video
+                    ref={videoRef}
+                    src={streamUrl}
+                    autoPlay
+                    controls
+                    playsInline
+                    className="w-full h-screen object-contain bg-black"
+                    onError={(e) => {
+                        const err = (e.currentTarget as HTMLVideoElement).error
+                        console.error("[Notflix] local video error", err?.code, err?.message)
+                    }}
+                />
+            </div>
+        </>
+    )
 }
