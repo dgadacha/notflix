@@ -247,6 +247,11 @@ func convertOne(ctx context.Context, mkvPath string) (outcome, errMsg string) {
 		// faststart moves the moov to the front so the browser can
 		// start playback before the whole file downloads.
 		"-movflags", "+faststart",
+		// `-f mp4` is REQUIRED because we write to <out>.mp4.tmp
+		// and ffmpeg can't infer the format from the .tmp extension.
+		// Without this it errors with "Unable to choose an output
+		// format for ...mp4.tmp".
+		"-f", "mp4",
 		tmpPath,
 	)
 
