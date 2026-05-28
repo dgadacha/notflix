@@ -151,9 +151,18 @@ func ParseEpisode(name string) (EpisodeParse, bool) {
 }
 
 // ExtractSeasonFromFolder returns the season number if a folder name
-// declares one (e.g. "Show.S02.GROUP" → 2). 0 when no Sxx marker is
-// present.
+// declares one. Handles both plain "Show.S02.GROUP" → 2 AND the
+// per-episode subfolder shape "Show.S01E03.GROUP" → 1.
+//
+// The two-pattern fallback fixes a subtle regex trap: `\bS01\b` does
+// NOT match inside "S01E01" because `E` is a word char so there's no
+// word boundary between `S01` and `E`. We try the SxxExx form first
+// (catches per-episode folder names), then the Sxx-alone form.
 func ExtractSeasonFromFolder(name string) int {
+	if m := seasonEpisodeSExEPattern.FindStringSubmatch(name); m != nil {
+		n, _ := strconv.Atoi(m[1])
+		return n
+	}
 	if m := seasonOnlyPattern.FindStringSubmatch(name); m != nil {
 		n, _ := strconv.Atoi(m[1])
 		return n
@@ -161,15 +170,23 @@ func ExtractSeasonFromFolder(name string) int {
 	return 0
 }
 
-// FolderShowName strips the S\d{1,3} marker (and anything after it)
-// from a TV season folder name so the remainder is just the show
-// title: "Euphoria.S01.MULTi.1080p" → "Euphoria".
+// FolderShowName strips the SxxExx (or just Sxx) marker — and
+// everything that follows — from a folder name so the remainder is
+// just the show title:
+//
+//	"Euphoria.S01.MULTi.1080p"         → "Euphoria"
+//	"Euphoria.S01E03.MULTi.1080p"      → "Euphoria"
+//	"Friends Season 2"                 → "Friends Season 2" (no match,
+//	                                      whole name kept — user can
+//	                                      rename)
 func FolderShowName(folder string) string {
-	idx := seasonOnlyPattern.FindStringIndex(folder)
-	if idx == nil {
-		return cleanTitle(folder)
+	if idx := seasonEpisodeSExEPattern.FindStringIndex(folder); idx != nil {
+		return cleanTitle(folder[:idx[0]])
 	}
-	return cleanTitle(folder[:idx[0]])
+	if idx := seasonOnlyPattern.FindStringIndex(folder); idx != nil {
+		return cleanTitle(folder[:idx[0]])
+	}
+	return cleanTitle(folder)
 }
 
 func cleanTitle(raw string) string {
@@ -438,6 +455,39 @@ func processFolder(
 	seenPaths *[]string,
 	report *ScanReport,
 ) {
+	folderSeason := ExtractSeasonFromFolder(folderName)
+
+	// TV mode: this folder declares a season (either "Show.S01.GROUP"
+	// or "Show.S01E03.GROUP" for per-episode folders). Walk the WHOLE
+	// subtree to gather every video file — handles both layouts:
+	//
+	//   Show.S01.GROUP/
+	//   ├── Show.S01E01.mkv                                 ← direct
+	//   ├── Show.S01E02.mkv
+	//
+	// and
+	//
+	//   Show.S01.GROUP/
+	//   ├── Show.S01E01.GROUP/                              ← nested
+	//   │   └── Show.S01E01.GROUP.mkv
+	//   ├── Show.S01E02.GROUP/
+	//   │   └── Show.S01E02.GROUP.mkv
+	//
+	// One TMDB lookup covers all episodes — the show name comes from
+	// the season folder, the (season, episode) numbers from each
+	// file's name (with a fallback to the immediate parent folder
+	// name for the nested layout).
+	if folderSeason > 0 {
+		var episodes []videoEntry
+		collectVideosRecursive(folderPath, &episodes)
+		if len(episodes) > 0 {
+			processTVFolder(ctx, t, store, folderName, episodes, seenPaths, report)
+			return
+		}
+		// folderSeason > 0 but no videos — fall through to the
+		// normal classification (probably an empty / misnamed folder).
+	}
+
 	entries, err := os.ReadDir(folderPath)
 	if err != nil {
 		log.Printf("library scan: read %s: %v", folderPath, err)
@@ -448,14 +498,11 @@ func processFolder(
 	var videos []videoEntry
 	for _, e := range entries {
 		if e.IsDir() {
-			// One level deep is enough for the user's typical layout.
-			// Subdirs inside a movie/season folder are noise (Subs/,
-			// Sample/, Featurettes/) and the skip list catches them.
 			if skipFolders[strings.ToLower(e.Name())] {
 				continue
 			}
-			// Recurse for nested season folders — eg.
-			// "Show/Season 01/episode.mkv".
+			// Recurse for nested layouts — eg. "Movies/Action/Film.mkv"
+			// where Movies/ isn't itself a Sxx folder.
 			processFolder(ctx, t, store, filepath.Join(folderPath, e.Name()), e.Name(), seenPaths, report)
 			continue
 		}
@@ -469,33 +516,41 @@ func processFolder(
 		}
 		videos = append(videos, videoEntry{path: fullPath, info: info, name: e.Name()})
 	}
-	if len(videos) == 0 {
+
+	// Movie folder. The filename inside usually carries the title too;
+	// fall back to the folder name when the file is a bare "movie.mkv".
+	for _, v := range videos {
+		processMovieFile(ctx, t, store, v.path, v.info, folderName, seenPaths, report)
+	}
+}
+
+// collectVideosRecursive walks `dir` depth-first, appending every
+// playable video file (above the minimum size, not under a skip
+// folder) into `out`. Used by the TV mode of processFolder to gather
+// episodes from both flat and per-episode-subfolder layouts in one
+// pass.
+func collectVideosRecursive(dir string, out *[]videoEntry) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return
 	}
-
-	// Detect TV: folder name has Sxx AND at least one file matches
-	// SxxExx. Either condition alone is too weak (folder named "S03"
-	// could be a movie filed weirdly; SxxExx in one file out of 8
-	// could be a typo).
-	folderSeason := ExtractSeasonFromFolder(folderName)
-	hasEpisodeFiles := false
-	for _, v := range videos {
-		if _, ok := ParseEpisode(v.name); ok {
-			hasEpisodeFiles = true
-			break
+	for _, e := range entries {
+		if e.IsDir() {
+			if skipFolders[strings.ToLower(e.Name())] {
+				continue
+			}
+			collectVideosRecursive(filepath.Join(dir, e.Name()), out)
+			continue
 		}
-	}
-	isTVFolder := folderSeason > 0 && hasEpisodeFiles
-
-	if isTVFolder {
-		processTVFolder(ctx, t, store, folderName, videos, seenPaths, report)
-	} else {
-		// Movie folder. The filename inside usually carries the title
-		// too; fall back to the folder name when the file is a bare
-		// "movie.mkv".
-		for _, v := range videos {
-			processMovieFile(ctx, t, store, v.path, v.info, folderName, seenPaths, report)
+		if !videoExtensions[strings.ToLower(filepath.Ext(e.Name()))] {
+			continue
 		}
+		full := filepath.Join(dir, e.Name())
+		info, ierr := os.Stat(full)
+		if ierr != nil || info.Size() < minVideoBytes {
+			continue
+		}
+		*out = append(*out, videoEntry{path: full, info: info, name: e.Name()})
 	}
 }
 
@@ -512,16 +567,30 @@ func processTVFolder(
 	report *ScanReport,
 ) {
 	showName := FolderShowName(folderName)
+	// Folder-level season so we can backfill episodes where the file
+	// itself only declared an episode number (rare but possible).
+	folderSeason := ExtractSeasonFromFolder(folderName)
 	tvMatch, _ := matchTMDBTV(ctx, t, showName)
 
 	for _, v := range videos {
 		ep, ok := ParseEpisode(v.name)
 		if !ok {
-			// Episode pattern missing — fall back to treating it as
-			// part of the show but with season/episode = 0. Better
-			// than skipping (the file IS playable and Want to show up
-			// in the rail) but the user might need to rename.
-			ep = EpisodeParse{ShowName: showName}
+			// Per-episode-subfolder layout: the file is a bare
+			// "movie.mkv" but its immediate parent folder name has
+			// the SxxExx marker. Try that.
+			parentName := filepath.Base(filepath.Dir(v.path))
+			ep, ok = ParseEpisode(parentName)
+		}
+		if !ok {
+			// Still nothing — file plays but season/episode are
+			// unknown. We tag the row with the folder's season so
+			// the show grouping in the rail still works.
+			ep = EpisodeParse{ShowName: showName, Season: folderSeason}
+		}
+		// Backfill season from the folder when the file declared
+		// episode-only (e.g. "Show 01.mkv" inside "Show S03").
+		if ep.Season == 0 && folderSeason > 0 {
+			ep.Season = folderSeason
 		}
 
 		row := &models.LocalFile{
