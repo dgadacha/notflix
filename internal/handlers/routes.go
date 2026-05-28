@@ -86,6 +86,10 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	lib := v1.Group("/local-library")
 	lib.GET("", h.HandleListLocalLibrary)
 	lib.GET("/stream/:id", h.HandleStreamLocalFile)
+	// Subtitle support: probe surfaces the embedded subtitle tracks,
+	// /subtitle/:id/:idx.vtt extracts one of them via ffmpeg.
+	lib.GET("/probe/:id", h.HandleProbeLocalFile)
+	lib.GET("/subtitle/:id/:idx", h.HandleExtractSubtitle)
 	// SSE stream — pushes "a new file landed in your library" events
 	// to every logged-in browser. Doesn't need admin: the toast is
 	// useful for all viewers (even if only the admin can trigger scans).

@@ -54,7 +54,7 @@ import { useRouter, useSearchParams } from "@/lib/navigation"
 import { toast } from "sonner"
 import React from "react"
 import { useTranslation } from "react-i18next"
-import { BiArrowBack, BiPlay, BiRefresh, BiSolidCheckCircle } from "react-icons/bi"
+import { BiArrowBack, BiPlay, BiRefresh, BiSolidCheckCircle, BiSubtitles } from "react-icons/bi"
 import { FiLoader } from "react-icons/fi"
 
 type Phase = "searching" | "picking" | "preparing" | "preparing_subs" | "playing" | "error"
@@ -2090,13 +2090,62 @@ function useLocalFile(id: number) {
  * If a release has unplayable audio, the fix is upstream: rip with
  * an AAC track, or remux locally with `ffmpeg -c:v copy -c:a aac`.
  */
+type LocalSubTrack = {
+    streamIndex: number
+    lang?: string
+    codec?: string
+    title?: string
+}
+type LocalProbe = { duration: number; subtitles?: LocalSubTrack[] }
+
+function useLocalFileProbe(localId: number) {
+    return useQuery<LocalProbe>({
+        queryKey: ["local-library", "probe", localId],
+        queryFn: async () => {
+            const r = await fetch(`/api/v1/local-library/probe/${localId}`)
+            if (!r.ok) throw new Error(`probe ${r.status}`)
+            const j = await r.json()
+            return (j.data ?? j) as LocalProbe
+        },
+        staleTime: 60 * 60_000,
+    })
+}
+
+// Friendly label for a subtitle track — "Français · srt", "English",
+// or whatever info ffprobe gave us. Falls back to "Piste N" so the
+// menu is never empty.
+function subLabel(t: LocalSubTrack): string {
+    const langMap: Record<string, string> = {
+        fre: "Français",
+        fra: "Français",
+        fr: "Français",
+        eng: "English",
+        en: "English",
+        spa: "Español",
+        ger: "Deutsch",
+        ita: "Italiano",
+        jpn: "日本語",
+    }
+    const lang = t.lang ? (langMap[t.lang.toLowerCase()] ?? t.lang.toUpperCase()) : ""
+    const title = t.title?.trim()
+    if (title && lang) return `${title} (${lang})`
+    if (title) return title
+    if (lang) return lang
+    return `Piste ${t.streamIndex + 1}`
+}
+
 function LocalWatch({ localId }: { localId: number }) {
     const { t } = useTranslation()
     const router = useRouter()
     const searchParams = useSearchParams()
     const resumeSec = parseInt(searchParams.get("t") ?? "0", 10) || 0
     const { data: file, isLoading, error } = useLocalFile(localId)
+    const { data: probe } = useLocalFileProbe(localId)
     const videoRef = React.useRef<HTMLVideoElement>(null)
+    const [activeSub, setActiveSub] = React.useState<number | null>(null)
+    const [subMenuOpen, setSubMenuOpen] = React.useState(false)
+
+    const subs = probe?.subtitles ?? []
 
     // Apply the resume position on the first loadedmetadata. After
     // that the user is in charge — no re-seek loops.
@@ -2111,6 +2160,18 @@ function LocalWatch({ localId }: { localId: number }) {
         v.addEventListener("loadedmetadata", onLoaded, { once: true })
         return () => v.removeEventListener("loadedmetadata", onLoaded)
     }, [resumeSec])
+
+    // Toggle the chosen <track> on. The <track> elements are always
+    // mounted (so the browser pre-loads the VTTs), we just flip
+    // mode="showing" / "disabled" via textTracks API.
+    React.useEffect(() => {
+        const v = videoRef.current
+        if (!v) return
+        const tracks = v.textTracks
+        for (let i = 0; i < tracks.length; i++) {
+            tracks[i].mode = i === activeSub ? "showing" : "disabled"
+        }
+    }, [activeSub, subs.length])
 
     if (isLoading) {
         return (
@@ -2171,8 +2232,67 @@ function LocalWatch({ localId }: { localId: number }) {
                 >
                     <BiArrowBack className="size-5" />
                 </button>
-                <div className="absolute top-3 right-3 z-[60] bg-black/70 backdrop-blur-sm rounded-md px-3 py-1.5 text-white text-xs font-semibold max-w-[60vw] truncate">
-                    {displayTitle}
+                <div className="absolute top-3 right-3 z-[60] flex items-center gap-2">
+                    {/* Subtitle picker — only shown when the probe
+                        actually found embedded tracks. Toggles a
+                        small dropdown with "Aucun" + one entry per
+                        track (label = title / language / fallback). */}
+                    {subs.length > 0 && (
+                        <div className="relative">
+                            <button
+                                type="button"
+                                onClick={() => setSubMenuOpen(o => !o)}
+                                className={cn(
+                                    "bg-black/70 hover:bg-black/90 backdrop-blur-sm rounded-md",
+                                    "px-3 py-1.5 text-white text-xs font-semibold inline-flex items-center gap-1.5",
+                                )}
+                                aria-label={t("watch.subtitles", "Sous-titres")}
+                            >
+                                <BiSubtitles className="size-4" />
+                                {activeSub !== null && subs[activeSub]
+                                    ? subLabel(subs[activeSub])
+                                    : t("watch.subtitles", "Sous-titres")}
+                            </button>
+                            {subMenuOpen && (
+                                <div className={cn(
+                                    "absolute right-0 mt-1 min-w-[180px] py-1 rounded-md",
+                                    "bg-black/95 backdrop-blur-sm border border-white/10 shadow-xl",
+                                    "text-xs",
+                                )}>
+                                    <button
+                                        type="button"
+                                        onClick={() => { setActiveSub(null); setSubMenuOpen(false) }}
+                                        className={cn(
+                                            "w-full text-left px-3 py-1.5 transition-colors",
+                                            activeSub === null
+                                                ? "bg-brand-500/20 text-brand-100"
+                                                : "text-white/80 hover:bg-white/10",
+                                        )}
+                                    >
+                                        {t("watch.subtitle_off", "Aucun")}
+                                    </button>
+                                    {subs.map((s, i) => (
+                                        <button
+                                            key={s.streamIndex}
+                                            type="button"
+                                            onClick={() => { setActiveSub(i); setSubMenuOpen(false) }}
+                                            className={cn(
+                                                "w-full text-left px-3 py-1.5 transition-colors",
+                                                activeSub === i
+                                                    ? "bg-brand-500/20 text-brand-100"
+                                                    : "text-white/80 hover:bg-white/10",
+                                            )}
+                                        >
+                                            {subLabel(s)}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    )}
+                    <div className="bg-black/70 backdrop-blur-sm rounded-md px-3 py-1.5 text-white text-xs font-semibold max-w-[60vw] truncate">
+                        {displayTitle}
+                    </div>
                 </div>
                 <video
                     ref={videoRef}
@@ -2180,12 +2300,28 @@ function LocalWatch({ localId }: { localId: number }) {
                     autoPlay
                     controls
                     playsInline
+                    crossOrigin="anonymous"
                     className="w-full h-screen object-contain bg-black"
                     onError={(e) => {
                         const err = (e.currentTarget as HTMLVideoElement).error
                         console.error("[Notflix] local video error", err?.code, err?.message)
                     }}
-                />
+                >
+                    {/* Subtitle <track> elements — always mounted so the
+                        browser pre-fetches the VTT lazily. The active
+                        one is enabled via the textTracks API in the
+                        useEffect above. */}
+                    {subs.map((s, i) => (
+                        <track
+                            key={s.streamIndex}
+                            kind="subtitles"
+                            srcLang={s.lang || "und"}
+                            label={subLabel(s)}
+                            src={`/api/v1/local-library/subtitle/${localId}/${s.streamIndex}.vtt`}
+                            default={i === activeSub}
+                        />
+                    ))}
+                </video>
             </div>
         </>
     )

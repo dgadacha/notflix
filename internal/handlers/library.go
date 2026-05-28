@@ -1,10 +1,13 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -394,6 +397,187 @@ func (h *Handler) HandleConvertStatus(c echo.Context) error {
 func (h *Handler) HandleConvertCancel(c echo.Context) error {
 	library.CancelConvertBatch()
 	return RespondOK(c, map[string]any{"cancelled": true})
+}
+
+// -----------------------------------------------------------------------------
+// Subtitles — probe + on-demand VTT extraction
+// -----------------------------------------------------------------------------
+//
+// Local MKV / MP4 files often ship embedded subtitle tracks (VF, EN,
+// commentary…). The browser can't render SRT/ASS/PGS natively, so we
+// expose two endpoints:
+//
+//   GET /api/v1/local-library/probe/:id
+//       → JSON { duration, subtitles: [{streamIndex, lang, codec, title}] }
+//
+//   GET /api/v1/local-library/subtitle/:id/:streamIdx.vtt
+//       → text/vtt, extracted on demand via ffmpeg
+//
+// The frontend probes once, renders a "Sous-titres" menu in the
+// player, attaches a <track> per chosen subtitle. ffmpeg converts
+// most text-based formats (subrip, ass, mov_text) cleanly to WebVTT.
+// PGS (bitmap subs from Blu-rays) won't work — they need OCR.
+//
+// Audio tracks intentionally not exposed: switching audio via
+// server-side re-mux re-introduced the drift / freeze issues we just
+// killed by reverting to direct file streaming. On Safari, the
+// native controls expose multi-audio anyway.
+
+type localSubTrack struct {
+	StreamIndex int    `json:"streamIndex"` // stream index in the subtitle list (0, 1, 2…)
+	Lang        string `json:"lang,omitempty"`
+	Codec       string `json:"codec,omitempty"`
+	Title       string `json:"title,omitempty"`
+}
+
+type localProbeResp struct {
+	Duration  float64         `json:"duration"`
+	Subtitles []localSubTrack `json:"subtitles,omitempty"`
+}
+
+// HandleProbeLocalFile — GET /api/v1/local-library/probe/:id
+func (h *Handler) HandleProbeLocalFile(c echo.Context) error {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	absFile, errResp := h.resolveLocalFilePath(c, uint(id))
+	if errResp != nil {
+		return errResp
+	}
+
+	// One ffprobe call gets us duration + all stream metadata.
+	ctx, cancel := context.WithTimeout(c.Request().Context(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ffprobe",
+		"-v", "error",
+		"-show_entries", "format=duration:stream=index,codec_type,codec_name:stream_tags=language,title",
+		"-of", "json",
+		absFile,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]any{
+			"error": "ffprobe failed: " + err.Error(),
+		})
+	}
+
+	resp := localProbeResp{Subtitles: []localSubTrack{}}
+	var probe struct {
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
+		Streams []struct {
+			Index     int    `json:"index"`
+			CodecType string `json:"codec_type"`
+			CodecName string `json:"codec_name"`
+			Tags      struct {
+				Language string `json:"language"`
+				Title    string `json:"title"`
+			} `json:"tags"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(out, &probe); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]any{
+			"error": "ffprobe parse: " + err.Error(),
+		})
+	}
+	if d, err := strconv.ParseFloat(strings.TrimSpace(probe.Format.Duration), 64); err == nil {
+		resp.Duration = d
+	}
+	subIdx := 0
+	for _, s := range probe.Streams {
+		if s.CodecType != "subtitle" {
+			continue
+		}
+		resp.Subtitles = append(resp.Subtitles, localSubTrack{
+			StreamIndex: subIdx, // s:N — 0-based within subtitle streams
+			Lang:        s.Tags.Language,
+			Codec:       s.CodecName,
+			Title:       s.Tags.Title,
+		})
+		subIdx++
+	}
+	return RespondOK(c, resp)
+}
+
+// HandleExtractSubtitle — GET /api/v1/local-library/subtitle/:id/:idx.vtt
+//
+// Pipes ffmpeg output for one subtitle stream directly to the
+// response. Text-based subs (subrip, ass, mov_text) convert cleanly
+// to WebVTT. PGS / DVD bitmap subs are skipped server-side; the
+// frontend should treat 422 as "not extractable".
+func (h *Handler) HandleExtractSubtitle(c echo.Context) error {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	idxStr := strings.TrimSuffix(c.Param("idx"), ".vtt")
+	idx, err := strconv.Atoi(idxStr)
+	if err != nil || idx < 0 {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	absFile, errResp := h.resolveLocalFilePath(c, uint(id))
+	if errResp != nil {
+		return errResp
+	}
+
+	c.Response().Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	c.Response().Header().Set("Cache-Control", "private, max-age=3600")
+	c.Response().WriteHeader(http.StatusOK)
+
+	ctx := c.Request().Context()
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-hide_banner",
+		"-loglevel", "error",
+		"-i", absFile,
+		"-map", fmt.Sprintf("0:s:%d", idx),
+		"-c:s", "webvtt",
+		"-f", "webvtt",
+		"pipe:1",
+	)
+	cmd.Stdout = c.Response().Writer
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		log.Printf("subtitle extract %d/%d: %v | %s",
+			id, idx, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// resolveLocalFilePath looks up the LocalFile row, security-checks
+// it's still under the configured library dir, and returns the
+// absolute file path. On any failure returns an *echo.Response error
+// the caller should return verbatim.
+func (h *Handler) resolveLocalFilePath(c echo.Context, id uint) (string, error) {
+	f, err := h.App.Database.GetLocalFile(id)
+	if err != nil {
+		return "", c.NoContent(http.StatusNotFound)
+	}
+	configuredDir := strings.TrimSpace(h.App.Config.Library.Dir)
+	if configuredDir == "" {
+		return "", c.JSON(http.StatusServiceUnavailable, map[string]any{
+			"error": "library dir not configured",
+		})
+	}
+	absDir, _ := filepath.Abs(configuredDir)
+	absFile, _ := filepath.Abs(f.Path)
+	rel, err := filepath.Rel(absDir, absFile)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", c.JSON(http.StatusForbidden, map[string]any{
+			"error": "file outside configured library dir",
+		})
+	}
+	if _, err := os.Stat(absFile); err != nil {
+		return "", c.JSON(http.StatusNotFound, map[string]any{
+			"error": "file no longer exists on disk",
+		})
+	}
+	return absFile, nil
 }
 
 // Compile-time link check: ensure core.SettingLibraryDir is exported
