@@ -14,7 +14,7 @@ GO      ?= go
 NPM     ?= npm
 
 .DEFAULT_GOAL := help
-.PHONY: help dev backend frontend setup install-deps init-config build run clean docker docker-push deploy
+.PHONY: help dev backend frontend setup install-deps init-config build run clean docker docker-push deploy push-all
 
 # Container image — override per environment.
 IMAGE   ?= registry.gitlab.com/kidnar/notflix
@@ -74,6 +74,13 @@ run: build ## Build then launch the prod binary
 clean: ## Remove build artifacts (web/, notflix, notflix-web/out)
 	@rm -rf web notflix notflix-web/out
 	@echo "→ cleaned. Your datadir at $(DATADIR) is untouched."
+
+# ─────────────────────────────────────────────────────────────────────
+# Git — dual-remote helpers (GitHub origin + GitLab mirror)
+# ─────────────────────────────────────────────────────────────────────
+
+push-all: ## Push main to both origin (GitHub) + gitlab
+	@git push origin main && git push gitlab main
 
 # ─────────────────────────────────────────────────────────────────────
 # Container / k8s deploy
