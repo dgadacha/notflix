@@ -289,12 +289,16 @@ func (a *App) IsAnime(mediaType string, tmdbID int) bool {
 		log.Printf("is-anime: skip — tmdbID=%d (file not matched against TMDB at scan time?)", tmdbID)
 		return false
 	}
+	// Leading slash matters: the TMDB client concatenates baseURL +
+	// path verbatim, so "tv/N" produces ".../3tv/N" (broken). Other
+	// call sites (tmdb_proxy, admin_diagnostics) pass "/path" — we
+	// just have to follow the same convention.
 	var endpoint string
 	switch mediaType {
 	case "tv":
-		endpoint = fmt.Sprintf("tv/%d", tmdbID)
+		endpoint = fmt.Sprintf("/tv/%d", tmdbID)
 	case "movie":
-		endpoint = fmt.Sprintf("movie/%d", tmdbID)
+		endpoint = fmt.Sprintf("/movie/%d", tmdbID)
 	default:
 		log.Printf("is-anime: skip — unknown mediaType=%q (tmdbID=%d)", mediaType, tmdbID)
 		return false
