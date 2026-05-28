@@ -2206,13 +2206,17 @@ function LocalWatch({ localId }: { localId: number }) {
             {/* Mirror local plays into the watch-history just like the
                 TorBox flow does — Continue Watching shows them, the
                 ?t= resume URL works on re-open, and Because You
-                Watched recommendations seed from them. */}
+                Watched recommendations seed from them.
+                Season/episode MUST be forwarded for TV episodes,
+                otherwise the resume-via-Continue-Watching path can't
+                pick the right episode back (it falls through to the
+                cloud URL and surfaces "Aucune source trouvée"). */}
             {file.tmdbId > 0 && (
                 <NetflixWatchHistorySaver
                     tmdbId={file.tmdbId}
                     mediaType={mediaType}
-                    season={undefined}
-                    episode={undefined}
+                    season={mediaType === "tv" && file.season > 0 ? file.season : undefined}
+                    episode={mediaType === "tv" && file.episode > 0 ? file.episode : undefined}
                     title={displayTitle}
                     posterPath={file.posterPath}
                     backdropUrl={file.backdropPath}
