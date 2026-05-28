@@ -15,6 +15,7 @@
  * jotai atomWithStorage atoms the player + modal already read from, so
  * a change here applies on the very next /watch open without a refresh.
  */
+import { useLocalLibrary } from "@/app/(main)/_features/netflix/netflix-local-library"
 import { LanguageSwitcher } from "@/components/shared/language-switcher"
 import { cn } from "@/components/ui/core/styling"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -121,6 +122,12 @@ export function NetflixSettings() {
             </Section>
 
             {me?.isAdmin && (
+                <Section icon={<LuFolderOpen className="size-5" />} title={t("settings.library", "Bibliothèque locale")}>
+                    <LibraryPanel />
+                </Section>
+            )}
+
+            {me?.isAdmin && (
                 <Section icon={<BiShield className="size-5" />} title={t("settings.admin", "Administration")}>
                     <NavRow
                         primary={t("settings.admin_users", "Comptes utilisateurs")}
@@ -143,12 +150,6 @@ export function NetflixSettings() {
             {me?.isAdmin && (
                 <Section icon={<LuActivity className="size-5" />} title={t("settings.prowlarr_health", "État Prowlarr")}>
                     <ProwlarrHealthPanel />
-                </Section>
-            )}
-
-            {me?.isAdmin && (
-                <Section icon={<LuFolderOpen className="size-5" />} title={t("settings.library", "Bibliothèque locale")}>
-                    <LibraryPanel />
                 </Section>
             )}
 
@@ -1469,10 +1470,29 @@ function LibraryPanel() {
     const { t } = useTranslation()
     const qc = useQueryClient()
     const { data: dirData, isLoading } = useLibraryDir()
+    const { data: localFiles } = useLocalLibrary()
     const [editing, setEditing] = React.useState(false)
     const [draft, setDraft] = React.useState("")
     const [saveErr, setSaveErr] = React.useState<string | null>(null)
     const [scanErr, setScanErr] = React.useState<string | null>(null)
+
+    // Ventilation films / séries / épisodes — recomputed à chaque
+    // refresh de /api/v1/local-library. Une série = un tmdbId distinct.
+    const breakdown = React.useMemo(() => {
+        const files = localFiles ?? []
+        let movies = 0
+        let episodes = 0
+        const showIds = new Set<number>()
+        for (const f of files) {
+            if (f.mediaType === "tv") {
+                episodes++
+                if (f.tmdbId > 0) showIds.add(f.tmdbId)
+            } else {
+                movies++
+            }
+        }
+        return { movies, series: showIds.size, episodes, total: files.length }
+    }, [localFiles])
     // The scan is async on the backend — POST returns 202, the running
     // flag flips by reading /scan/status. We poll fast (1.5 s) as long
     // as the backend says running OR we just kicked off (small
@@ -1574,6 +1594,26 @@ function LibraryPanel() {
                     "Notflix scanne ce répertoire, parse les noms de fichiers, et match TMDB. Les films reconnus apparaissent dans la rangée « Bibliothèque locale » sur l'accueil et se lancent en direct (zéro Prowlarr, zéro TorBox).",
                 )}
             </p>
+
+            {/* Ventilation : films / séries / épisodes — l'inventaire
+                réel de ce qui est actuellement indexé en base. Reste
+                visible en permanence, pas seulement après un scan. */}
+            {breakdown.total > 0 && (
+                <div className="grid grid-cols-3 gap-2">
+                    <BreakdownStat
+                        label={t("settings.library_movies", "Films")}
+                        value={breakdown.movies}
+                    />
+                    <BreakdownStat
+                        label={t("settings.library_series", "Séries")}
+                        value={breakdown.series}
+                    />
+                    <BreakdownStat
+                        label={t("settings.library_episodes", "Épisodes")}
+                        value={breakdown.episodes}
+                    />
+                </div>
+            )}
 
             {/* Dir row */}
             <div className="space-y-2">
@@ -1707,6 +1747,17 @@ function Stat({ label, value, className }: { label: string; value: number | stri
         <div>
             <div className="text-[--muted] uppercase tracking-wider text-[9px]">{label}</div>
             <div className={cn("text-white font-bold tabular-nums", className)}>{value}</div>
+        </div>
+    )
+}
+
+/** Pavé compteur (films / séries / épisodes). Plus visible que le
+ *  petit Stat du dernier rapport — c'est l'état permanent de la bib. */
+function BreakdownStat({ label, value }: { label: string; value: number }) {
+    return (
+        <div className="bg-black/30 border border-white/10 rounded-md px-3 py-2 text-center">
+            <div className="text-white text-xl font-extrabold tabular-nums leading-none">{value}</div>
+            <div className="text-[--muted] uppercase tracking-wider text-[9px] mt-1">{label}</div>
         </div>
     )
 }
