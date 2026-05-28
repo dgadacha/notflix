@@ -10,6 +10,7 @@
  * Clicking a card opens /watch with the right season/episode + a `?t=`
  * resume position so the player seeks to where the user left off.
  */
+import { useLocalLibrary, type LocalFile } from "@/app/(main)/_features/netflix/netflix-local-library"
 import { ROW } from "@/app/(main)/_features/netflix/netflix.constants"
 import { cn } from "@/components/ui/core/styling"
 import { useRouter } from "@/lib/navigation"
@@ -35,6 +36,12 @@ export function NetflixContinueWatching() {
     const router = useRouter()
     const profileUid = useActiveProfileId()
     const history = useActiveProfileHistory()
+    // Local library lookup so a resume of a film/episode that lives
+    // on disk routes to /watch?localId=N instead of running through
+    // Prowlarr again. Without this, the "Aucune source trouvée" panel
+    // pops up on the first local title that doesn't happen to have a
+    // matching torrent indexer.
+    const { data: localFiles } = useLocalLibrary()
 
     const inProgress = React.useMemo<ProfileWatchEntry[]>(() => {
         if (!profileUid) return []
@@ -54,6 +61,18 @@ export function NetflixContinueWatching() {
     if (inProgress.length === 0) return null
 
     const onClick = (e: ProfileWatchEntry) => {
+        // Local short-circuit. For movies: any file matching the
+        // tmdbId wins. For TV: prefer an exact (season, episode)
+        // match, fall back to any episode of that season. If
+        // nothing local matches, fall through to the cloud flow.
+        const localId = pickResumeLocalId(localFiles ?? [], e)
+        if (localId != null) {
+            const params = new URLSearchParams({ localId: String(localId) })
+            params.set("t", String(Math.floor(e.currentTime)))
+            router.push(`/watch?${params.toString()}`)
+            return
+        }
+
         const params = new URLSearchParams({
             id: String(e.tmdbId),
             type: e.mediaType,
@@ -154,4 +173,35 @@ function ResumeCard({ entry, onClick }: { entry: ProfileWatchEntry; onClick: () 
             </div>
         </button>
     )
+}
+
+/** pickResumeLocalId — does any locally-scanned file cover the watch
+ *  history entry the user just clicked? Used by the Continue Watching
+ *  rail to route a resume click back to the local stream endpoint
+ *  instead of triggering Prowlarr.
+ *
+ *  For movies: any file whose tmdbId matches wins.
+ *  For TV: exact (season, episode) preferred, then any episode of the
+ *  same season. Returns null if nothing local matches — caller then
+ *  falls through to the cloud (TorBox) resume URL. */
+function pickResumeLocalId(files: LocalFile[], entry: ProfileWatchEntry): number | null {
+    if (!files || files.length === 0) return null
+    const matchingTitle = files.filter(f => f.tmdbId === entry.tmdbId)
+    if (matchingTitle.length === 0) return null
+
+    if (entry.mediaType === "movie") {
+        return matchingTitle[0].id
+    }
+    // TV — exact (season, episode) first, then any of the season.
+    if (entry.season > 0 && entry.episode > 0) {
+        const exact = matchingTitle.find(
+            f => f.season === entry.season && f.episode === entry.episode,
+        )
+        if (exact) return exact.id
+    }
+    if (entry.season > 0) {
+        const inSeason = matchingTitle.find(f => f.season === entry.season)
+        if (inSeason) return inSeason.id
+    }
+    return null
 }
