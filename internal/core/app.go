@@ -323,10 +323,14 @@ func (a *App) IsAnime(mediaType string, tmdbID int) bool {
 func (a *App) NewAudioLangPicker() func(*models.LocalFile) string {
 	def, anime := a.AudioLangPrefs()
 	return func(f *models.LocalFile) string {
-		if a.IsAnime(f.MediaType, f.TMDBID) {
-			return anime
+		isAnime := a.IsAnime(f.MediaType, f.TMDBID)
+		picked := def
+		if isAnime {
+			picked = anime
 		}
-		return def
+		log.Printf("audio-lang: %s (tmdb=%d type=%q) → anime=%v lang=%q",
+			filepath.Base(f.Path), f.TMDBID, f.MediaType, isAnime, picked)
+		return picked
 	}
 }
 

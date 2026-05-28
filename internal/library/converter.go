@@ -282,6 +282,8 @@ func runReorderBatch(ctx context.Context, store *db.Database, pickLang func(*mod
 
 		preferredLang := pickLang(f)
 		outcome, errMsg := reorderOne(ctx, f.Path, preferredLang)
+		log.Printf("reorder: %s — outcome=%s reason=%q (pref=%q)",
+			filepath.Base(f.Path), outcome, errMsg, preferredLang)
 
 		convertMu.Lock()
 		switch outcome {
@@ -289,6 +291,12 @@ func runReorderBatch(ctx context.Context, store *db.Database, pickLang func(*mod
 			convertState.Succeeded++
 		case "skipped":
 			convertState.Skipped++
+			// Surface skip reasons too — that's how the user
+			// discovers WHY their Demon Slayer didn't get reordered.
+			if errMsg != "" && len(convertState.Errors) < 20 {
+				convertState.Errors = append(convertState.Errors,
+					fmt.Sprintf("[ignoré] %s: %s", filepath.Base(f.Path), errMsg))
+			}
 		default:
 			convertState.Failed++
 			if errMsg != "" && len(convertState.Errors) < 20 {
@@ -316,7 +324,7 @@ func runReorderBatch(ctx context.Context, store *db.Database, pickLang func(*mod
 //   - "failed"  : ffprobe / ffmpeg / rename error
 func reorderOne(ctx context.Context, mp4Path, preferredLang string) (outcome, errMsg string) {
 	if strings.TrimSpace(preferredLang) == "" {
-		return "skipped", ""
+		return "skipped", "pas de langue préférée"
 	}
 	if _, err := os.Stat(mp4Path); err != nil {
 		return "failed", "source missing: " + err.Error()
@@ -324,13 +332,13 @@ func reorderOne(ctx context.Context, mp4Path, preferredLang string) (outcome, er
 
 	streams := probeAudioStreams(ctx, mp4Path)
 	if len(streams) == 0 {
-		return "skipped", "no audio streams"
+		return "skipped", "aucune piste audio"
 	}
 	prefLower := strings.ToLower(strings.TrimSpace(preferredLang))
 
 	// Already correct? Compare track 0 to the desired lang.
 	if matchLangCode(streams[0].Lang, prefLower) {
-		return "skipped", ""
+		return "skipped", fmt.Sprintf("track 0 déjà en %s", prefLower)
 	}
 	// Preferred lang in file at all?
 	preferredIdx := -1
@@ -341,7 +349,19 @@ func reorderOne(ctx context.Context, mp4Path, preferredLang string) (outcome, er
 		}
 	}
 	if preferredIdx < 0 {
-		return "skipped", "preferred lang not in source"
+		// List the tags we actually saw so the user can debug
+		// (eg. tags="fre,und" → un seul stream taggué FR + un sans
+		// tag, on aurait peut-être dû matcher l'untagged comme JP).
+		tags := make([]string, len(streams))
+		for i, s := range streams {
+			if s.Lang == "" {
+				tags[i] = "(sans tag)"
+			} else {
+				tags[i] = s.Lang
+			}
+		}
+		return "skipped", fmt.Sprintf("lang %q absente — tags présents : %s",
+			prefLower, strings.Join(tags, ", "))
 	}
 
 	// Disk space safety — though a -c copy remux uses only the source
