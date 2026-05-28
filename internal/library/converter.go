@@ -231,7 +231,13 @@ func convertOne(ctx context.Context, mkvPath string) (outcome, errMsg string) {
 		"-c:v", "copy", // bit-perfect video copy
 		"-map_metadata", "0",
 		"-map", "0:v:0",
-		"-map", "0:a:0?", // optional audio map — files without an audio track skip the audio side
+		// `-map 0:a?` keeps ALL audio tracks (?  = no-op when there
+		// are none). Releases tagged "MULTi" / "VFF+VO" typically
+		// pack the French and English tracks side-by-side; the old
+		// `-map 0:a:0?` dropped everything past the first track,
+		// which for some release groups was actually the VO and
+		// silently lost the VFF after conversion.
+		"-map", "0:a?",
 	}
 	// HEVC in MP4 needs the `hvc1` brand to play in Chrome/Safari.
 	// Without `-tag:v hvc1`, ffmpeg writes `hev1` which the browsers
