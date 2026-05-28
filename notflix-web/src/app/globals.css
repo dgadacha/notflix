@@ -1,3 +1,9 @@
+/* Bebas Neue — utilisé pour le mark "N" rouge de la navbar.
+ * Chargé depuis Google Fonts plutôt que self-hosted parce que c'est
+ * la seule utilisation et que le coût d'un fichier .woff2 dans
+ * public/fonts/ + une @font-face vaut pas le coup pour 1 glyphe. */
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

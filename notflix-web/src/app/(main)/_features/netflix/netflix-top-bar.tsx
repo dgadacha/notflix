@@ -52,20 +52,18 @@ export function NetflixTopBar() {
             )}
         >
             <div className="flex items-center h-16 lg:h-[68px] px-3 sm:px-6 lg:px-12 gap-2 sm:gap-4 lg:gap-10">
-                <SeaLink href="/" className="flex items-center shrink-0">
-                    {/* On mobile (< sm) the N mark is enough — keeps the
-                        navbar compact. From sm up we show the wordmark
-                        which already says "NOTFLIX" in its glyphs. */}
-                    <img
-                        src="/notflix-logo.svg"
-                        alt="Notflix"
-                        className="size-8 sm:hidden"
-                    />
-                    <img
-                        src="/notflix-wordmark.svg"
-                        alt="Notflix"
-                        className="hidden sm:block h-7 lg:h-9 w-auto"
-                    />
+                <SeaLink href="/" className="flex items-center shrink-0" aria-label="Notflix">
+                    {/* Wordmark texte rendu en Bebas Neue — condensé,
+                        tout-en-capitales par construction (Bebas n'a
+                        qu'un seul jeu de glyphes). Pas d'asset image,
+                        scale net en rétine, taille modérée pour rester
+                        dans l'esprit "discret" de la navbar. */}
+                    <span
+                        className="tracking-wide text-brand-500 text-2xl sm:text-[26px] lg:text-[28px] leading-none select-none"
+                        style={{ fontFamily: '"Bebas Neue", "Impact", sans-serif' }}
+                    >
+                        NOTFLIX
+                    </span>
                 </SeaLink>
 
                 {/* Nav links hidden < sm — the bottom tab bar takes over. */}
