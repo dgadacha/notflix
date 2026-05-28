@@ -236,11 +236,18 @@ func convertOne(ctx context.Context, mkvPath string) (outcome, errMsg string) {
 		// of audio per second of wall time on a modern CPU).
 		args = append(args, "-c:a", "aac", "-b:a", "192k", "-ac", "2")
 	}
+	// Write to <outPath>.tmp first, then atomic rename on success.
+	// Cheap (same filesystem) and protects against ffmpeg/Notflix
+	// crashing mid-mux leaving a corrupt .mp4 that the next batch
+	// would treat as "already converted" and skip.
+	tmpPath := outPath + ".tmp"
+	// In case a previous run left a stale .tmp behind.
+	_ = os.Remove(tmpPath)
 	args = append(args,
 		// faststart moves the moov to the front so the browser can
 		// start playback before the whole file downloads.
 		"-movflags", "+faststart",
-		outPath,
+		tmpPath,
 	)
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
@@ -249,7 +256,7 @@ func convertOne(ctx context.Context, mkvPath string) (outcome, errMsg string) {
 
 	if err := cmd.Run(); err != nil {
 		// Tidy up the partial / corrupt output.
-		_ = os.Remove(outPath)
+		_ = os.Remove(tmpPath)
 		if ctx.Err() != nil {
 			return "failed", "cancelled"
 		}
@@ -263,19 +270,29 @@ func convertOne(ctx context.Context, mkvPath string) (outcome, errMsg string) {
 		return "failed", msg
 	}
 
-	// Sanity check the output.
-	info, err := os.Stat(outPath)
+	// Sanity check the temp output.
+	info, err := os.Stat(tmpPath)
 	if err != nil || info.Size() == 0 {
-		_ = os.Remove(outPath)
+		_ = os.Remove(tmpPath)
 		return "failed", "ffmpeg produced no output"
+	}
+
+	// Atomic rename → the .mp4 only exists once it's fully valid.
+	if err := os.Rename(tmpPath, outPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return "failed", "rename .tmp → .mp4 failed: " + err.Error()
 	}
 
 	// Delete the source MKV. If this fails, we still consider the
 	// conversion successful — the MP4 is valid; the user can clean up
 	// the MKV manually later.
+	srcMB := info.Size() >> 20
 	if err := os.Remove(mkvPath); err != nil {
 		log.Printf("convert: removed %s mp4 but couldn't delete .mkv: %v",
 			filepath.Base(outPath), err)
+	} else {
+		log.Printf("convert: %s done (%d MB freed)",
+			filepath.Base(outPath), srcMB)
 	}
 
 	return "ok", ""
