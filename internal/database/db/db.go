@@ -417,6 +417,7 @@ func (db *Database) UpsertLocalFile(f *models.LocalFile) (*models.LocalFile, err
 				"parsed_title", "parsed_year",
 				"tmdb_id", "media_type", "title",
 				"poster_path", "backdrop_path", "overview", "year",
+				"season", "episode",
 				"updated_at",
 			}),
 		}).

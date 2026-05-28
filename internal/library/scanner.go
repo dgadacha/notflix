@@ -1,14 +1,24 @@
-// Package library scans a local directory for video files, parses their
-// filenames into (title, year), looks each one up on TMDB, and persists
-// the result as a LocalFile row. The frontend then renders these as a
-// "Bibliothèque locale" rail on the home page; clicking a card plays
-// the file directly from disk through the stream endpoint, bypassing
-// Prowlarr + TorBox entirely.
+// Package library scans a local directory for video files, parses
+// their filenames into (title, year) for movies or (show, season,
+// episode) for series, looks each up on TMDB, and persists the result
+// as a LocalFile row. The frontend renders these as a "Bibliothèque
+// locale" home rail; clicking a card plays the file directly from
+// disk via /api/v1/local-library/stream/:id — no Prowlarr, no TorBox.
 //
-// Scope: movies only. TV is deferred — episode parsing has enough
-// edge cases (S01E01 vs " - 01 " vs 1x01) that mixing it into the
-// same scanner produces wrong matches half the time. Add a separate
-// scanner mode later.
+// Layout supported (typical user library):
+//
+//	library/
+//	├── Movie.2024.1080p.GROUP/
+//	│   └── Movie.2024.1080p.GROUP.mkv          (folder-as-movie)
+//	├── Series.S01.1080p.GROUP/
+//	│   ├── Series.S01E01.1080p.mkv             (TV season folder)
+//	│   ├── Series.S01E02.1080p.mkv
+//	│   └── …
+//	├── Some.Other.Movie.2025.mkv                (orphan movie at root)
+//	└── Sample/                                  (skipped — noise dir)
+//
+// Episode parsing handles both SxxExx and 1x05 patterns. Show name is
+// taken from the folder name (everything before the SxxExx marker).
 package library
 
 import (
@@ -23,6 +33,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"notflix/internal/database/db"
@@ -30,8 +41,8 @@ import (
 	"notflix/internal/tmdb"
 )
 
-// Extensions we treat as playable video. Other media (subs, nfo,
-// readme, sample folders) are skipped silently.
+// Playable video extensions. Anything else (subs, nfo, sample.jpg,
+// readme.txt) is silently skipped.
 var videoExtensions = map[string]bool{
 	".mkv":  true,
 	".mp4":  true,
@@ -46,99 +57,241 @@ var videoExtensions = map[string]bool{
 	".mpeg": true,
 }
 
-// Minimum file size to consider — release groups ship 5-50 KB "Sample"
-// teaser files inside the same folder. Anything under 50 MB is
-// treated as junk and ignored.
+// Files below this size are treated as junk (release-group "Sample"
+// teasers ship ~5-50 KB, the actual film is 1-50 GB).
 const minVideoBytes = 50 << 20
 
-// First 4-digit year in the filename. Captures 19xx / 20xx / 21xx —
-// anything past 2199 isn't a film year, and pre-1900 collides with
-// release group numerics ("AVC1" → 1xxx).
+// First 4-digit year in the filename / foldername. 19xx / 20xx / 21xx
+// only — release-group hex sequences ("AVC1") otherwise hit on year=1.
 var yearPattern = regexp.MustCompile(`\b(19\d{2}|20\d{2}|21\d{2})\b`)
 
-// ParseResult is what we extract from one filename. Year is 0 when no
-// 4-digit year was found — the TMDB search then runs unfiltered and
-// we take the best result regardless of year.
+// SxxExx or SxxxExxx — case-insensitive, captures (season, episode).
+var seasonEpisodeSExEPattern = regexp.MustCompile(`(?i)\bS(\d{1,3})E(\d{1,3})\b`)
+
+// 1x05 / 12x05 — alternative episode notation common on anime / older
+// rips. Captures (season, episode).
+var seasonEpisodeXPattern = regexp.MustCompile(`\b(\d{1,2})x(\d{2})\b`)
+
+// Season-only pattern, e.g. "Show.S02.GROUP" — used on TV season
+// folders that don't repeat SxxExx in the folder name itself.
+var seasonOnlyPattern = regexp.MustCompile(`(?i)\bS(\d{1,3})\b`)
+
+// Folder names we never descend into (release-group leftovers,
+// trash, behind-the-scenes featurettes — none of these are the main
+// film/episode the user wants to play).
+var skipFolders = map[string]bool{
+	"sample":       true,
+	"samples":      true,
+	"extras":       true,
+	"featurettes":  true,
+	"behind the scenes": true,
+	"deleted scenes":    true,
+	".trash":       true,
+	"@eadir":       true, // Synology metadata
+}
+
+// ParseResult — output of ParseFilename for movies. Title is the
+// cleaned-up basename (or foldername); Year is the 4-digit year or 0
+// when no year was found.
 type ParseResult struct {
 	Title string
 	Year  int
 }
 
-// ParseFilename peels the title + year out of a video filename. The
-// input is the basename (no directory). Common shapes handled:
-//
-//	"Inception (2010) [1080p BluRay x264].mkv"   → Inception, 2010
-//	"Inception.2010.1080p.BluRay.x264.mkv"        → Inception, 2010
-//	"The.Matrix.1999.UHD.HDR.x265-GROUP.mkv"      → The Matrix, 1999
-//	"Tenet 2020 1080p.mkv"                        → Tenet, 2020
-//	"Some Movie.mkv"                              → Some Movie, 0
-//
-// The year is the FIRST 4-digit year found. Everything before it is
-// the title (with dots / underscores collapsed into spaces). When no
-// year is found we use the whole basename minus the extension.
+// ParseFilename peels (title, year) out of a video filename or folder
+// name. The first 4-digit year wins; everything before becomes the
+// title (dots/underscores replaced with spaces, bracket noise
+// stripped). Returns Year=0 when no year is present.
 func ParseFilename(name string) ParseResult {
 	stem := strings.TrimSuffix(name, filepath.Ext(name))
-
 	idx := yearPattern.FindStringIndex(stem)
 	if idx == nil {
 		return ParseResult{Title: cleanTitle(stem)}
 	}
 	yearStr := stem[idx[0]:idx[1]]
 	year, _ := strconv.Atoi(yearStr)
-
-	rawTitle := stem[:idx[0]]
-	return ParseResult{Title: cleanTitle(rawTitle), Year: year}
+	return ParseResult{Title: cleanTitle(stem[:idx[0]]), Year: year}
 }
 
-// cleanTitle turns "The.Matrix" / "the_matrix" / "The  Matrix  " into
-// "The Matrix". Trailing dashes and brackets from release-group
-// suffixes are dropped.
+// EpisodeParse — output of ParseEpisode for a TV episode file. ShowName
+// is the cleaned-up prefix BEFORE the SxxExx marker; Season+Episode
+// are the captured numbers. Returns ok=false when neither pattern
+// matched — caller should treat the file as a movie or skip.
+type EpisodeParse struct {
+	ShowName string
+	Season   int
+	Episode  int
+}
+
+// ParseEpisode tries SxxExx then 1x05 against the filename. Falls back
+// to (ok=false) on no match. Show name is everything before the
+// matched marker, cleaned.
+func ParseEpisode(name string) (EpisodeParse, bool) {
+	stem := strings.TrimSuffix(name, filepath.Ext(name))
+
+	if m := seasonEpisodeSExEPattern.FindStringSubmatchIndex(stem); m != nil {
+		season, _ := strconv.Atoi(stem[m[2]:m[3]])
+		episode, _ := strconv.Atoi(stem[m[4]:m[5]])
+		return EpisodeParse{
+			ShowName: cleanTitle(stem[:m[0]]),
+			Season:   season,
+			Episode:  episode,
+		}, true
+	}
+	if m := seasonEpisodeXPattern.FindStringSubmatchIndex(stem); m != nil {
+		season, _ := strconv.Atoi(stem[m[2]:m[3]])
+		episode, _ := strconv.Atoi(stem[m[4]:m[5]])
+		return EpisodeParse{
+			ShowName: cleanTitle(stem[:m[0]]),
+			Season:   season,
+			Episode:  episode,
+		}, true
+	}
+	return EpisodeParse{}, false
+}
+
+// ExtractSeasonFromFolder returns the season number if a folder name
+// declares one (e.g. "Show.S02.GROUP" → 2). 0 when no Sxx marker is
+// present.
+func ExtractSeasonFromFolder(name string) int {
+	if m := seasonOnlyPattern.FindStringSubmatch(name); m != nil {
+		n, _ := strconv.Atoi(m[1])
+		return n
+	}
+	return 0
+}
+
+// FolderShowName strips the S\d{1,3} marker (and anything after it)
+// from a TV season folder name so the remainder is just the show
+// title: "Euphoria.S01.MULTi.1080p" → "Euphoria".
+func FolderShowName(folder string) string {
+	idx := seasonOnlyPattern.FindStringIndex(folder)
+	if idx == nil {
+		return cleanTitle(folder)
+	}
+	return cleanTitle(folder[:idx[0]])
+}
+
 func cleanTitle(raw string) string {
 	s := raw
 	s = strings.ReplaceAll(s, ".", " ")
 	s = strings.ReplaceAll(s, "_", " ")
-	// Strip leading/trailing bracket noise (e.g. "[GroupName]Movie")
 	s = strings.Trim(s, "()[]{}- \t")
-	// Collapse runs of whitespace.
 	s = strings.Join(strings.Fields(s), " ")
 	return s
+}
+
+// -----------------------------------------------------------------------------
+// Live progress state
+// -----------------------------------------------------------------------------
+
+// ProgressSnapshot is the JSON-friendly read-only view of the current
+// scan state. Returned by Progress() to the handler layer; unsafe to
+// mutate (treat as a value type).
+type ProgressSnapshot struct {
+	Running     bool   `json:"running"`
+	StartedAt   string `json:"startedAt,omitempty"`
+	Total       int    `json:"total"`
+	Current     int    `json:"current"`
+	CurrentFile string `json:"currentFile,omitempty"`
+	Matched     int    `json:"matched"`
+	Unmatched   int    `json:"unmatched"`
+}
+
+type progressState struct {
+	mu          sync.RWMutex
+	running     bool
+	startedAt   time.Time
+	total       int
+	current     int
+	currentFile string
+	matched     int
+	unmatched   int
+}
+
+var globalProgress = &progressState{}
+
+// Progress returns the current scan state as a snapshot. Safe to call
+// at any time; the status endpoint hits this every ~1.5 s while a
+// scan is running.
+func Progress() ProgressSnapshot {
+	globalProgress.mu.RLock()
+	defer globalProgress.mu.RUnlock()
+	startedAt := ""
+	if !globalProgress.startedAt.IsZero() {
+		startedAt = globalProgress.startedAt.Format(time.RFC3339)
+	}
+	return ProgressSnapshot{
+		Running:     globalProgress.running,
+		StartedAt:   startedAt,
+		Total:       globalProgress.total,
+		Current:     globalProgress.current,
+		CurrentFile: globalProgress.currentFile,
+		Matched:     globalProgress.matched,
+		Unmatched:   globalProgress.unmatched,
+	}
+}
+
+func (p *progressState) reset(total int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.running = true
+	p.startedAt = time.Now()
+	p.total = total
+	p.current = 0
+	p.currentFile = ""
+	p.matched = 0
+	p.unmatched = 0
+}
+
+func (p *progressState) tick(file string, matched bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.current++
+	p.currentFile = file
+	if matched {
+		p.matched++
+	} else {
+		p.unmatched++
+	}
+}
+
+func (p *progressState) finish() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.running = false
+	p.currentFile = ""
 }
 
 // -----------------------------------------------------------------------------
 // Scan orchestration
 // -----------------------------------------------------------------------------
 
-// ScanReport is returned by Scan to the caller. Surfaced in the API
-// response so the settings UI can show "X matched, Y unmatched, took
-// Zms".
+// ScanReport — returned once the scan finishes, surfaced in the API
+// response so the settings UI can show the post-scan summary card.
 type ScanReport struct {
-	StartedAt   time.Time `json:"startedAt"`
-	FinishedAt  time.Time `json:"finishedAt"`
-	Directory   string    `json:"directory"`
-	FilesSeen   int       `json:"filesSeen"`
-	Matched     int       `json:"matched"`
-	Unmatched   int       `json:"unmatched"`
-	DurationMs  int64     `json:"durationMs"`
-	Removed     int       `json:"removed"`
-	WalkError   string    `json:"walkError,omitempty"`
+	StartedAt  time.Time `json:"startedAt"`
+	FinishedAt time.Time `json:"finishedAt"`
+	Directory  string    `json:"directory"`
+	FilesSeen  int       `json:"filesSeen"`
+	Matched    int       `json:"matched"`
+	Unmatched  int       `json:"unmatched"`
+	Movies     int       `json:"movies"`
+	Episodes   int       `json:"episodes"`
+	DurationMs int64     `json:"durationMs"`
+	Removed    int       `json:"removed"`
+	WalkError  string    `json:"walkError,omitempty"`
 }
 
-// TMDBSearcher is the slice of *tmdb.Client we actually use. Defined
-// as an interface so unit tests can stub it without spinning a real
-// HTTP server.
+// TMDBSearcher is the slice of *tmdb.Client we actually use.
 type TMDBSearcher interface {
 	Get(ctx context.Context, path string, params url.Values) ([]byte, error)
 }
 
-// Scan walks `dir` recursively, parses every video file's name, looks
-// each one up on TMDB, and upserts a LocalFile row. Returns a
-// ScanReport. Safe to call repeatedly — re-scans update metadata in
-// place and remove rows whose path no longer exists.
-//
-// The TMDB lookups serialise (one at a time) on purpose: TMDB
-// rate-limits at 40 req / 10 s per IP, and our own SQLite cache makes
-// repeats free anyway. Parallel scanning didn't help on real test
-// libraries.
+// Scan walks `dir`, classifies each top-level entry, parses + matches
+// against TMDB, and upserts a LocalFile row per video file. Cleans up
+// rows whose path no longer exists. Updates the package-level
+// progress state throughout so the settings UI can render a live bar.
 func Scan(ctx context.Context, dir string, t TMDBSearcher, store *db.Database) (*ScanReport, error) {
 	report := &ScanReport{
 		StartedAt: time.Now(),
@@ -158,75 +311,22 @@ func Scan(ctx context.Context, dir string, t TMDBSearcher, store *db.Database) (
 		return report, fmt.Errorf("scan: %q is not a directory", abs)
 	}
 
-	seenPaths := make([]string, 0, 256)
+	// Phase 1: pre-walk to count target files. Fast — just stat each
+	// entry, no TMDB. Lets the UI render a real "X / Y" progress bar.
+	total := countVideoFiles(abs)
+	globalProgress.reset(total)
+	defer globalProgress.finish()
 
-	walkErr := filepath.WalkDir(abs, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// Permission denied on a subdir → log and skip, don't fail
-			// the whole scan.
-			log.Printf("library scan: walk %s: %v", path, err)
-			return nil
-		}
-		if d.IsDir() {
-			// Skip well-known noise dirs.
-			switch strings.ToLower(d.Name()) {
-			case "sample", "samples", "extras", "featurettes", ".trash":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		ext := strings.ToLower(filepath.Ext(d.Name()))
-		if !videoExtensions[ext] {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil || info.Size() < minVideoBytes {
-			return nil
-		}
-
-		report.FilesSeen++
-		seenPaths = append(seenPaths, path)
-
-		parsed := ParseFilename(d.Name())
-		row := &models.LocalFile{
-			Path:        path,
-			SizeBytes:   info.Size(),
-			ScannedAt:   time.Now(),
-			ParsedTitle: parsed.Title,
-			ParsedYear:  parsed.Year,
-			MediaType:   "movie",
-		}
-
-		if match, matchErr := matchTMDB(ctx, t, parsed); matchErr == nil && match != nil {
-			row.TMDBID = match.ID
-			row.Title = match.Title
-			row.PosterPath = match.PosterPath
-			row.BackdropPath = match.BackdropPath
-			row.Overview = match.Overview
-			row.Year = extractYear(match.ReleaseDate)
-			report.Matched++
-		} else {
-			report.Unmatched++
-			if matchErr != nil {
-				log.Printf("library scan: tmdb match failed for %q: %v", parsed.Title, matchErr)
-			}
-		}
-
-		if _, err := store.UpsertLocalFile(row); err != nil {
-			log.Printf("library scan: upsert %s: %v", path, err)
-		}
-		return nil
-	})
-
-	if walkErr != nil {
-		report.WalkError = walkErr.Error()
+	// Phase 2: classify top-level entries and process.
+	seenPaths := make([]string, 0, total)
+	classifyErr := classifyAndProcess(ctx, t, store, abs, &seenPaths, report)
+	if classifyErr != nil {
+		report.WalkError = classifyErr.Error()
 	}
 
-	// Prune rows whose path is no longer present. Only if the walk
-	// itself succeeded — otherwise we'd delete everything on a
-	// permission glitch.
-	if walkErr == nil {
+	// Phase 3: prune rows whose path is no longer present. Only when
+	// the walk succeeded; a permission glitch shouldn't wipe the DB.
+	if classifyErr == nil {
 		if removed, derr := store.DeleteLocalFilesNotIn(seenPaths); derr == nil {
 			report.Removed = int(removed)
 		}
@@ -237,10 +337,313 @@ func Scan(ctx context.Context, dir string, t TMDBSearcher, store *db.Database) (
 	return report, nil
 }
 
-// matchTMDB queries /search/movie with the parsed title (+ year when
-// available) and returns the first hit. Returns nil, nil when TMDB
-// has no result for the title.
-func matchTMDB(ctx context.Context, t TMDBSearcher, parsed ParseResult) (*tmdbMovie, error) {
+// countVideoFiles does a cheap pre-walk (no TMDB, no upsert) just to
+// count files we'll actually process. Excludes Sample folders + tiny
+// junk files so the progress bar's denominator matches what the main
+// pass will process. Errors are swallowed — worst case the bar
+// over- or under-estimates by a few percent.
+func countVideoFiles(root string) int {
+	count := 0
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if skipFolders[strings.ToLower(d.Name())] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !videoExtensions[strings.ToLower(filepath.Ext(d.Name()))] {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil || info.Size() < minVideoBytes {
+			return nil
+		}
+		count++
+		return nil
+	})
+	return count
+}
+
+// classifyAndProcess inspects each top-level entry under root and
+// dispatches to processFile (root-level file) or processFolder
+// (subfolder).
+func classifyAndProcess(
+	ctx context.Context,
+	t TMDBSearcher,
+	store *db.Database,
+	root string,
+	seenPaths *[]string,
+	report *ScanReport,
+) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+
+	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if e.IsDir() {
+			if skipFolders[strings.ToLower(e.Name())] {
+				continue
+			}
+			processFolder(ctx, t, store, filepath.Join(root, e.Name()), e.Name(), seenPaths, report)
+			continue
+		}
+		// Root-level file: treat as movie if it's a playable video.
+		if !videoExtensions[strings.ToLower(filepath.Ext(e.Name()))] {
+			continue
+		}
+		fullPath := filepath.Join(root, e.Name())
+		info, ierr := os.Stat(fullPath)
+		if ierr != nil || info.Size() < minVideoBytes {
+			continue
+		}
+		processMovieFile(ctx, t, store, fullPath, info, "", seenPaths, report)
+	}
+	return nil
+}
+
+// videoEntry is a tiny tuple — promoted to package scope so
+// processFolder and processTVFolder share the same type, otherwise Go
+// treats two identical anonymous struct definitions as incompatible.
+type videoEntry struct {
+	path string
+	info os.FileInfo
+	name string
+}
+
+// processFolder picks between TV-season-folder and movie-folder
+// strategies based on the contents:
+//
+//   - If the folder name carries an Sxx marker AND at least one inner
+//     file matches SxxExx → TV season folder, each video file is an
+//     episode.
+//   - Otherwise → movie folder, every video file is treated as the
+//     main feature (usually only 1; multi-file movies = part1/part2
+//     are rare enough that we don't dedupe).
+//
+// TMDB search runs ONCE for the TV show (folder-level), then each
+// episode reuses that match — saves one HTTP call per episode and
+// guarantees all episodes of the same season land on the same show id.
+func processFolder(
+	ctx context.Context,
+	t TMDBSearcher,
+	store *db.Database,
+	folderPath, folderName string,
+	seenPaths *[]string,
+	report *ScanReport,
+) {
+	entries, err := os.ReadDir(folderPath)
+	if err != nil {
+		log.Printf("library scan: read %s: %v", folderPath, err)
+		return
+	}
+
+	// Collect the playable video files inside.
+	var videos []videoEntry
+	for _, e := range entries {
+		if e.IsDir() {
+			// One level deep is enough for the user's typical layout.
+			// Subdirs inside a movie/season folder are noise (Subs/,
+			// Sample/, Featurettes/) and the skip list catches them.
+			if skipFolders[strings.ToLower(e.Name())] {
+				continue
+			}
+			// Recurse for nested season folders — eg.
+			// "Show/Season 01/episode.mkv".
+			processFolder(ctx, t, store, filepath.Join(folderPath, e.Name()), e.Name(), seenPaths, report)
+			continue
+		}
+		if !videoExtensions[strings.ToLower(filepath.Ext(e.Name()))] {
+			continue
+		}
+		fullPath := filepath.Join(folderPath, e.Name())
+		info, ierr := os.Stat(fullPath)
+		if ierr != nil || info.Size() < minVideoBytes {
+			continue
+		}
+		videos = append(videos, videoEntry{path: fullPath, info: info, name: e.Name()})
+	}
+	if len(videos) == 0 {
+		return
+	}
+
+	// Detect TV: folder name has Sxx AND at least one file matches
+	// SxxExx. Either condition alone is too weak (folder named "S03"
+	// could be a movie filed weirdly; SxxExx in one file out of 8
+	// could be a typo).
+	folderSeason := ExtractSeasonFromFolder(folderName)
+	hasEpisodeFiles := false
+	for _, v := range videos {
+		if _, ok := ParseEpisode(v.name); ok {
+			hasEpisodeFiles = true
+			break
+		}
+	}
+	isTVFolder := folderSeason > 0 && hasEpisodeFiles
+
+	if isTVFolder {
+		processTVFolder(ctx, t, store, folderName, videos, seenPaths, report)
+	} else {
+		// Movie folder. The filename inside usually carries the title
+		// too; fall back to the folder name when the file is a bare
+		// "movie.mkv".
+		for _, v := range videos {
+			processMovieFile(ctx, t, store, v.path, v.info, folderName, seenPaths, report)
+		}
+	}
+}
+
+// processTVFolder ties every episode inside the folder to the same
+// TMDB show by searching ONCE on the folder's show name, then
+// upserting one LocalFile per episode with season + episode set.
+func processTVFolder(
+	ctx context.Context,
+	t TMDBSearcher,
+	store *db.Database,
+	folderName string,
+	videos []videoEntry,
+	seenPaths *[]string,
+	report *ScanReport,
+) {
+	showName := FolderShowName(folderName)
+	tvMatch, _ := matchTMDBTV(ctx, t, showName)
+
+	for _, v := range videos {
+		ep, ok := ParseEpisode(v.name)
+		if !ok {
+			// Episode pattern missing — fall back to treating it as
+			// part of the show but with season/episode = 0. Better
+			// than skipping (the file IS playable and Want to show up
+			// in the rail) but the user might need to rename.
+			ep = EpisodeParse{ShowName: showName}
+		}
+
+		row := &models.LocalFile{
+			Path:        v.path,
+			SizeBytes:   v.info.Size(),
+			ScannedAt:   time.Now(),
+			ParsedTitle: ep.ShowName,
+			MediaType:   "tv",
+			Season:      ep.Season,
+			Episode:     ep.Episode,
+		}
+		matched := false
+		if tvMatch != nil {
+			row.TMDBID = tvMatch.ID
+			row.Title = tvMatch.Name
+			row.PosterPath = tvMatch.PosterPath
+			row.BackdropPath = tvMatch.BackdropPath
+			row.Overview = tvMatch.Overview
+			row.Year = extractYear(tvMatch.FirstAirDate)
+			matched = true
+		}
+		if matched {
+			report.Matched++
+			report.Episodes++
+		} else {
+			report.Unmatched++
+		}
+		report.FilesSeen++
+
+		if _, err := store.UpsertLocalFile(row); err != nil {
+			log.Printf("library scan: upsert %s: %v", v.path, err)
+		}
+		*seenPaths = append(*seenPaths, v.path)
+		globalProgress.tick(filepath.Base(v.path), matched)
+	}
+}
+
+// processMovieFile handles one movie video file. folderHint is the
+// containing folder name (when called from processFolder) so we have
+// a fallback title source if the filename itself is a bare
+// "movie.mkv".
+func processMovieFile(
+	ctx context.Context,
+	t TMDBSearcher,
+	store *db.Database,
+	path string,
+	info os.FileInfo,
+	folderHint string,
+	seenPaths *[]string,
+	report *ScanReport,
+) {
+	parsed := ParseFilename(filepath.Base(path))
+	// If the filename parse came up empty (a bare "movie.mkv" inside
+	// a "Title.2024.GROUP" folder), fall back to the folder name.
+	if (parsed.Title == "" || parsed.Year == 0) && folderHint != "" {
+		alt := ParseFilename(folderHint)
+		if parsed.Title == "" {
+			parsed.Title = alt.Title
+		}
+		if parsed.Year == 0 {
+			parsed.Year = alt.Year
+		}
+	}
+
+	row := &models.LocalFile{
+		Path:        path,
+		SizeBytes:   info.Size(),
+		ScannedAt:   time.Now(),
+		ParsedTitle: parsed.Title,
+		ParsedYear:  parsed.Year,
+		MediaType:   "movie",
+	}
+	matched := false
+	if match, _ := matchTMDBMovie(ctx, t, parsed); match != nil {
+		row.TMDBID = match.ID
+		row.Title = match.Title
+		row.PosterPath = match.PosterPath
+		row.BackdropPath = match.BackdropPath
+		row.Overview = match.Overview
+		row.Year = extractYear(match.ReleaseDate)
+		matched = true
+	}
+	if matched {
+		report.Matched++
+		report.Movies++
+	} else {
+		report.Unmatched++
+	}
+	report.FilesSeen++
+
+	if _, err := store.UpsertLocalFile(row); err != nil {
+		log.Printf("library scan: upsert %s: %v", path, err)
+	}
+	*seenPaths = append(*seenPaths, path)
+	globalProgress.tick(filepath.Base(path), matched)
+}
+
+// -----------------------------------------------------------------------------
+// TMDB matching
+// -----------------------------------------------------------------------------
+
+type tmdbMovie struct {
+	ID           int     `json:"id"`
+	Title        string  `json:"title"`
+	ReleaseDate  string  `json:"release_date"`
+	PosterPath   string  `json:"poster_path"`
+	BackdropPath string  `json:"backdrop_path"`
+	Overview     string  `json:"overview"`
+	Popularity   float64 `json:"popularity"`
+}
+
+type tmdbTV struct {
+	ID           int     `json:"id"`
+	Name         string  `json:"name"`
+	FirstAirDate string  `json:"first_air_date"`
+	PosterPath   string  `json:"poster_path"`
+	BackdropPath string  `json:"backdrop_path"`
+	Overview     string  `json:"overview"`
+	Popularity   float64 `json:"popularity"`
+}
+
+func matchTMDBMovie(ctx context.Context, t TMDBSearcher, parsed ParseResult) (*tmdbMovie, error) {
 	if parsed.Title == "" {
 		return nil, nil
 	}
@@ -259,45 +662,48 @@ func matchTMDB(ctx context.Context, t TMDBSearcher, parsed ParseResult) (*tmdbMo
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, err
 	}
-	if len(resp.Results) == 0 {
-		// One more try without the year — rip-named years are often
-		// off by one (a 2023 film tagged 2022 because of festival
-		// release vs theatrical, etc.).
-		if parsed.Year > 0 {
-			q.Del("year")
-			body, err := t.Get(ctx, "/search/movie", q)
-			if err != nil {
-				return nil, err
-			}
-			if err := json.Unmarshal(body, &resp); err != nil {
-				return nil, err
-			}
+	// Retry without the year — rip-named years are often off by one
+	// (festival vs theatrical release).
+	if len(resp.Results) == 0 && parsed.Year > 0 {
+		q.Del("year")
+		body, err = t.Get(ctx, "/search/movie", q)
+		if err != nil {
+			return nil, err
 		}
-		if len(resp.Results) == 0 {
-			return nil, nil
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, err
 		}
 	}
-	// TMDB sorts by popularity desc; the first result is almost always
-	// the right one. Returning &resp.Results[0] would alias the slice
-	// in odd ways under future refactors — copy.
-	first := resp.Results[0]
-	return &first, nil
+	if len(resp.Results) == 0 {
+		return nil, nil
+	}
+	r := resp.Results[0]
+	return &r, nil
 }
 
-// tmdbMovie is the subset of /search/movie response we actually use.
-type tmdbMovie struct {
-	ID           int     `json:"id"`
-	Title        string  `json:"title"`
-	OriginalTitle string `json:"original_title"`
-	ReleaseDate  string  `json:"release_date"`
-	PosterPath   string  `json:"poster_path"`
-	BackdropPath string  `json:"backdrop_path"`
-	Overview     string  `json:"overview"`
-	Popularity   float64 `json:"popularity"`
+func matchTMDBTV(ctx context.Context, t TMDBSearcher, showName string) (*tmdbTV, error) {
+	if showName == "" {
+		return nil, nil
+	}
+	q := url.Values{}
+	q.Set("query", showName)
+	body, err := t.Get(ctx, "/search/tv", q)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Results []tmdbTV `json:"results"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, err
+	}
+	if len(resp.Results) == 0 {
+		return nil, nil
+	}
+	r := resp.Results[0]
+	return &r, nil
 }
 
-// extractYear pulls the 4-digit year out of a release_date like
-// "2010-07-16". Returns 0 if the date is empty or malformed.
 func extractYear(date string) int {
 	if len(date) < 4 {
 		return 0
@@ -309,7 +715,5 @@ func extractYear(date string) int {
 	return y
 }
 
-// Compile-time assertion: *tmdb.Client satisfies the TMDBSearcher
-// interface we use here. If TMDB's Client signature drifts, this
-// breaks at compile time instead of at the first scan.
+// Compile-time assertion: *tmdb.Client satisfies our interface.
 var _ TMDBSearcher = (*tmdb.Client)(nil)

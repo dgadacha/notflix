@@ -1410,11 +1410,26 @@ type ScanReport = {
     filesSeen: number
     matched: number
     unmatched: number
+    movies: number
+    episodes: number
     durationMs: number
     removed: number
     walkError?: string
 }
-type ScanStatusResp = { running: boolean; lastReport: ScanReport | null }
+type ScanProgress = {
+    running: boolean
+    startedAt?: string
+    total: number
+    current: number
+    currentFile?: string
+    matched: number
+    unmatched: number
+}
+type ScanStatusResp = {
+    running: boolean
+    progress: ScanProgress
+    lastReport: ScanReport | null
+}
 
 function useLibraryDir() {
     return useQuery<LibraryDirResp>({
@@ -1429,7 +1444,7 @@ function useLibraryDir() {
     })
 }
 
-function useScanStatus(enabled: boolean) {
+function useScanStatus(_enabled: boolean) {
     return useQuery<ScanStatusResp>({
         queryKey: ["library", "scan-status"],
         queryFn: async () => {
@@ -1438,9 +1453,14 @@ function useScanStatus(enabled: boolean) {
             const j = await r.json()
             return (j.data ?? j) as ScanStatusResp
         },
-        // Poll fast while a scan is in flight so the spinner gives way
-        // to the report as soon as it lands.
-        refetchInterval: enabled ? 1500 : false,
+        // Adaptive polling: 1.5 s while a scan is running so the
+        // progress bar feels live; 30 s when idle just to detect an
+        // out-of-band scan (eg. someone hit POST /scan from curl).
+        refetchInterval: (query) => {
+            const d = query.state.data as ScanStatusResp | undefined
+            const running = d?.progress?.running ?? d?.running ?? false
+            return running ? 1500 : 30_000
+        },
         staleTime: 1000,
     })
 }
@@ -1452,23 +1472,27 @@ function LibraryPanel() {
     const [editing, setEditing] = React.useState(false)
     const [draft, setDraft] = React.useState("")
     const [saveErr, setSaveErr] = React.useState<string | null>(null)
-    const [scanning, setScanning] = React.useState(false)
     const [scanErr, setScanErr] = React.useState<string | null>(null)
-    const { data: status } = useScanStatus(scanning)
+    // The scan is async on the backend — POST returns 202, the running
+    // flag flips by reading /scan/status. We poll fast (1.5 s) as long
+    // as the backend says running OR we just kicked off (small
+    // grace window so the poll has time to see the new state).
+    const wasRunningRef = React.useRef(false)
+    const { data: status } = useScanStatus(true)
+    const running = status?.progress?.running ?? status?.running ?? false
 
     React.useEffect(() => {
         if (dirData && !editing) setDraft(dirData.dir)
     }, [dirData, editing])
 
-    // When the backend reports "running: false" + we had marked
-    // scanning=true, the scan just finished — flip back off and
-    // invalidate the home rail so any new files show up.
+    // When the backend reports running flips false (and was true
+    // previously), invalidate the home rail so any new files show up.
     React.useEffect(() => {
-        if (scanning && status && !status.running) {
-            setScanning(false)
+        if (wasRunningRef.current && !running) {
             qc.invalidateQueries({ queryKey: ["local-library"] })
         }
-    }, [scanning, status, qc])
+        wasRunningRef.current = running
+    }, [running, qc])
 
     const saveDir = async (next: string) => {
         setSaveErr(null)
@@ -1489,23 +1513,17 @@ function LibraryPanel() {
 
     const triggerScan = async () => {
         setScanErr(null)
-        setScanning(true)
         try {
             const r = await fetch("/api/v1/local-library/scan", { method: "POST" })
-            const j = await r.json()
-            if (!r.ok) throw new Error(j.error ?? `scan ${r.status}`)
-            // The Scan response IS the report — push it into the
-            // scan-status cache so the UI updates immediately even
-            // before the next status poll lands.
-            qc.setQueryData<ScanStatusResp>(["library", "scan-status"], {
-                running: false,
-                lastReport: (j.data ?? j) as ScanReport,
-            })
-            qc.invalidateQueries({ queryKey: ["local-library"] })
+            if (!r.ok) {
+                const j = await r.json().catch(() => ({}))
+                throw new Error(j.error ?? `scan ${r.status}`)
+            }
+            // Backend returns 202 — running flag will flip via the
+            // /scan/status poll within ~1.5 s.
+            qc.invalidateQueries({ queryKey: ["library", "scan-status"] })
         } catch (e) {
             setScanErr((e as Error).message)
-        } finally {
-            setScanning(false)
         }
     }
 
@@ -1598,30 +1616,36 @@ function LibraryPanel() {
                 )}
             </div>
 
-            {/* Scan row */}
-            <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-white/10">
-                <button
-                    type="button"
-                    onClick={triggerScan}
-                    disabled={!dir || scanning}
-                    className={cn(
-                        "inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider",
-                        "bg-white/10 hover:bg-white/15 text-white",
-                        "disabled:opacity-50 disabled:cursor-not-allowed",
+            {/* Scan row + progress */}
+            <div className="space-y-2 pt-2 border-t border-white/10">
+                <div className="flex flex-wrap items-center gap-2">
+                    <button
+                        type="button"
+                        onClick={triggerScan}
+                        disabled={!dir || running}
+                        className={cn(
+                            "inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider",
+                            "bg-white/10 hover:bg-white/15 text-white",
+                            "disabled:opacity-50 disabled:cursor-not-allowed",
+                        )}
+                    >
+                        <LuRefreshCw className={cn("size-3.5", running && "animate-spin")} />
+                        {running
+                            ? t("settings.library_scanning", "Scan en cours…")
+                            : t("settings.library_scan", "Scanner maintenant")}
+                    </button>
+                    {scanErr && (
+                        <span className="text-red-300 text-xs">{scanErr}</span>
                     )}
-                >
-                    <LuRefreshCw className={cn("size-3.5", scanning && "animate-spin")} />
-                    {scanning
-                        ? t("settings.library_scanning", "Scan en cours…")
-                        : t("settings.library_scan", "Scanner maintenant")}
-                </button>
-                {scanErr && (
-                    <span className="text-red-300 text-xs">{scanErr}</span>
+                </div>
+
+                {running && status?.progress && (
+                    <ScanProgressBar progress={status.progress} />
                 )}
             </div>
 
             {/* Last report */}
-            {lastReport && (
+            {lastReport && !running && (
                 <div className="bg-black/30 border border-white/10 rounded-md p-3 space-y-1 text-xs">
                     <p className="text-white/80 font-semibold">
                         {t("settings.library_last_scan", "Dernier scan")}{" "}
@@ -1635,6 +1659,15 @@ function LibraryPanel() {
                         <Stat label={t("settings.library_unmatched", "Inconnus")} value={lastReport.unmatched} className={lastReport.unmatched > 0 ? "text-amber-300" : ""} />
                         <Stat label={t("settings.library_duration", "Durée")} value={`${(lastReport.durationMs / 1000).toFixed(1)}s`} />
                     </div>
+                    {(lastReport.movies > 0 || lastReport.episodes > 0) && (
+                        <p className="text-[10px] text-[--muted] pt-1">
+                            {t("settings.library_breakdown", "{{m}} film(s) · {{e}} épisode(s) · {{r}} entrée(s) nettoyée(s)", {
+                                m: lastReport.movies,
+                                e: lastReport.episodes,
+                                r: lastReport.removed,
+                            })}
+                        </p>
+                    )}
                     {lastReport.walkError && (
                         <p className="text-red-300 text-[11px]">⚠ {lastReport.walkError}</p>
                     )}
@@ -1649,6 +1682,50 @@ function Stat({ label, value, className }: { label: string; value: number | stri
         <div>
             <div className="text-[--muted] uppercase tracking-wider text-[9px]">{label}</div>
             <div className={cn("text-white font-bold tabular-nums", className)}>{value}</div>
+        </div>
+    )
+}
+
+/** Live progress card rendered while a scan is in flight. Shows a
+ *  filled bar (current/total) + current file name + live matched/
+ *  unmatched counters that tick up as the scanner walks. */
+function ScanProgressBar({ progress }: { progress: ScanProgress }) {
+    const { t } = useTranslation()
+    const total = progress.total > 0 ? progress.total : 1
+    const pct = Math.min(100, Math.round((progress.current / total) * 100))
+    return (
+        <div className="bg-black/30 border border-white/10 rounded-md p-3 space-y-2 text-xs">
+            <div className="flex items-baseline justify-between gap-2">
+                <p className="text-white/80 font-semibold">
+                    {progress.total > 0
+                        ? t("settings.library_progress", "{{n}} / {{t}}", { n: progress.current, t: progress.total })
+                        : t("settings.library_progress_walking", "Inventaire en cours…")}
+                </p>
+                <span className="text-[--muted] tabular-nums text-[11px]">
+                    {progress.total > 0 ? `${pct}%` : ""}
+                </span>
+            </div>
+            <div className="h-1.5 w-full rounded-full bg-white/10 overflow-hidden">
+                <div
+                    className="h-full bg-brand-500 transition-[width] duration-300"
+                    style={{ width: progress.total > 0 ? `${pct}%` : "30%" }}
+                />
+            </div>
+            {progress.currentFile && (
+                <p className="truncate text-[10px] text-[--muted] font-mono" title={progress.currentFile}>
+                    {progress.currentFile}
+                </p>
+            )}
+            <div className="flex items-center gap-3 text-[10px] pt-1">
+                <span className="text-emerald-300">
+                    ✓ {progress.matched} {t("settings.library_matched_short", "reconnus")}
+                </span>
+                {progress.unmatched > 0 && (
+                    <span className="text-amber-300">
+                        ⚠ {progress.unmatched} {t("settings.library_unmatched_short", "inconnus")}
+                    </span>
+                )}
+            </div>
         </div>
     )
 }

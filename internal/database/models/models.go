@@ -119,12 +119,16 @@ type LocalFile struct {
 	// "orphan" rows from the home rail but the admin scan summary
 	// still counts them.
 	TMDBID       int    `gorm:"column:tmdb_id;index" json:"tmdbId"`
-	MediaType    string `gorm:"column:media_type;size:8" json:"mediaType"` // "movie" reserved for TV later
+	MediaType    string `gorm:"column:media_type;size:8" json:"mediaType"` // "movie" | "tv"
 	Title        string `gorm:"column:title;size:255" json:"title"`
 	PosterPath   string `gorm:"column:poster_path;size:255" json:"posterPath"`
 	BackdropPath string `gorm:"column:backdrop_path;size:255" json:"backdropPath"`
 	Overview     string `gorm:"column:overview;type:text" json:"overview"`
 	Year         int    `gorm:"column:year" json:"year"`
+	// TV — populated only when MediaType=="tv". Both 0 for movies.
+	// Season > 0 lets the frontend group cards on the home rail.
+	Season  int `gorm:"column:season" json:"season"`
+	Episode int `gorm:"column:episode" json:"episode"`
 }
 
 // TMDBCacheEntry persists TMDB API responses so home/detail pages stay

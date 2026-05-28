@@ -162,12 +162,17 @@ func releaseScan() {
 
 // HandleScanLocalLibrary — POST /api/v1/local-library/scan
 //
-// Synchronous on purpose. With TMDB SQLite cache hits, a typical
-// 200-file library scans in 5-20 s — well within an HTTP request
-// budget and the UI can show a clear "Scan en cours…" spinner.
+// Fire-and-forget: the scan runs in a goroutine and the HTTP request
+// returns immediately with `{started: true}`. The frontend polls
+// /scan/status every ~1.5 s to render the progress bar, and reads the
+// final ScanReport from `lastReport` once `running` flips back to
+// false.
 //
-// 409 when a scan is already running. Frontend polls /scan/status if
-// it needs progress / report after a 409.
+// This avoids two failure modes the sync version had:
+//   - 10-min HTTP request hanging across proxies / Cloudflare Tunnel
+//   - The UI's spinner with no progress info on large libraries
+//
+// 409 when a scan is already running.
 func (h *Handler) HandleScanLocalLibrary(c echo.Context) error {
 	dir := h.App.Config.Library.Dir
 	if dir == "" {
@@ -181,39 +186,53 @@ func (h *Handler) HandleScanLocalLibrary(c echo.Context) error {
 			"error": "scan already in progress",
 		})
 	}
-	defer releaseScan()
 
-	// Serialise the actual TMDB calls + DB writes so we don't blow
-	// the rate limit on rapid double-clicks.
-	scanMu.Lock()
-	defer scanMu.Unlock()
+	// Detach from the request context — the request returns
+	// immediately, the scan keeps running. Bounded at 30 min to cover
+	// even pathologically big libraries (10 k files on a slow disk +
+	// cold TMDB cache).
+	go func() {
+		defer releaseScan()
+		scanMu.Lock()
+		defer scanMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(c.Request().Context(), 10*time.Minute)
-	defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
 
-	rep, err := library.Scan(ctx, dir, h.App.TMDB, h.App.Database)
-	if err != nil {
-		log.Printf("library scan: %v", err)
-		return c.JSON(http.StatusBadGateway, map[string]any{
-			"error":  err.Error(),
-			"report": rep,
-		})
-	}
-	lastReport = rep
-	return RespondOK(c, rep)
+		rep, err := library.Scan(ctx, dir, h.App.TMDB, h.App.Database)
+		if err != nil {
+			log.Printf("library scan: %v", err)
+			// Keep the partial report around so the UI can show what
+			// finished before the error.
+			if rep != nil {
+				lastReport = rep
+			}
+			return
+		}
+		lastReport = rep
+		log.Printf("library scan: done — %d matched, %d unmatched, %d removed in %.1fs",
+			rep.Matched, rep.Unmatched, rep.Removed,
+			float64(rep.DurationMs)/1000)
+	}()
+
+	return c.JSON(http.StatusAccepted, map[string]any{
+		"started": true,
+		"dir":     dir,
+	})
 }
 
 // HandleScanStatus — GET /api/v1/local-library/scan/status
 //
-// Returns the last finished scan report + whether a scan is
-// currently running. The UI uses this to render a "last scan: X min
-// ago" line.
+// Returns the in-flight progress (current/total/currentFile) when a
+// scan is running, plus the last finished scan's report. The settings
+// panel polls this every ~1.5 s to render a live progress bar.
 func (h *Handler) HandleScanStatus(c echo.Context) error {
 	scanFlightMu.Lock()
 	running := scanInFlight
 	scanFlightMu.Unlock()
 	return RespondOK(c, map[string]any{
 		"running":    running,
+		"progress":   library.Progress(),
 		"lastReport": lastReport,
 	})
 }
