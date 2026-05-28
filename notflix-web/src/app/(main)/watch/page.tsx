@@ -54,7 +54,7 @@ import { useRouter, useSearchParams } from "@/lib/navigation"
 import { toast } from "sonner"
 import React from "react"
 import { useTranslation } from "react-i18next"
-import { BiArrowBack, BiExitFullscreen, BiFullscreen, BiPause, BiPlay, BiRefresh, BiSolidCheckCircle, BiVolumeFull, BiVolumeMute } from "react-icons/bi"
+import { BiArrowBack, BiPlay, BiRefresh, BiSolidCheckCircle } from "react-icons/bi"
 import { FiLoader } from "react-icons/fi"
 
 type Phase = "searching" | "picking" | "preparing" | "preparing_subs" | "playing" | "error"
@@ -2072,245 +2072,45 @@ function useLocalFile(id: number) {
 }
 
 /**
- * LocalScrubBar — Netflix-style timeline with buffered indicator.
- * Click anywhere to seek; the parent decides if the target is in the
- * current pipe's buffer (instant) or needs a pipe restart.
+ * LocalWatch — minimal local file player.
+ *
+ * Strategy intentionally bare-bones: the browser plays the file
+ * directly via `<video src="/api/v1/local-library/stream/:id">`
+ * which serves the raw bytes with HTTP Range. Browser-native
+ * controls, browser-native seek, browser-native buffering.
+ *
+ * Trade-off: MKV files with non-AAC audio (AC-3 / E-AC-3 / DTS /
+ * TrueHD) won't have sound on Chrome/Firefox because those browsers
+ * can't decode that audio natively. Safari has wider codec support.
+ * For now, the user accepts that trade-off — every attempt at
+ * server-side transmux (HLS chunked, single-pipe fMP4 with custom
+ * UI) introduced more problems than it solved (sync drift, frame
+ * skips, broken seek, broken duration).
+ *
+ * If a release has unplayable audio, the fix is upstream: rip with
+ * an AAC track, or remux locally with `ffmpeg -c:v copy -c:a aac`.
  */
-function LocalScrubBar({
-    currentAbs,
-    bufferedAbsEnd,
-    duration,
-    onSeek,
-}: {
-    currentAbs: number
-    bufferedAbsEnd: number
-    duration: number
-    onSeek: (absSec: number) => void
-}) {
-    const barRef = React.useRef<HTMLDivElement>(null)
-    const [hoverPct, setHoverPct] = React.useState<number | null>(null)
-
-    const pctOf = (v: number) =>
-        duration > 0 ? Math.max(0, Math.min(100, (v / duration) * 100)) : 0
-    const playedPct = pctOf(currentAbs)
-    const bufferedPct = pctOf(bufferedAbsEnd)
-
-    const handleClick = (e: React.MouseEvent) => {
-        const bar = barRef.current
-        if (!bar || duration <= 0) return
-        const r = bar.getBoundingClientRect()
-        const pct = (e.clientX - r.left) / r.width
-        onSeek(pct * duration)
-    }
-    const handleMove = (e: React.MouseEvent) => {
-        const bar = barRef.current
-        if (!bar) return
-        const r = bar.getBoundingClientRect()
-        const pct = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * 100
-        setHoverPct(pct)
-    }
-
-    return (
-        <div
-            ref={barRef}
-            onClick={handleClick}
-            onMouseMove={handleMove}
-            onMouseLeave={() => setHoverPct(null)}
-            className="relative h-1.5 hover:h-2 bg-white/20 rounded-full cursor-pointer transition-all group/bar"
-        >
-            {/* Buffered ahead. */}
-            <div
-                className="absolute inset-y-0 left-0 bg-white/40 rounded-full"
-                style={{ width: `${bufferedPct}%` }}
-            />
-            {/* Played. */}
-            <div
-                className="absolute inset-y-0 left-0 bg-brand-500 rounded-full"
-                style={{ width: `${playedPct}%` }}
-            />
-            {/* Hover position indicator. */}
-            {hoverPct !== null && (
-                <div
-                    className="absolute inset-y-0 w-px bg-white/70 pointer-events-none"
-                    style={{ left: `${hoverPct}%` }}
-                />
-            )}
-            {/* Scrub handle. */}
-            <div
-                className="absolute size-3 rounded-full bg-brand-500 shadow-md -translate-x-1/2 -translate-y-1/4 opacity-0 group-hover/bar:opacity-100 transition-opacity"
-                style={{ left: `${playedPct}%` }}
-            />
-        </div>
-    )
-}
-
-type LocalProbe = { duration: number; audioCodec: string; videoCodec: string }
-
-function useLocalFileProbe(localId: number) {
-    return useQuery<LocalProbe>({
-        queryKey: ["local-library", "probe", localId],
-        queryFn: async () => {
-            const r = await fetch(`/api/v1/local-library/probe/${localId}`)
-            if (!r.ok) throw new Error(`probe ${r.status}`)
-            const j = await r.json()
-            return (j.data ?? j) as LocalProbe
-        },
-        staleTime: 60 * 60_000, // duration doesn't change for a static file
-    })
-}
-
-function fmtTime(sec: number): string {
-    if (!Number.isFinite(sec) || sec < 0) return "0:00"
-    const s = Math.floor(sec)
-    const h = Math.floor(s / 3600)
-    const m = Math.floor((s % 3600) / 60)
-    const r = s % 60
-    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`
-    return `${m}:${String(r).padStart(2, "0")}`
-}
-
 function LocalWatch({ localId }: { localId: number }) {
     const { t } = useTranslation()
     const router = useRouter()
     const searchParams = useSearchParams()
     const resumeSec = parseInt(searchParams.get("t") ?? "0", 10) || 0
     const { data: file, isLoading, error } = useLocalFile(localId)
-    const { data: probe } = useLocalFileProbe(localId)
     const videoRef = React.useRef<HTMLVideoElement>(null)
-    const containerRef = React.useRef<HTMLDivElement>(null)
 
-    // ABSOLUTE timeline = playOffsetSec (where the current ffmpeg pipe
-    // started in the source file) + video.currentTime (offset within
-    // the pipe's output). The custom UI displays + manipulates
-    // ABSOLUTE time; the <video> element only knows pipe-local time.
-    const [playOffsetSec, setPlayOffsetSec] = React.useState(resumeSec)
-    const [videoLocalSec, setVideoLocalSec] = React.useState(0)
-    const [bufferedAbsEnd, setBufferedAbsEnd] = React.useState(0)
-    const [playing, setPlaying] = React.useState(false)
-    const [volume, setVolume] = React.useState(1)
-    const [muted, setMuted] = React.useState(false)
-    const [fullscreen, setFullscreen] = React.useState(false)
-    const [controlsShown, setControlsShown] = React.useState(true)
-    const totalDuration = probe?.duration ?? 0
-    const absoluteCurrent = playOffsetSec + videoLocalSec
-
-    const transmuxUrl = `/api/v1/local-library/transmux/${localId}${
-        playOffsetSec > 0 ? `?t=${playOffsetSec}` : ""
-    }`
-
-    // Attach src imperatively so a re-seek (new playOffsetSec)
-    // doesn't tear down the React element tree.
+    // Apply the resume position on the first loadedmetadata. After
+    // that the user is in charge — no re-seek loops.
     React.useEffect(() => {
         const v = videoRef.current
-        if (!v) return
-        v.src = transmuxUrl
-        v.load()
-        const onCanPlay = () => {
-            void v.play().catch(() => {})
-        }
-        v.addEventListener("canplay", onCanPlay, { once: true })
-        return () => v.removeEventListener("canplay", onCanPlay)
-    }, [transmuxUrl])
-
-    // Wire video element events into local state.
-    React.useEffect(() => {
-        const v = videoRef.current
-        if (!v) return
-        const onTime = () => {
-            setVideoLocalSec(v.currentTime)
-            if (v.buffered.length > 0) {
-                setBufferedAbsEnd(playOffsetSec + v.buffered.end(v.buffered.length - 1))
+        if (!v || resumeSec <= 0) return
+        const onLoaded = () => {
+            if (Number.isFinite(v.duration) && resumeSec < v.duration) {
+                v.currentTime = resumeSec
             }
         }
-        const onPlay = () => setPlaying(true)
-        const onPause = () => setPlaying(false)
-        v.addEventListener("timeupdate", onTime)
-        v.addEventListener("progress", onTime)
-        v.addEventListener("play", onPlay)
-        v.addEventListener("pause", onPause)
-        return () => {
-            v.removeEventListener("timeupdate", onTime)
-            v.removeEventListener("progress", onTime)
-            v.removeEventListener("play", onPlay)
-            v.removeEventListener("pause", onPause)
-        }
-    }, [playOffsetSec])
-
-    // Volume control wiring.
-    React.useEffect(() => {
-        const v = videoRef.current
-        if (!v) return
-        v.volume = volume
-        v.muted = muted
-    }, [volume, muted])
-
-    // Fullscreen state mirror.
-    React.useEffect(() => {
-        const onFsChange = () => setFullscreen(!!document.fullscreenElement)
-        document.addEventListener("fullscreenchange", onFsChange)
-        return () => document.removeEventListener("fullscreenchange", onFsChange)
-    }, [])
-
-    // Auto-hide controls after 3 s of mouse inactivity, restore on
-    // movement. Always shown when paused.
-    React.useEffect(() => {
-        const el = containerRef.current
-        if (!el) return
-        let timer: ReturnType<typeof setTimeout> | null = null
-        const reveal = () => {
-            setControlsShown(true)
-            if (timer) clearTimeout(timer)
-            if (playing) {
-                timer = setTimeout(() => setControlsShown(false), 3000)
-            }
-        }
-        el.addEventListener("mousemove", reveal)
-        el.addEventListener("touchstart", reveal)
-        reveal()
-        return () => {
-            el.removeEventListener("mousemove", reveal)
-            el.removeEventListener("touchstart", reveal)
-            if (timer) clearTimeout(timer)
-        }
-    }, [playing])
-
-    // Seek handler — maps an ABSOLUTE target time to a pipe restart
-    // if the target is outside the buffered window of the current
-    // pipe; otherwise just nudges video.currentTime inside the pipe.
-    const seekToAbsolute = React.useCallback((targetAbs: number) => {
-        const v = videoRef.current
-        if (!v) return
-        const clamped = Math.max(0, Math.min(targetAbs, totalDuration - 0.5))
-        // Inside the current pipe's buffered range?
-        const localTarget = clamped - playOffsetSec
-        if (localTarget >= 0 && v.buffered.length > 0) {
-            for (let i = 0; i < v.buffered.length; i++) {
-                if (localTarget >= v.buffered.start(i) - 0.1 && localTarget <= v.buffered.end(i) + 0.1) {
-                    v.currentTime = localTarget
-                    return
-                }
-            }
-        }
-        // Out of buffer → restart the pipe at the target.
-        setPlayOffsetSec(Math.max(0, Math.floor(clamped)))
-    }, [playOffsetSec, totalDuration])
-
-    const togglePlay = React.useCallback(() => {
-        const v = videoRef.current
-        if (!v) return
-        if (v.paused) void v.play().catch(() => {})
-        else v.pause()
-    }, [])
-
-    const toggleFullscreen = React.useCallback(() => {
-        const el = containerRef.current
-        if (!el) return
-        if (document.fullscreenElement) {
-            void document.exitFullscreen()
-        } else {
-            void el.requestFullscreen()
-        }
-    }, [])
+        v.addEventListener("loadedmetadata", onLoaded, { once: true })
+        return () => v.removeEventListener("loadedmetadata", onLoaded)
+    }, [resumeSec])
 
     if (isLoading) {
         return (
@@ -2342,17 +2142,10 @@ function LocalWatch({ localId }: { localId: number }) {
 
     const displayTitle = file.title || file.parsedTitle || file.path
     const mediaType = (file.mediaType as "movie" | "tv") || "movie"
+    const streamUrl = `/api/v1/local-library/stream/${localId}`
 
     return (
         <>
-            {/* Mirror local plays into the watch-history just like the
-                TorBox flow does — Continue Watching shows them, the
-                ?t= resume URL works on re-open, and Because You
-                Watched recommendations seed from them.
-                Season/episode MUST be forwarded for TV episodes,
-                otherwise the resume-via-Continue-Watching path can't
-                pick the right episode back (it falls through to the
-                cloud URL and surfaces "Aucune source trouvée"). */}
             {file.tmdbId > 0 && (
                 <NetflixWatchHistorySaver
                     tmdbId={file.tmdbId}
@@ -2365,120 +2158,34 @@ function LocalWatch({ localId }: { localId: number }) {
                     release={null}
                 />
             )}
-            <div
-                ref={containerRef}
-                className="min-h-screen bg-black relative -mt-16 lg:-mt-[68px] group/player select-none"
-            >
-                {/* Back button — auto-hides with the rest of the chrome. */}
+            <div className="min-h-screen bg-black relative -mt-16 lg:-mt-[68px]">
                 <button
                     type="button"
                     onClick={() => router.push("/")}
                     className={cn(
                         "absolute top-3 left-3 z-[60] size-10 rounded-full",
                         "bg-black/70 hover:bg-black/90 text-white",
-                        "flex items-center justify-center backdrop-blur-sm transition-opacity duration-200",
-                        controlsShown ? "opacity-100" : "opacity-0 pointer-events-none",
+                        "flex items-center justify-center backdrop-blur-sm",
                     )}
                     aria-label={t("common.back", "Retour")}
                 >
                     <BiArrowBack className="size-5" />
                 </button>
-                {/* Title overlay. */}
-                <div
-                    className={cn(
-                        "absolute top-3 right-3 z-[60] bg-black/70 backdrop-blur-sm rounded-md px-3 py-1.5",
-                        "text-white text-xs font-semibold max-w-[60vw] truncate transition-opacity duration-200",
-                        controlsShown ? "opacity-100" : "opacity-0 pointer-events-none",
-                    )}
-                >
+                <div className="absolute top-3 right-3 z-[60] bg-black/70 backdrop-blur-sm rounded-md px-3 py-1.5 text-white text-xs font-semibold max-w-[60vw] truncate">
                     {displayTitle}
                 </div>
-
                 <video
                     ref={videoRef}
+                    src={streamUrl}
                     autoPlay
+                    controls
                     playsInline
-                    onClick={togglePlay}
-                    className="w-full h-screen object-contain bg-black cursor-pointer"
+                    className="w-full h-screen object-contain bg-black"
                     onError={(e) => {
                         const err = (e.currentTarget as HTMLVideoElement).error
                         console.error("[Notflix] local video error", err?.code, err?.message)
                     }}
                 />
-
-                {/* Custom controls bar — replaces native controls so
-                    the timeline reflects the FULL source duration
-                    (probed via ffprobe) instead of just the bytes
-                    received so far from the pipe. */}
-                <div
-                    className={cn(
-                        "absolute inset-x-0 bottom-0 z-[55] px-4 sm:px-8 pb-4 pt-12",
-                        "bg-gradient-to-t from-black/90 via-black/40 to-transparent",
-                        "transition-opacity duration-200",
-                        controlsShown ? "opacity-100" : "opacity-0 pointer-events-none",
-                    )}
-                >
-                    {/* Scrub bar */}
-                    <LocalScrubBar
-                        currentAbs={absoluteCurrent}
-                        bufferedAbsEnd={bufferedAbsEnd}
-                        duration={totalDuration}
-                        onSeek={seekToAbsolute}
-                    />
-                    <div className="flex items-center gap-4 mt-2 text-white">
-                        <button
-                            type="button"
-                            onClick={togglePlay}
-                            className="p-1 hover:scale-110 transition-transform"
-                            aria-label={playing ? t("watch.pause", "Pause") : t("watch.play", "Lecture")}
-                        >
-                            {playing
-                                ? <BiPause className="size-7" />
-                                : <BiPlay className="size-7" />}
-                        </button>
-                        <div className="text-xs sm:text-sm tabular-nums">
-                            <span>{fmtTime(absoluteCurrent)}</span>
-                            <span className="text-white/60"> / {fmtTime(totalDuration)}</span>
-                        </div>
-                        <div className="flex-1" />
-                        <div className="flex items-center gap-1.5">
-                            <button
-                                type="button"
-                                onClick={() => setMuted(m => !m)}
-                                className="p-1 hover:scale-110 transition-transform"
-                                aria-label={muted ? t("watch.unmute", "Activer le son") : t("watch.mute", "Couper le son")}
-                            >
-                                {muted || volume === 0
-                                    ? <BiVolumeMute className="size-5" />
-                                    : <BiVolumeFull className="size-5" />}
-                            </button>
-                            <input
-                                type="range"
-                                min={0}
-                                max={1}
-                                step={0.05}
-                                value={muted ? 0 : volume}
-                                onChange={(e) => {
-                                    const v = parseFloat(e.target.value)
-                                    setVolume(v)
-                                    setMuted(v === 0)
-                                }}
-                                className="w-20 accent-brand-500 cursor-pointer"
-                                aria-label={t("watch.volume", "Volume")}
-                            />
-                        </div>
-                        <button
-                            type="button"
-                            onClick={toggleFullscreen}
-                            className="p-1 hover:scale-110 transition-transform"
-                            aria-label={fullscreen ? t("watch.exit_fullscreen", "Quitter le plein écran") : t("watch.fullscreen", "Plein écran")}
-                        >
-                            {fullscreen
-                                ? <BiExitFullscreen className="size-5" />
-                                : <BiFullscreen className="size-5" />}
-                        </button>
-                    </div>
-                </div>
             </div>
         </>
     )
