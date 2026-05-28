@@ -281,8 +281,12 @@ func (a *App) ApplyAudioLangPrefs(def, anime string) error {
 // Returns false on any TMDB error or unrecognised mediaType — that's
 // the safe default (no special treatment, falls back to the general
 // preferred lang).
+//
+// Logs the path it took so the admin can debug "why didn't my anime
+// get treated as anime?" without recompiling.
 func (a *App) IsAnime(mediaType string, tmdbID int) bool {
 	if tmdbID <= 0 {
+		log.Printf("is-anime: skip — tmdbID=%d (file not matched against TMDB at scan time?)", tmdbID)
 		return false
 	}
 	var endpoint string
@@ -292,28 +296,37 @@ func (a *App) IsAnime(mediaType string, tmdbID int) bool {
 	case "movie":
 		endpoint = fmt.Sprintf("movie/%d", tmdbID)
 	default:
+		log.Printf("is-anime: skip — unknown mediaType=%q (tmdbID=%d)", mediaType, tmdbID)
 		return false
 	}
 	var data struct {
 		OriginalLanguage string `json:"original_language"`
 		Genres           []struct {
-			ID int `json:"id"`
+			ID   int    `json:"id"`
+			Name string `json:"name"`
 		} `json:"genres"`
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := a.TMDB.GetJSON(ctx, endpoint, nil, &data); err != nil {
+		log.Printf("is-anime: TMDB %q failed: %v", endpoint, err)
 		return false
 	}
-	if data.OriginalLanguage != "ja" {
-		return false
+	genreNames := make([]string, len(data.Genres))
+	for i, g := range data.Genres {
+		genreNames[i] = fmt.Sprintf("%d:%s", g.ID, g.Name)
 	}
+	hasAnimationGenre := false
 	for _, g := range data.Genres {
-		if g.ID == 16 { // 16 = Animation in TMDB
-			return true
+		if g.ID == 16 {
+			hasAnimationGenre = true
+			break
 		}
 	}
-	return false
+	result := data.OriginalLanguage == "ja" && hasAnimationGenre
+	log.Printf("is-anime: %s → lang=%q genres=[%s] → anime=%v",
+		endpoint, data.OriginalLanguage, strings.Join(genreNames, ", "), result)
+	return result
 }
 
 // NewAudioLangPicker returns a closure that maps a LocalFile to the
