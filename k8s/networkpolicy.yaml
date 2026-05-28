@@ -1,0 +1,110 @@
+# NetworkPolicy — Notflix (namespace notflix)
+#
+# Modèle zero-trust : tout est bloqué par défaut dès qu'une NetworkPolicy
+# existe pour le pod. Ces deux policies ouvrent UNIQUEMENT ce dont l'app a
+# besoin.
+#
+# Trafic autorisé en ENTRÉE :
+#   • Traefik (kube-system) → notflix:43212  (HTTP des navigateurs via Ingress)
+#   • cloudflared (cloudflared) → notflix:80 (tunnel Cloudflare direct, sans Traefik)
+#
+# Trafic autorisé en SORTIE :
+#   • kube-dns (kube-system):53 UDP+TCP       (résolution DNS)
+#   • prowlarr.streaming-apps:9696            (recherche de releases, port pod réel)
+#   • Internet HTTPS (:443) et HTTP (:80)     (TMDB, TorBox, Claude API)
+#     → cluster pod CIDR 10.42.0.0/16 exclu pour ne pas ouvrir de backdoor
+#       intra-cluster non explicite
+#
+# L'agent GitLab (gitlab-agent) n'est pas concerné par ces policies : il a
+# ses propres rules Helm et n'est pas sélectionné par app=notflix.
+
+---
+# ── INGRESS ──────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: notflix-ingress-allow
+  namespace: notflix
+spec:
+  podSelector:
+    matchLabels:
+      app: notflix
+  policyTypes:
+    - Ingress
+  ingress:
+    # Traefik → Notflix (port applicatif, accès LAN via notflix.maiz.lan)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - protocol: TCP
+          port: 43212
+
+    # Cloudflare Tunnel → Notflix (accès internet via notflix.nc-maiz.org)
+    # Le tunnel connecte Service notflix:80 → kube-proxy DNAT → pod:43212.
+    # La NetworkPolicy s'évalue APRÈS le DNAT (niveau pod), donc le port
+    # ici doit être 43212 (port du conteneur), pas 80 (port du Service).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cloudflared
+      ports:
+        - protocol: TCP
+          port: 43212
+
+---
+# ── EGRESS ───────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: notflix-egress-allow
+  namespace: notflix
+spec:
+  podSelector:
+    matchLabels:
+      app: notflix
+  policyTypes:
+    - Egress
+  egress:
+    # 1) DNS — obligatoire pour que les appels HTTP internes et externes
+    #    puissent résoudre les noms de domaines
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # 2) Prowlarr (streaming-apps) — recherche de releases torrent
+    # Service prowlarr:80 → kube-proxy DNAT → pod:9696 (port réel de Prowlarr).
+    # NetworkPolicy évaluée APRÈS le DNAT → port cible = 9696.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: streaming-apps
+          podSelector:
+            matchLabels:
+              app: prowlarr
+      ports:
+        - protocol: TCP
+          port: 9696
+
+    # 3) Internet — TMDB (api.themoviedb.org, image.tmdb.org),
+    #    TorBox (api.torbox.app), Claude API (api.anthropic.com)
+    #    Le CIDR pod k3s (10.42.0.0/16) et les plages RFC-1918 sont
+    #    exclus pour ne pas autoriser de mouvements latéraux intra-cluster.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8      # RFC-1918 (inclut pods + services k3s)
+              - 172.16.0.0/12   # RFC-1918
+              - 192.168.0.0/16  # RFC-1918 (LAN)
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
