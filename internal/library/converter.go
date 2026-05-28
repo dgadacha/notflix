@@ -1,13 +1,16 @@
 package library
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -40,12 +43,19 @@ type ConvertProgress struct {
 	Total       int       `json:"total"`
 	Current     int       `json:"current"`
 	CurrentFile string    `json:"currentFile,omitempty"`
-	Succeeded   int       `json:"succeeded"`
-	Skipped     int       `json:"skipped"` // already a .mp4 sibling exists
-	Failed      int       `json:"failed"`
-	Errors      []string  `json:"errors,omitempty"`
-	StartedAt   time.Time `json:"startedAt,omitempty"`
-	FinishedAt  time.Time `json:"finishedAt,omitempty"`
+	// Per-file progress, populated by parsing ffmpeg's -progress
+	// output. Pct is 0-100; SecDone / SecTotal are floats in
+	// seconds so the UI can render "01:23 / 02:14:08" if wanted.
+	// Reset to 0 between files.
+	CurrentFilePct float64  `json:"currentFilePct,omitempty"`
+	CurrentFileSec float64  `json:"currentFileSec,omitempty"`
+	CurrentFileDur float64  `json:"currentFileDur,omitempty"`
+	Succeeded      int      `json:"succeeded"`
+	Skipped        int      `json:"skipped"` // already a .mp4 sibling exists
+	Failed         int      `json:"failed"`
+	Errors         []string `json:"errors,omitempty"`
+	StartedAt      time.Time `json:"startedAt,omitempty"`
+	FinishedAt     time.Time `json:"finishedAt,omitempty"`
 }
 
 var (
@@ -137,6 +147,9 @@ func runConvertBatch(ctx context.Context, store *db.Database) {
 		convertMu.Lock()
 		convertState.Current = i + 1
 		convertState.CurrentFile = filepath.Base(f.Path)
+		convertState.CurrentFilePct = 0
+		convertState.CurrentFileSec = 0
+		convertState.CurrentFileDur = 0
 		convertMu.Unlock()
 
 		outcome, errMsg := convertOne(ctx, f.Path)
@@ -249,25 +262,56 @@ func convertOne(ctx context.Context, mkvPath string) (outcome, errMsg string) {
 		"-movflags", "+faststart",
 		// `-f mp4` is REQUIRED because we write to <out>.mp4.tmp
 		// and ffmpeg can't infer the format from the .tmp extension.
-		// Without this it errors with "Unable to choose an output
-		// format for ...mp4.tmp".
 		"-f", "mp4",
+		// Stream key=value progress lines to stdout so we can update
+		// the per-file progress bar in real time. Includes out_time
+		// (HH:MM:SS.mmm) which we divide by the probed source
+		// duration to get a percentage.
+		"-progress", "pipe:1",
+		"-nostats",
 		tmpPath,
 	)
+
+	// Pre-fetch the source duration so we can compute "%" from
+	// ffmpeg's reported out_time. Best-effort: if ffprobe fails the
+	// per-file bar just stays at 0 and the global N/total works fine.
+	srcDuration := probeDuration(ctx, mkvPath)
+	if srcDuration > 0 {
+		convertMu.Lock()
+		convertState.CurrentFileDur = srcDuration
+		convertMu.Unlock()
+	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
+	stdout, pipeErr := cmd.StdoutPipe()
+	if pipeErr != nil {
+		return "failed", "stdout pipe: " + pipeErr.Error()
+	}
 
-	if err := cmd.Run(); err != nil {
-		// Tidy up the partial / corrupt output.
+	if err := cmd.Start(); err != nil {
+		return "failed", "ffmpeg start: " + err.Error()
+	}
+
+	// Stream progress in a goroutine until ffmpeg closes stdout
+	// (i.e. exits). We sync the goroutine end with cmd.Wait() via
+	// the `done` channel so progressState updates never race with
+	// the post-Wait cleanup.
+	done := make(chan struct{})
+	go streamConvertProgress(stdout, srcDuration, done)
+
+	waitErr := cmd.Wait()
+	<-done
+
+	if waitErr != nil {
 		_ = os.Remove(tmpPath)
 		if ctx.Err() != nil {
 			return "failed", "cancelled"
 		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
-			msg = err.Error()
+			msg = waitErr.Error()
 		}
 		if len(msg) > 200 {
 			msg = msg[:200] + "…"
@@ -354,6 +398,80 @@ func freeBytesAt(path string) uint64 {
 	// Cast Bsize through int64 → uint64 since its underlying type
 	// is int32 on Linux and int32 on macOS.
 	return stat.Bavail * uint64(stat.Bsize)
+}
+
+// probeDuration returns the source duration in seconds, or 0 if
+// ffprobe fails. Used to scale the per-file progress percentage.
+func probeDuration(ctx context.Context, path string) float64 {
+	cmd := exec.CommandContext(ctx, "ffprobe",
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		path,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// streamConvertProgress reads ffmpeg's `-progress pipe:1` output
+// line-by-line and updates convertState.CurrentFilePct in real time.
+// The stream emits `key=value` lines, terminated by
+// `progress=continue` (each tick) or `progress=end` (finished).
+//
+// We close `done` when the reader returns so cmd.Wait() can safely
+// proceed without a race against the goroutine.
+func streamConvertProgress(r io.Reader, duration float64, done chan struct{}) {
+	defer close(done)
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		// `out_time=HH:MM:SS.mmm` is the unambiguous one — works
+		// across all ffmpeg versions we care about (4+).
+		if !strings.HasPrefix(line, "out_time=") {
+			continue
+		}
+		secStr := strings.TrimPrefix(line, "out_time=")
+		secs, ok := parseFFmpegTime(secStr)
+		if !ok {
+			continue
+		}
+		pct := 0.0
+		if duration > 0 {
+			pct = math.Min(100, (secs/duration)*100)
+		}
+		convertMu.Lock()
+		convertState.CurrentFileSec = secs
+		convertState.CurrentFilePct = pct
+		convertMu.Unlock()
+	}
+}
+
+// parseFFmpegTime parses a "HH:MM:SS.uuuuuu" time string from
+// ffmpeg's -progress output into seconds. Returns (0, false) for
+// "N/A" or malformed input.
+func parseFFmpegTime(s string) (float64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "N/A" {
+		return 0, false
+	}
+	parts := strings.Split(s, ":")
+	if len(parts) != 3 {
+		return 0, false
+	}
+	h, err1 := strconv.ParseFloat(parts[0], 64)
+	m, err2 := strconv.ParseFloat(parts[1], 64)
+	sec, err3 := strconv.ParseFloat(parts[2], 64)
+	if err1 != nil || err2 != nil || err3 != nil {
+		return 0, false
+	}
+	return h*3600 + m*60 + sec, true
 }
 
 // humanBytes formats n into a short SI-ish string ("4.3 GB", "789 MB").

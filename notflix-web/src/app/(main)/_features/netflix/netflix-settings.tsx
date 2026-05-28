@@ -1471,6 +1471,9 @@ type ConvertStatus = {
     total: number
     current: number
     currentFile?: string
+    currentFilePct?: number  // 0-100, per-file ffmpeg progress
+    currentFileSec?: number  // seconds processed on the current file
+    currentFileDur?: number  // total source duration
     succeeded: number
     skipped: number
     failed: number
@@ -1944,8 +1947,22 @@ function ScanProgressBar({ progress }: { progress: ScanProgress }) {
     )
 }
 
+/** Formats a seconds value into "mm:ss" or "hh:mm:ss" depending on
+ *  magnitude. Used by the per-file convert progress display. */
+function fmtTimeShort(sec: number): string {
+    if (!Number.isFinite(sec) || sec < 0) return "0:00"
+    const s = Math.floor(sec)
+    const h = Math.floor(s / 3600)
+    const m = Math.floor((s % 3600) / 60)
+    const r = s % 60
+    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`
+    return `${m}:${String(r).padStart(2, "0")}`
+}
+
 /** Live progress for the MKV → MP4 batch converter. Mirrors the
- *  scanner's progress card so the visual language is consistent. */
+ *  scanner's progress card so the visual language is consistent.
+ *  Two-tier progress bars: the global "N/total files" + a per-file
+ *  ffmpeg progress (parsed from `-progress pipe:1` server-side). */
 function ConvertProgressBar({
     progress,
     onCancel,
@@ -1956,6 +1973,8 @@ function ConvertProgressBar({
     const { t } = useTranslation()
     const total = progress.total > 0 ? progress.total : 1
     const pct = Math.min(100, Math.round((progress.current / total) * 100))
+    const filePct = progress.currentFilePct ?? 0
+    const filePctRounded = Math.round(filePct)
     return (
         <div className="bg-black/30 border border-brand-500/30 rounded-md p-3 space-y-2 text-xs">
             <div className="flex items-baseline justify-between gap-2">
@@ -1989,6 +2008,29 @@ function ConvertProgressBar({
                 <p className="truncate text-[10px] text-[--muted] font-mono" title={progress.currentFile}>
                     {progress.currentFile}
                 </p>
+            )}
+            {/* Per-file ffmpeg progress — only shows once we have a
+                non-zero pct (ffmpeg's first tick lands after a few
+                hundred ms). Time display when we have a duration. */}
+            {filePct > 0 && (
+                <div className="space-y-1">
+                    <div className="flex items-baseline justify-between gap-2 text-[10px]">
+                        <span className="text-white/60">
+                            {t("settings.library_convert_file_progress", "Fichier en cours")}
+                        </span>
+                        <span className="text-[--muted] tabular-nums">
+                            {progress.currentFileDur && progress.currentFileSec !== undefined
+                                ? `${fmtTimeShort(progress.currentFileSec)} / ${fmtTimeShort(progress.currentFileDur)} · ${filePctRounded}%`
+                                : `${filePctRounded}%`}
+                        </span>
+                    </div>
+                    <div className="h-1 w-full rounded-full bg-white/10 overflow-hidden">
+                        <div
+                            className="h-full bg-brand-300 transition-[width] duration-300"
+                            style={{ width: `${filePctRounded}%` }}
+                        />
+                    </div>
+                </div>
             )}
             <div className="flex items-center gap-3 text-[10px] pt-1">
                 {progress.succeeded > 0 && (
