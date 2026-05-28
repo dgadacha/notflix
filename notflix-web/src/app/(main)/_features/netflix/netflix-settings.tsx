@@ -50,7 +50,7 @@ import {
     BiShield,
     BiUser,
 } from "react-icons/bi"
-import { LuActivity, LuArrowRight, LuDownload, LuFolderOpen, LuGlobe, LuKey, LuPlay, LuRefreshCw, LuServer, LuUpload, LuUsers } from "react-icons/lu"
+import { LuActivity, LuArrowRight, LuDownload, LuFolderOpen, LuGlobe, LuKey, LuPlay, LuRefreshCw, LuReplace, LuServer, LuUpload, LuUsers, LuX } from "react-icons/lu"
 
 export function NetflixSettings() {
     const { t } = useTranslation()
@@ -1466,6 +1466,38 @@ function useScanStatus(_enabled: boolean) {
     })
 }
 
+type ConvertStatus = {
+    running: boolean
+    total: number
+    current: number
+    currentFile?: string
+    succeeded: number
+    skipped: number
+    failed: number
+    errors?: string[]
+    startedAt?: string
+    finishedAt?: string
+}
+
+function useConvertStatus() {
+    return useQuery<ConvertStatus>({
+        queryKey: ["library", "convert-status"],
+        queryFn: async () => {
+            const r = await fetch("/api/v1/local-library/convert/status")
+            if (!r.ok) throw new Error(`convert status ${r.status}`)
+            const j = await r.json()
+            return (j.data ?? j) as ConvertStatus
+        },
+        // Same adaptive polling as the scan: fast while running so
+        // the user sees current file ticking through, idle otherwise.
+        refetchInterval: (query) => {
+            const d = query.state.data as ConvertStatus | undefined
+            return d?.running ? 1500 : 30_000
+        },
+        staleTime: 1000,
+    })
+}
+
 function LibraryPanel() {
     const { t } = useTranslation()
     const qc = useQueryClient()
@@ -1499,6 +1531,7 @@ function LibraryPanel() {
     // grace window so the poll has time to see the new state).
     const wasRunningRef = React.useRef(false)
     const { data: status } = useScanStatus(true)
+    const { data: convertStatus } = useConvertStatus()
     // OR-style. Either flag being true means a scan is in progress:
     //   status.running          — backend's scanInFlight flag (flips
     //                             on the POST, before any state-prep)
@@ -1506,6 +1539,8 @@ function LibraryPanel() {
     //                             when Scan() actually starts)
     // The two can differ briefly during the pre-walk window.
     const running = (status?.running ?? false) || (status?.progress?.running ?? false)
+    const converting = convertStatus?.running ?? false
+    const [convertErr, setConvertErr] = React.useState<string | null>(null)
 
     React.useEffect(() => {
         if (dirData && !editing) setDraft(dirData.dir)
@@ -1534,6 +1569,43 @@ function LibraryPanel() {
             qc.invalidateQueries({ queryKey: ["library", "dir"] })
         } catch (e) {
             setSaveErr((e as Error).message)
+        }
+    }
+
+    const triggerConvert = async () => {
+        setConvertErr(null)
+        // Optimistic flip — same logic as triggerScan, so the spinner /
+        // progress bar shows up before the first poll comes back.
+        qc.setQueryData<ConvertStatus>(["library", "convert-status"], (prev) => ({
+            running: true,
+            total: 0,
+            current: 0,
+            succeeded: 0,
+            skipped: 0,
+            failed: 0,
+            errors: [],
+            startedAt: new Date().toISOString(),
+            finishedAt: prev?.finishedAt,
+        }))
+        try {
+            const r = await fetch("/api/v1/local-library/convert", { method: "POST" })
+            if (!r.ok) {
+                const j = await r.json().catch(() => ({}))
+                throw new Error(j.error ?? `convert ${r.status}`)
+            }
+            qc.invalidateQueries({ queryKey: ["library", "convert-status"] })
+        } catch (e) {
+            setConvertErr((e as Error).message)
+            qc.invalidateQueries({ queryKey: ["library", "convert-status"] })
+        }
+    }
+
+    const cancelConvert = async () => {
+        try {
+            await fetch("/api/v1/local-library/convert/cancel", { method: "POST" })
+            qc.invalidateQueries({ queryKey: ["library", "convert-status"] })
+        } catch {
+            // best-effort, the poll will reconcile
         }
     }
 
@@ -1699,13 +1771,79 @@ function LibraryPanel() {
                             ? t("settings.library_scanning", "Scan en cours…")
                             : t("settings.library_scan", "Scanner maintenant")}
                     </button>
+                    <button
+                        type="button"
+                        onClick={triggerConvert}
+                        disabled={!dir || converting}
+                        className={cn(
+                            "inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider",
+                            "bg-brand-500/20 hover:bg-brand-500/30 text-brand-100",
+                            "disabled:opacity-50 disabled:cursor-not-allowed",
+                        )}
+                        title={t(
+                            "settings.library_convert_hint",
+                            "Remuxe les .mkv en .mp4 (audio AC-3/DTS → AAC) pour qu'ils soient lisibles dans Chrome/Firefox. Quelques secondes par fichier.",
+                        )}
+                    >
+                        <LuReplace className={cn("size-3.5", converting && "animate-pulse")} />
+                        {converting
+                            ? t("settings.library_converting", "Conversion en cours…")
+                            : t("settings.library_convert", "Convertir les MKV → MP4")}
+                    </button>
                     {scanErr && (
                         <span className="text-red-300 text-xs">{scanErr}</span>
+                    )}
+                    {convertErr && (
+                        <span className="text-red-300 text-xs">{convertErr}</span>
                     )}
                 </div>
 
                 {running && status?.progress && (
                     <ScanProgressBar progress={status.progress} />
+                )}
+
+                {converting && convertStatus && (
+                    <ConvertProgressBar progress={convertStatus} onCancel={cancelConvert} />
+                )}
+
+                {/* Last batch summary — surfaces success/skip/fail counts
+                    + the error list when something went wrong. */}
+                {!converting && convertStatus && convertStatus.finishedAt && convertStatus.total > 0 && (
+                    <div className="bg-black/30 border border-white/10 rounded-md p-3 text-xs space-y-1">
+                        <p className="text-white/80 font-semibold">
+                            {t("settings.library_convert_done", "Dernière conversion")}{" "}
+                            <span className="text-[--muted] font-normal">
+                                · {new Date(convertStatus.finishedAt).toLocaleString()}
+                            </span>
+                        </p>
+                        <div className="flex flex-wrap gap-3 text-[11px]">
+                            <span className="text-emerald-300">
+                                ✓ {convertStatus.succeeded} {t("settings.library_convert_ok", "convertis")}
+                            </span>
+                            {convertStatus.skipped > 0 && (
+                                <span className="text-white/60">
+                                    ↷ {convertStatus.skipped} {t("settings.library_convert_skipped", "ignorés")}
+                                </span>
+                            )}
+                            {convertStatus.failed > 0 && (
+                                <span className="text-red-300">
+                                    ✗ {convertStatus.failed} {t("settings.library_convert_failed", "échecs")}
+                                </span>
+                            )}
+                        </div>
+                        {convertStatus.errors && convertStatus.errors.length > 0 && (
+                            <details className="pt-1">
+                                <summary className="text-red-300/80 text-[10px] cursor-pointer">
+                                    {t("settings.library_convert_show_errors", "Voir les erreurs")}
+                                </summary>
+                                <ul className="mt-1 space-y-0.5 text-[10px] text-red-300/70 font-mono">
+                                    {convertStatus.errors.map((e, i) => (
+                                        <li key={i} className="break-all">{e}</li>
+                                    ))}
+                                </ul>
+                            </details>
+                        )}
+                    </div>
                 )}
             </div>
 
@@ -1799,6 +1937,73 @@ function ScanProgressBar({ progress }: { progress: ScanProgress }) {
                 {progress.unmatched > 0 && (
                     <span className="text-amber-300">
                         ⚠ {progress.unmatched} {t("settings.library_unmatched_short", "inconnus")}
+                    </span>
+                )}
+            </div>
+        </div>
+    )
+}
+
+/** Live progress for the MKV → MP4 batch converter. Mirrors the
+ *  scanner's progress card so the visual language is consistent. */
+function ConvertProgressBar({
+    progress,
+    onCancel,
+}: {
+    progress: ConvertStatus
+    onCancel: () => void
+}) {
+    const { t } = useTranslation()
+    const total = progress.total > 0 ? progress.total : 1
+    const pct = Math.min(100, Math.round((progress.current / total) * 100))
+    return (
+        <div className="bg-black/30 border border-brand-500/30 rounded-md p-3 space-y-2 text-xs">
+            <div className="flex items-baseline justify-between gap-2">
+                <p className="text-white/80 font-semibold">
+                    {progress.total > 0
+                        ? t("settings.library_convert_progress", "{{n}} / {{t}}", { n: progress.current, t: progress.total })
+                        : t("settings.library_convert_walking", "Préparation…")}
+                </p>
+                <div className="flex items-center gap-2">
+                    <span className="text-[--muted] tabular-nums text-[11px]">
+                        {progress.total > 0 ? `${pct}%` : ""}
+                    </span>
+                    <button
+                        type="button"
+                        onClick={onCancel}
+                        className="inline-flex items-center gap-1 text-[10px] text-red-300/80 hover:text-red-200 transition-colors"
+                        title={t("settings.library_convert_cancel", "Annuler")}
+                    >
+                        <LuX className="size-3" />
+                        {t("common.cancel", "Annuler")}
+                    </button>
+                </div>
+            </div>
+            <div className="h-1.5 w-full rounded-full bg-white/10 overflow-hidden">
+                <div
+                    className="h-full bg-brand-500 transition-[width] duration-300"
+                    style={{ width: progress.total > 0 ? `${pct}%` : "30%" }}
+                />
+            </div>
+            {progress.currentFile && (
+                <p className="truncate text-[10px] text-[--muted] font-mono" title={progress.currentFile}>
+                    {progress.currentFile}
+                </p>
+            )}
+            <div className="flex items-center gap-3 text-[10px] pt-1">
+                {progress.succeeded > 0 && (
+                    <span className="text-emerald-300">
+                        ✓ {progress.succeeded} {t("settings.library_convert_ok", "convertis")}
+                    </span>
+                )}
+                {progress.skipped > 0 && (
+                    <span className="text-white/60">
+                        ↷ {progress.skipped} {t("settings.library_convert_skipped", "ignorés")}
+                    </span>
+                )}
+                {progress.failed > 0 && (
+                    <span className="text-red-300">
+                        ✗ {progress.failed} {t("settings.library_convert_failed", "échecs")}
                     </span>
                 )}
             </div>

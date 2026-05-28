@@ -96,6 +96,12 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	libAdmin.PUT("/dir", h.HandleSetLibraryDir)
 	libAdmin.POST("/scan", h.HandleScanLocalLibrary)
 	libAdmin.GET("/scan/status", h.HandleScanStatus)
+	// MKV → MP4 batch conversion. Runs ffmpeg per MKV row in the DB,
+	// remuxing video bit-perfect and transcoding audio to AAC when
+	// the source isn't already AAC. Deletes the source on success.
+	libAdmin.POST("/convert", h.HandleConvertMKVs)
+	libAdmin.GET("/convert/status", h.HandleConvertStatus)
+	libAdmin.POST("/convert/cancel", h.HandleConvertCancel)
 
 	// Stream transmux — pipes a TorBox URL through ffmpeg to swap the
 	// audio codec for AAC. Used as a fallback when the browser can't

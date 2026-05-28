@@ -329,6 +329,49 @@ func (h *Handler) HandleStreamLocalFile(c echo.Context) error {
 	return c.File(absFile)
 }
 
+// -----------------------------------------------------------------------------
+// MKV → MP4 batch conversion
+// -----------------------------------------------------------------------------
+
+// HandleConvertMKVs — POST /api/v1/local-library/convert
+//
+// Kicks off a batch that walks every .mkv row in the DB, remuxes it
+// to .mp4 (transcoding the audio to AAC if needed), and deletes the
+// .mkv on success. Returns 202 immediately; the frontend polls
+// /convert/status to render a progress bar. 409 if a batch is
+// already running.
+func (h *Handler) HandleConvertMKVs(c echo.Context) error {
+	if h.App.Config.Library.Dir == "" {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error": "library dir not configured",
+		})
+	}
+	if !library.TryStartConvertBatch(h.App.Database) {
+		return c.JSON(http.StatusConflict, map[string]any{
+			"error": "conversion already running",
+		})
+	}
+	return c.JSON(http.StatusAccepted, map[string]any{"started": true})
+}
+
+// HandleConvertStatus — GET /api/v1/local-library/convert/status
+//
+// Returns the live progress of the current batch (or the final
+// summary of the last finished batch). Polled by the settings UI
+// while the batch is running.
+func (h *Handler) HandleConvertStatus(c echo.Context) error {
+	return RespondOK(c, library.ConvertSnapshot())
+}
+
+// HandleConvertCancel — POST /api/v1/local-library/convert/cancel
+//
+// Stops the current batch. The in-flight ffmpeg is killed via context
+// cancellation, leaving its (incomplete) .mp4 cleaned up.
+func (h *Handler) HandleConvertCancel(c echo.Context) error {
+	library.CancelConvertBatch()
+	return RespondOK(c, map[string]any{"cancelled": true})
+}
+
 // Compile-time link check: ensure core.SettingLibraryDir is exported
 // at the expected name (we reference it via the App helper above).
 var _ = core.SettingLibraryDir
