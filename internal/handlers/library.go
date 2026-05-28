@@ -429,6 +429,23 @@ func (h *Handler) HandleConvertCancel(c echo.Context) error {
 	return RespondOK(c, map[string]any{"cancelled": true})
 }
 
+// HandleReorderAudio — POST /api/v1/local-library/reorder-audio
+//
+// Re-runs the audio-track ordering pass against every .mp4 already
+// in the library. Lightweight: -c copy + new -map order, ~seconds
+// per file. Useful when the user changes the preferred audio
+// language settings AFTER having already converted their library.
+//
+// 409 when a convert / reorder batch is already running.
+func (h *Handler) HandleReorderAudio(c echo.Context) error {
+	if !library.TryStartReorderBatch(h.App.Database, h.App.NewAudioLangPicker()) {
+		return c.JSON(http.StatusConflict, map[string]any{
+			"error": "another batch is already running",
+		})
+	}
+	return c.JSON(http.StatusAccepted, map[string]any{"started": true})
+}
+
 // -----------------------------------------------------------------------------
 // Subtitles — probe + on-demand VTT extraction
 // -----------------------------------------------------------------------------
@@ -460,9 +477,17 @@ type localSubTrack struct {
 	Title       string `json:"title,omitempty"`
 }
 
+type localAudioTrack struct {
+	StreamIndex int    `json:"streamIndex"` // 0-based among audio streams
+	Lang        string `json:"lang,omitempty"`
+	Codec       string `json:"codec,omitempty"`
+	Title       string `json:"title,omitempty"`
+}
+
 type localProbeResp struct {
-	Duration  float64         `json:"duration"`
-	Subtitles []localSubTrack `json:"subtitles,omitempty"`
+	Duration  float64           `json:"duration"`
+	Audio     []localAudioTrack `json:"audio,omitempty"`
+	Subtitles []localSubTrack   `json:"subtitles,omitempty"`
 }
 
 // HandleProbeLocalFile — GET /api/v1/local-library/probe/:id
@@ -492,7 +517,10 @@ func (h *Handler) HandleProbeLocalFile(c echo.Context) error {
 		})
 	}
 
-	resp := localProbeResp{Subtitles: []localSubTrack{}}
+	resp := localProbeResp{
+		Audio:     []localAudioTrack{},
+		Subtitles: []localSubTrack{},
+	}
 	var probe struct {
 		Format struct {
 			Duration string `json:"duration"`
@@ -515,18 +543,26 @@ func (h *Handler) HandleProbeLocalFile(c echo.Context) error {
 	if d, err := strconv.ParseFloat(strings.TrimSpace(probe.Format.Duration), 64); err == nil {
 		resp.Duration = d
 	}
-	subIdx := 0
+	subIdx, audioIdx := 0, 0
 	for _, s := range probe.Streams {
-		if s.CodecType != "subtitle" {
-			continue
+		switch s.CodecType {
+		case "subtitle":
+			resp.Subtitles = append(resp.Subtitles, localSubTrack{
+				StreamIndex: subIdx,
+				Lang:        s.Tags.Language,
+				Codec:       s.CodecName,
+				Title:       s.Tags.Title,
+			})
+			subIdx++
+		case "audio":
+			resp.Audio = append(resp.Audio, localAudioTrack{
+				StreamIndex: audioIdx,
+				Lang:        s.Tags.Language,
+				Codec:       s.CodecName,
+				Title:       s.Tags.Title,
+			})
+			audioIdx++
 		}
-		resp.Subtitles = append(resp.Subtitles, localSubTrack{
-			StreamIndex: subIdx, // s:N — 0-based within subtitle streams
-			Lang:        s.Tags.Language,
-			Codec:       s.CodecName,
-			Title:       s.Tags.Title,
-		})
-		subIdx++
 	}
 	return RespondOK(c, resp)
 }

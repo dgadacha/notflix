@@ -41,6 +41,11 @@ import (
 
 type ConvertProgress struct {
 	Running     bool      `json:"running"`
+	// Mode describes what the current batch is doing — "convert" for
+	// MKV→MP4 transcode, "reorder" for the lighter audio-track
+	// remap-only pass on existing MP4s. The frontend uses this to
+	// label its progress card correctly.
+	Mode        string    `json:"mode,omitempty"`
 	Total       int       `json:"total"`
 	Current     int       `json:"current"`
 	CurrentFile string    `json:"currentFile,omitempty"`
@@ -94,11 +99,41 @@ func TryStartConvertBatch(store *db.Database, pickLang func(*models.LocalFile) s
 	convertCancel = cancel
 	convertState = ConvertProgress{
 		Running:   true,
+		Mode:      "convert",
 		StartedAt: time.Now(),
 	}
 	convertMu.Unlock()
 
 	go runConvertBatch(ctx, store, pickLang)
+	return true
+}
+
+// TryStartReorderBatch starts a "reorder audio tracks" batch on the
+// already-converted .mp4 files in the library. Same mutex / progress
+// state as the convert batch — only one of either runs at a time.
+//
+// The reorder pass is lightweight: ffmpeg -c copy with a new -map
+// order. No re-encoding. A file already in the desired order is
+// skipped (we just compare track 0's lang to the picker's choice).
+func TryStartReorderBatch(store *db.Database, pickLang func(*models.LocalFile) string) bool {
+	if pickLang == nil {
+		return false
+	}
+	convertMu.Lock()
+	if convertState.Running {
+		convertMu.Unlock()
+		return false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	convertCancel = cancel
+	convertState = ConvertProgress{
+		Running:   true,
+		Mode:      "reorder",
+		StartedAt: time.Now(),
+	}
+	convertMu.Unlock()
+
+	go runReorderBatch(ctx, store, pickLang)
 	return true
 }
 
@@ -197,6 +232,195 @@ func runConvertBatch(ctx context.Context, store *db.Database, pickLang func(*mod
 //   - Returns "skipped" → a .mp4 with the same basename already exists
 //                         (we don't overwrite, the user can clean up)
 //   - Returns "failed"  → ffmpeg/output/delete error; errMsg explains
+// runReorderBatch walks every .mp4 row in the DB and remuxes those
+// whose track 0 audio doesn't match the picker's choice. Identical
+// progress state to runConvertBatch so the frontend renders the same
+// ConvertProgressBar.
+func runReorderBatch(ctx context.Context, store *db.Database, pickLang func(*models.LocalFile) string) {
+	defer func() {
+		convertMu.Lock()
+		convertState.Running = false
+		convertState.FinishedAt = time.Now()
+		convertCancel = nil
+		convertMu.Unlock()
+	}()
+
+	files, err := store.ListAllLocalFiles()
+	if err != nil {
+		log.Printf("reorder batch: list files: %v", err)
+		return
+	}
+
+	// Filter to MP4s only.
+	var mp4s []*models.LocalFile
+	for _, f := range files {
+		if strings.EqualFold(filepath.Ext(f.Path), ".mp4") {
+			mp4s = append(mp4s, f)
+		}
+	}
+
+	convertMu.Lock()
+	convertState.Total = len(mp4s)
+	convertMu.Unlock()
+
+	if len(mp4s) == 0 {
+		log.Printf("reorder batch: no MP4 files to process")
+		return
+	}
+	log.Printf("reorder batch: %d MP4(s) to check", len(mp4s))
+
+	for i, f := range mp4s {
+		if ctx.Err() != nil {
+			log.Printf("reorder batch: cancelled at %d/%d", i, len(mp4s))
+			return
+		}
+		convertMu.Lock()
+		convertState.Current = i + 1
+		convertState.CurrentFile = filepath.Base(f.Path)
+		convertState.CurrentFilePct = 0
+		convertMu.Unlock()
+
+		preferredLang := pickLang(f)
+		outcome, errMsg := reorderOne(ctx, f.Path, preferredLang)
+
+		convertMu.Lock()
+		switch outcome {
+		case "ok":
+			convertState.Succeeded++
+		case "skipped":
+			convertState.Skipped++
+		default:
+			convertState.Failed++
+			if errMsg != "" && len(convertState.Errors) < 20 {
+				convertState.Errors = append(convertState.Errors,
+					fmt.Sprintf("%s: %s", filepath.Base(f.Path), errMsg))
+			}
+		}
+		convertMu.Unlock()
+	}
+
+	convertMu.RLock()
+	log.Printf("reorder batch: done — %d ok, %d skipped, %d failed",
+		convertState.Succeeded, convertState.Skipped, convertState.Failed)
+	convertMu.RUnlock()
+}
+
+// reorderOne checks the current audio track 0 of an .mp4 and, if it
+// doesn't match the preferred language, remuxes the file with the
+// audio tracks in the preferred order. -c copy across the board, no
+// re-encode — runs in seconds even on large files.
+//
+//   - "skipped" : preferred lang already at track 0, or preferred lang
+//     not present in the file
+//   - "ok"      : successfully remuxed
+//   - "failed"  : ffprobe / ffmpeg / rename error
+func reorderOne(ctx context.Context, mp4Path, preferredLang string) (outcome, errMsg string) {
+	if strings.TrimSpace(preferredLang) == "" {
+		return "skipped", ""
+	}
+	if _, err := os.Stat(mp4Path); err != nil {
+		return "failed", "source missing: " + err.Error()
+	}
+
+	streams := probeAudioStreams(ctx, mp4Path)
+	if len(streams) == 0 {
+		return "skipped", "no audio streams"
+	}
+	prefLower := strings.ToLower(strings.TrimSpace(preferredLang))
+
+	// Already correct? Compare track 0 to the desired lang.
+	if matchLangCode(streams[0].Lang, prefLower) {
+		return "skipped", ""
+	}
+	// Preferred lang in file at all?
+	preferredIdx := -1
+	for _, s := range streams {
+		if matchLangCode(s.Lang, prefLower) {
+			preferredIdx = s.Idx
+			break
+		}
+	}
+	if preferredIdx < 0 {
+		return "skipped", "preferred lang not in source"
+	}
+
+	// Disk space safety — though a -c copy remux uses only the source
+	// size temporarily, the .tmp + the source coexist briefly.
+	srcInfo, err := os.Stat(mp4Path)
+	if err == nil {
+		srcBytes := uint64(srcInfo.Size())
+		if free := freeBytesAt(filepath.Dir(mp4Path)); free > 0 && free < srcBytes*6/5 {
+			return "failed", fmt.Sprintf(
+				"espace insuffisant : %s libre, %s requis",
+				humanBytes(free), humanBytes(srcBytes*6/5),
+			)
+		}
+	}
+
+	tmpPath := mp4Path + ".reorder.tmp"
+	_ = os.Remove(tmpPath)
+
+	// Build the audio map in preferred order.
+	audioOrder := []int{preferredIdx}
+	for _, s := range streams {
+		if s.Idx != preferredIdx {
+			audioOrder = append(audioOrder, s.Idx)
+		}
+	}
+
+	args := []string{
+		"-hide_banner",
+		"-loglevel", "error",
+		"-y",
+		"-i", mp4Path,
+		"-map", "0:v?",
+		"-map_metadata", "0",
+	}
+	for _, idx := range audioOrder {
+		args = append(args, "-map", fmt.Sprintf("0:a:%d", idx))
+	}
+	args = append(args,
+		"-map", "0:s?",
+		"-c", "copy",
+		"-movflags", "+faststart",
+		"-f", "mp4",
+		tmpPath,
+	)
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		_ = os.Remove(tmpPath)
+		if ctx.Err() != nil {
+			return "failed", "cancelled"
+		}
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		if len(msg) > 200 {
+			msg = msg[:200] + "…"
+		}
+		return "failed", msg
+	}
+
+	info, err := os.Stat(tmpPath)
+	if err != nil || info.Size() == 0 {
+		_ = os.Remove(tmpPath)
+		return "failed", "ffmpeg produced no output"
+	}
+
+	// Atomic swap — same name as source, so we replace it in place.
+	if err := os.Rename(tmpPath, mp4Path); err != nil {
+		_ = os.Remove(tmpPath)
+		return "failed", "rename: " + err.Error()
+	}
+	log.Printf("reorder: %s — audio order [%s], pref=%q",
+		filepath.Base(mp4Path), joinInts(audioOrder), preferredLang)
+	return "ok", ""
+}
+
 func convertOne(ctx context.Context, mkvPath, preferredAudioLang string) (outcome, errMsg string) {
 	srcInfo, err := os.Stat(mkvPath)
 	if err != nil {

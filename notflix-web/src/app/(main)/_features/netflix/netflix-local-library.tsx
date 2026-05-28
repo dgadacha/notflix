@@ -139,6 +139,49 @@ function buildEntries(files: LocalFile[]): LibraryEntry[] {
     return out
 }
 
+/** Maps an ISO 639-2/B (or 639-1) code to a short user-friendly label.
+ *  Used by the detail modal to show "FR" / "VO" / "EN" next to the
+ *  Local badge of a locally-available media. */
+export function langLabel(code: string | null | undefined): string | null {
+    if (!code) return null
+    const c = code.toLowerCase().trim()
+    const map: Record<string, string> = {
+        fre: "FR", fra: "FR", fr: "FR",
+        eng: "EN", en: "EN",
+        jpn: "VO", ja: "VO", // anime / Japan = "VO" in French parlance
+        spa: "ES", es: "ES",
+        ger: "DE", deu: "DE", de: "DE",
+        ita: "IT", it: "IT",
+        chi: "ZH", zho: "ZH", zh: "ZH",
+        kor: "KO", ko: "KO",
+        por: "PT", pt: "PT",
+        rus: "RU", ru: "RU",
+        ara: "AR", ar: "AR",
+    }
+    return map[c] ?? c.toUpperCase()
+}
+
+/** Fetches the audio language of track 0 (the one Chrome plays by
+ *  default) for a local file. Returns null when no probe data is
+ *  available or the track has no language tag. Used by the detail
+ *  modal so the user sees the language he'll get if he clicks Lecture. */
+export function useLocalAudioLang(localId: number | null | undefined, enabled: boolean = true) {
+    return useQuery<string | null>({
+        queryKey: ["local-library", "audio-lang", localId],
+        queryFn: async () => {
+            if (!localId) return null
+            const r = await fetch(`/api/v1/local-library/probe/${localId}`)
+            if (!r.ok) return null
+            const j = await r.json()
+            const data = j.data ?? j
+            const lang = data?.audio?.[0]?.lang
+            return typeof lang === "string" && lang ? lang : null
+        },
+        enabled: enabled && !!localId,
+        staleTime: 60 * 60_000,
+    })
+}
+
 export function useLocalLibrary() {
     return useQuery<LocalFile[]>({
         queryKey: ["local-library"],

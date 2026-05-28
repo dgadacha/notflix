@@ -36,7 +36,7 @@ import {
     useTMDBSeason,
     yearOf,
 } from "@/lib/tmdb"
-import { useLocalLibrary, type LocalFile } from "@/app/(main)/_features/netflix/netflix-local-library"
+import { langLabel, useLocalAudioLang, useLocalLibrary, type LocalFile } from "@/app/(main)/_features/netflix/netflix-local-library"
 import { useSearchMovie, type Release } from "@/lib/notflix-api"
 import { useNetflixPersonModal } from "@/app/(main)/_features/netflix/netflix-person-modal"
 import { atom, useAtom, useSetAtom } from "jotai"
@@ -238,24 +238,15 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
                         {/* "LOCAL" badge — surfaces when at least one file
                             for this title is on disk. Tells the user the
                             Lecture button will play from /api/v1/local-library
-                            instead of triggering a Prowlarr search. */}
+                            instead of triggering a Prowlarr search.
+                            For movies (single file) we also fetch the audio
+                            track 0 language and append it ("· FR" / "· VO"). */}
                         {hasLocal && (
-                            <span
-                                className={cn(
-                                    "inline-flex items-center gap-1 px-2 py-1 rounded-md",
-                                    "bg-emerald-500/15 border border-emerald-500/40 text-emerald-300",
-                                    "text-[10px] font-bold uppercase tracking-wider",
-                                )}
-                                title={t("modal.local_available", "Disponible dans ta bibliothèque locale")}
-                            >
-                                <span className="size-1.5 rounded-full bg-emerald-400" />
-                                {t("modal.local_badge", "Local")}
-                                {type === "tv" && localFilesForTitle.length > 1 && (
-                                    <span className="text-emerald-300/70 font-normal">
-                                        · {localFilesForTitle.length} ép.
-                                    </span>
-                                )}
-                            </span>
+                            <MovieLocalBadge
+                                isMovie={type === "movie"}
+                                tvCount={type === "tv" ? localFilesForTitle.length : 0}
+                                localId={type === "movie" ? localFilesForTitle[0]?.id : undefined}
+                            />
                         )}
 
                         {/* "Ma liste" toggle — adds/removes from the active
@@ -392,6 +383,43 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
  *
  *  Returns null when no usable local file exists — the caller treats
  *  that as "no local copy, behave as before". */
+/** "LOCAL" badge for the modal — shows the audio language for
+ *  single-file movies, and the episode count for TV shows. */
+function MovieLocalBadge({
+    isMovie,
+    tvCount,
+    localId,
+}: {
+    isMovie: boolean
+    tvCount: number
+    localId?: number
+}) {
+    const { t } = useTranslation()
+    const { data: audioLangCode } = useLocalAudioLang(localId, isMovie)
+    const langLbl = isMovie ? langLabel(audioLangCode) : null
+    return (
+        <span
+            className={cn(
+                "inline-flex items-center gap-1 px-2 py-1 rounded-md",
+                "bg-emerald-500/15 border border-emerald-500/40 text-emerald-300",
+                "text-[10px] font-bold uppercase tracking-wider",
+            )}
+            title={t("modal.local_available", "Disponible dans ta bibliothèque locale")}
+        >
+            <span className="size-1.5 rounded-full bg-emerald-400" />
+            {t("modal.local_badge", "Local")}
+            {langLbl && (
+                <span className="text-emerald-300/85 font-normal">· {langLbl}</span>
+            )}
+            {!isMovie && tvCount > 1 && (
+                <span className="text-emerald-300/70 font-normal">
+                    · {tvCount} ép.
+                </span>
+            )}
+        </span>
+    )
+}
+
 function pickLocalFileId(
     files: LocalFile[],
     type: "movie" | "tv",
@@ -531,14 +559,15 @@ function EpisodeList({
                     {episodes.map(ep => {
                         // O(n × m) but episode lists are small (~24 max)
                         // and localFiles is filtered to this show.
-                        const isLocal = localFiles.some(
+                        const localFile = localFiles.find(
                             f => f.season === selectedSeason && f.episode === ep.episode_number,
                         )
                         return (
                             <li key={ep.id}>
                                 <EpisodeRow
                                     episode={ep}
-                                    isLocal={isLocal}
+                                    isLocal={!!localFile}
+                                    localId={localFile?.id}
                                     onClick={() => onPickEpisode(selectedSeason, ep.episode_number)}
                                 />
                             </li>
@@ -554,13 +583,19 @@ function EpisodeRow({
     episode,
     onClick,
     isLocal,
+    localId,
 }: {
     episode: TMDBEpisode
     onClick: () => void
     isLocal?: boolean
+    localId?: number
 }) {
     const { t } = useTranslation()
     const thumb = tmdbImage("w300", episode.still_path)
+    // Probe ONLY when the row is local — avoids a useless /probe call
+    // for the 23 of 24 episodes that aren't on disk.
+    const { data: audioLangCode } = useLocalAudioLang(localId, !!isLocal)
+    const langLbl = langLabel(audioLangCode)
     // Mark episodes whose air_date is still in the future — they exist in
     // TMDB's catalogue but Prowlarr won't have a release for them yet.
     const airDate = episode.air_date ? new Date(episode.air_date) : null
@@ -619,6 +654,9 @@ function EpisodeRow({
                     >
                         <span className="size-1 rounded-full bg-white" />
                         {t("modal.local_badge", "Local")}
+                        {langLbl && (
+                            <span className="font-normal text-white/85">· {langLbl}</span>
+                        )}
                     </span>
                 )}
             </div>

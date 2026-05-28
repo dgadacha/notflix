@@ -50,7 +50,7 @@ import {
     BiShield,
     BiUser,
 } from "react-icons/bi"
-import { LuActivity, LuArrowRight, LuDownload, LuFolderOpen, LuGlobe, LuKey, LuPlay, LuRefreshCw, LuReplace, LuServer, LuUpload, LuUsers, LuX } from "react-icons/lu"
+import { LuActivity, LuArrowDownUp, LuArrowRight, LuDownload, LuFolderOpen, LuGlobe, LuKey, LuPlay, LuRefreshCw, LuReplace, LuServer, LuUpload, LuUsers, LuX } from "react-icons/lu"
 
 export function NetflixSettings() {
     const { t } = useTranslation()
@@ -1468,6 +1468,7 @@ function useScanStatus(_enabled: boolean) {
 
 type ConvertStatus = {
     running: boolean
+    mode?: "convert" | "reorder"  // which batch is active
     total: number
     current: number
     currentFile?: string
@@ -1690,6 +1691,33 @@ function LibraryPanel() {
         }
     }
 
+    const triggerReorder = async () => {
+        setConvertErr(null)
+        qc.setQueryData<ConvertStatus>(["library", "convert-status"], (prev) => ({
+            running: true,
+            mode: "reorder",
+            total: 0,
+            current: 0,
+            succeeded: 0,
+            skipped: 0,
+            failed: 0,
+            errors: [],
+            startedAt: new Date().toISOString(),
+            finishedAt: prev?.finishedAt,
+        }))
+        try {
+            const r = await fetch("/api/v1/local-library/reorder-audio", { method: "POST" })
+            if (!r.ok) {
+                const j = await r.json().catch(() => ({}))
+                throw new Error(j.error ?? `reorder ${r.status}`)
+            }
+            qc.invalidateQueries({ queryKey: ["library", "convert-status"] })
+        } catch (e) {
+            setConvertErr((e as Error).message)
+            qc.invalidateQueries({ queryKey: ["library", "convert-status"] })
+        }
+    }
+
     const triggerScan = async () => {
         setScanErr(null)
         // Optimistic update — flip running=true in the cache BEFORE
@@ -1867,9 +1895,28 @@ function LibraryPanel() {
                         )}
                     >
                         <LuReplace className={cn("size-3.5", converting && "animate-pulse")} />
-                        {converting
+                        {converting && convertStatus?.mode === "convert"
                             ? t("settings.library_converting", "Conversion en cours…")
                             : t("settings.library_convert", "Convertir les MKV → MP4")}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={triggerReorder}
+                        disabled={!dir || converting}
+                        className={cn(
+                            "inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider",
+                            "bg-white/10 hover:bg-white/15 text-white",
+                            "disabled:opacity-50 disabled:cursor-not-allowed",
+                        )}
+                        title={t(
+                            "settings.library_reorder_hint",
+                            "Pour les .mp4 déjà convertis : remet la langue préférée en piste audio n° 1 sans réencoder. Quelques secondes par fichier.",
+                        )}
+                    >
+                        <LuArrowDownUp className={cn("size-3.5", converting && convertStatus?.mode === "reorder" && "animate-pulse")} />
+                        {converting && convertStatus?.mode === "reorder"
+                            ? t("settings.library_reordering", "Réorganisation…")
+                            : t("settings.library_reorder", "Réordonner pistes audio")}
                     </button>
                     {scanErr && (
                         <span className="text-red-300 text-xs">{scanErr}</span>

@@ -106,6 +106,10 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	libAdmin.POST("/convert", h.HandleConvertMKVs)
 	libAdmin.GET("/convert/status", h.HandleConvertStatus)
 	libAdmin.POST("/convert/cancel", h.HandleConvertCancel)
+	// Lightweight pass that just remuxes existing MP4s to put the
+	// preferred audio language at track 0. Shares the convert
+	// progress state (singleton — only one batch runs at a time).
+	libAdmin.POST("/reorder-audio", h.HandleReorderAudio)
 	// Auto-convert toggle: when ON, each successful scan chain-
 	// triggers the batch converter (no-op if a batch is already
 	// running, so back-to-back scans don't stack jobs).
