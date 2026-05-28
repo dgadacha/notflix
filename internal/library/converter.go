@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"notflix/internal/database/db"
@@ -170,7 +172,8 @@ func runConvertBatch(ctx context.Context, store *db.Database) {
 //                         (we don't overwrite, the user can clean up)
 //   - Returns "failed"  → ffmpeg/output/delete error; errMsg explains
 func convertOne(ctx context.Context, mkvPath string) (outcome, errMsg string) {
-	if _, err := os.Stat(mkvPath); err != nil {
+	srcInfo, err := os.Stat(mkvPath)
+	if err != nil {
 		return "failed", "source missing: " + err.Error()
 	}
 
@@ -183,6 +186,20 @@ func convertOne(ctx context.Context, mkvPath string) (outcome, errMsg string) {
 		// previous successful conversion that left the .mkv as a
 		// leftover; the admin can delete it manually.
 		return "skipped", ""
+	}
+
+	// Disk space check. We need roughly source size in the same
+	// directory (video is copy-muxed, audio is re-encoded so size
+	// is comparable). Use 1.2× as a safety margin. Skip with a
+	// clear error instead of letting ffmpeg churn for minutes only
+	// to fail on "No space left on device".
+	srcBytes := uint64(srcInfo.Size())
+	needBytes := srcBytes * 6 / 5
+	if free := freeBytesAt(filepath.Dir(outPath)); free > 0 && free < needBytes {
+		return "failed", fmt.Sprintf(
+			"espace insuffisant : %s libre, %s requis",
+			humanBytes(free), humanBytes(needBytes),
+		)
 	}
 
 	// Probe both audio and video codecs so we can pick the right
@@ -298,4 +315,42 @@ func probeFirstStreamCodec(ctx context.Context, path, selector string) string {
 func isHEVC(codec string) bool {
 	c := strings.ToLower(codec)
 	return c == "hevc" || c == "h265" || c == "h.265"
+}
+
+// freeBytesAt returns the number of bytes available to a non-root
+// user on the filesystem that hosts `path`. Returns 0 if the call
+// fails (caller treats that as "unknown" and proceeds).
+//
+// Works on macOS + Linux via syscall.Statfs_t. Windows would need
+// a different code path but Notflix doesn't deploy there.
+func freeBytesAt(path string) uint64 {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return 0
+	}
+	// Bavail = blocks free to a non-root user. Bsize = block size.
+	// Cast Bsize through int64 → uint64 since its underlying type
+	// is int32 on Linux and int32 on macOS.
+	return stat.Bavail * uint64(stat.Bsize)
+}
+
+// humanBytes formats n into a short SI-ish string ("4.3 GB", "789 MB").
+// Used in error messages so the user sees real numbers instead of
+// raw byte counts.
+func humanBytes(n uint64) string {
+	if n == 0 {
+		return "0 B"
+	}
+	units := []string{"B", "KB", "MB", "GB", "TB", "PB"}
+	v := float64(n)
+	i := 0
+	for v >= 1024 && i < len(units)-1 {
+		v /= 1024
+		i++
+	}
+	// 1 decimal under 10, integer above (so "4.3 GB" but "256 GB").
+	if v < 10 {
+		return fmt.Sprintf("%.1f %s", v, units[i])
+	}
+	return fmt.Sprintf("%.0f %s", math.Round(v), units[i])
 }
