@@ -301,6 +301,16 @@ func (p *progressState) reset(total int) {
 	p.unmatched = 0
 }
 
+// setTotal patches the total mid-scan. Used between the pre-walk
+// (which counts files) and the main pass (which processes them) —
+// `reset(0)` flips the running flag immediately, `setTotal(N)` fills
+// in the denominator a moment later.
+func (p *progressState) setTotal(total int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.total = total
+}
+
 func (p *progressState) tick(file string, matched bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -368,11 +378,18 @@ func Scan(ctx context.Context, dir string, t TMDBSearcher, store *db.Database) (
 		return report, fmt.Errorf("scan: %q is not a directory", abs)
 	}
 
-	// Phase 1: pre-walk to count target files. Fast — just stat each
-	// entry, no TMDB. Lets the UI render a real "X / Y" progress bar.
-	total := countVideoFiles(abs)
-	globalProgress.reset(total)
+	// Flip the running flag IMMEDIATELY — even before the pre-walk,
+	// which can take a few seconds on big libraries. Without this, the
+	// frontend polls /scan/status during the pre-walk window and sees
+	// running=false, so the progress bar takes its time to appear.
+	globalProgress.reset(0)
 	defer globalProgress.finish()
+
+	// Phase 1: pre-walk to count target files. Fast — just stat each
+	// entry, no TMDB. Lets the UI render a real "X / Y" progress bar
+	// once it lands.
+	total := countVideoFiles(abs)
+	globalProgress.setTotal(total)
 
 	// Phase 2: classify top-level entries and process.
 	seenPaths := make([]string, 0, total)

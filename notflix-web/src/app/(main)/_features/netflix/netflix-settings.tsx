@@ -1479,7 +1479,13 @@ function LibraryPanel() {
     // grace window so the poll has time to see the new state).
     const wasRunningRef = React.useRef(false)
     const { data: status } = useScanStatus(true)
-    const running = status?.progress?.running ?? status?.running ?? false
+    // OR-style. Either flag being true means a scan is in progress:
+    //   status.running          — backend's scanInFlight flag (flips
+    //                             on the POST, before any state-prep)
+    //   status.progress.running — library.Scan's progressState (flips
+    //                             when Scan() actually starts)
+    // The two can differ briefly during the pre-walk window.
+    const running = (status?.running ?? false) || (status?.progress?.running ?? false)
 
     React.useEffect(() => {
         if (dirData && !editing) setDraft(dirData.dir)
@@ -1513,17 +1519,36 @@ function LibraryPanel() {
 
     const triggerScan = async () => {
         setScanErr(null)
+        // Optimistic update — flip running=true in the cache BEFORE
+        // the network round-trip so the progress bar appears on the
+        // very next paint instead of waiting for the poll interval to
+        // tick. If the POST fails (eg. 409 already-running), the
+        // upcoming poll reconciles back to the real state.
+        qc.setQueryData<ScanStatusResp>(["library", "scan-status"], (prev) => ({
+            running: true,
+            progress: {
+                running: true,
+                startedAt: new Date().toISOString(),
+                total: 0,
+                current: 0,
+                matched: 0,
+                unmatched: 0,
+            },
+            lastReport: prev?.lastReport ?? null,
+        }))
         try {
             const r = await fetch("/api/v1/local-library/scan", { method: "POST" })
             if (!r.ok) {
                 const j = await r.json().catch(() => ({}))
                 throw new Error(j.error ?? `scan ${r.status}`)
             }
-            // Backend returns 202 — running flag will flip via the
-            // /scan/status poll within ~1.5 s.
+            // Force an immediate poll so the polling interval flips
+            // from 30 s (idle default) to 1.5 s (running) right away.
             qc.invalidateQueries({ queryKey: ["library", "scan-status"] })
         } catch (e) {
             setScanErr((e as Error).message)
+            // Roll back the optimistic flag on failure.
+            qc.invalidateQueries({ queryKey: ["library", "scan-status"] })
         }
     }
 
