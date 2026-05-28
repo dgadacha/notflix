@@ -78,6 +78,38 @@ func ffmpegHTTPInputFlags() []string {
 	}
 }
 
+// buildHLSAudioArgs returns the audio-side ffmpeg flags for a chunk
+// (or init segment) of the given variant.
+//
+// Decision matrix:
+//   - AAC source on the "source" variant → bit-perfect copy. Browsers
+//     play AAC natively so there's no point re-encoding.
+//   - Anything else → re-encode to AAC 192 kb/s stereo. We also slap
+//     `aresample=async=1000` on the audio filtergraph, which lets
+//     ffmpeg stretch or skip samples (up to 1000 / s) to keep audio
+//     aligned with video timestamps. Without it, MKV sources that
+//     carry a per-track delay drift progressively against the video
+//     across HLS chunks — that's the "le son est décalé" symptom.
+//
+// async=1000 is the modern replacement for the legacy `-async 1`
+// flag. It runs as an audio-filter so it composes cleanly with the
+// rest of the audioArgs (which are mostly stream selectors, not
+// filters).
+func buildHLSAudioArgs(audioCodec, variantName string) []string {
+	if variantName == "source" && strings.HasPrefix(strings.ToLower(audioCodec), "aac") {
+		return []string{"-c:a", "copy"}
+	}
+	return []string{
+		"-c:a", "aac",
+		"-b:a", "192k",
+		"-ac", "2",
+		// Audio resampler with drift correction. Stretches/squeezes
+		// samples to keep PTS aligned with video — fixes MKV with a
+		// track delay where the audio would otherwise lag the video.
+		"-af", "aresample=async=1000",
+	}
+}
+
 // SubtitleTrack describes one subtitle source we expose to the player.
 // Embedded streams live inside the video file (extracted via ffmpeg);
 // external tracks are separate .srt / .ass files shipped alongside
@@ -1385,15 +1417,19 @@ func (h *Handler) bakeInitSegment(sess *hlsSession, variantName string) error {
 	defer cancel()
 
 	// Same audio decision as on-demand bake to keep the init codec
-	// metadata consistent with the chunks.
-	audioArgs := []string{"-c:a", "aac", "-b:a", "192k", "-ac", "2"}
-	if variantName == "source" && strings.HasPrefix(strings.ToLower(sess.audioCodec), "aac") {
-		audioArgs = []string{"-c:a", "copy"}
-	}
+	// metadata consistent with the chunks. When we re-encode (everything
+	// non-AAC), we add aresample=async=1000 which stretches/skips
+	// samples to keep audio aligned with video timestamps — without it
+	// MKV sources with a track delay (typical on multi-language rips)
+	// drift progressively against the video.
+	audioArgs := buildHLSAudioArgs(sess.audioCodec, variantName)
 
 	args := []string{
 		"-hide_banner",
 		"-loglevel", "error",
+		// genpts: regenerate PTS when source missing — fixes MKV with
+		// a per-track delay where audio timestamps don't start at 0.
+		"-fflags", "+genpts",
 		"-ss", "0",
 	}
 	if strings.HasPrefix(sess.url, "http://") || strings.HasPrefix(sess.url, "https://") {
@@ -1480,19 +1516,19 @@ func (h *Handler) bakeOneHLSChunk(sess *hlsSession, variantName string, n int) e
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	// Audio handling:
-	//   - AAC source → `-c:a copy` for the source variant (bit-perfect).
-	//     For 720p variant, we always re-encode to a fixed AAC 192k
-	//     stereo to normalise the audio bitrate across variants.
-	//   - Anything else → re-encode to AAC stereo on both variants.
-	audioArgs := []string{"-c:a", "aac", "-b:a", "192k", "-ac", "2"}
-	if variantName == "source" && strings.HasPrefix(strings.ToLower(sess.audioCodec), "aac") {
-		audioArgs = []string{"-c:a", "copy"}
-	}
+	// Audio handling — see buildHLSAudioArgs for the full decision
+	// matrix. Re-encoded variants get aresample=async=1000 to keep
+	// audio aligned with video timestamps (fixes MKV drift).
+	audioArgs := buildHLSAudioArgs(sess.audioCodec, variantName)
 
 	args := []string{
 		"-hide_banner",
 		"-loglevel", "error",
+		// genpts: regenerate missing PTS — required for MKV sources
+		// where the audio track starts with a delay relative to video.
+		// Without it, ffmpeg honours the delay literally and the audio
+		// drifts behind the video by that delay × segment count.
+		"-fflags", "+genpts",
 		"-ss", fmt.Sprintf("%.3f", startSec),
 	}
 	// HTTP demuxer resilience — applies whenever the input is a URL.
