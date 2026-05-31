@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -300,24 +301,44 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 	var body struct {
 		Magnet      string `json:"magnet"`
 		DownloadURL string `json:"downloadUrl"`
-		FileID      int    `json:"fileId,omitempty"`
+		// TorrentID skips the add+poll dance when the torrent is
+		// already known to TorBox (eg. from the upload-torrent flow
+		// where the user already saw the file list).
+		TorrentID int `json:"torrentId,omitempty"`
+		FileID    int `json:"fileId,omitempty"`
+		// Season+episode hint — when > 0, lets pickBestVideoFile
+		// match SxxExx in season-pack torrents instead of taking
+		// the largest file.
+		Season  int `json:"season,omitempty"`
+		Episode int `json:"episode,omitempty"`
 	}
 	if err := c.Bind(&body); err != nil {
 		return RespondErr(c, err)
 	}
-	if body.Magnet == "" && body.DownloadURL == "" {
-		return c.JSON(http.StatusBadRequest, map[string]any{"error": "magnet or downloadUrl required"})
+	if body.Magnet == "" && body.DownloadURL == "" && body.TorrentID == 0 {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error": "magnet, downloadUrl or torrentId required",
+		})
 	}
 
 	ctx := c.Request().Context()
 
-	// 1) Add the torrent (instant if cached, queued otherwise). Try magnet
-	//    first, fall back to downloadUrl (fetch .torrent → upload bytes).
+	// 1) Resolve the torrent to a TorBox ID. Three paths:
+	//      torrentId  → skip add, fetch state directly
+	//      magnet     → AddMagnet
+	//      downloadUrl→ fetch the .torrent bytes, upload OR redirect
+	//                   to AddMagnet if the URL resolved to a magnet
 	var created *torbox.CreateResult
 	var err error
-	if body.Magnet != "" {
+	switch {
+	case body.TorrentID > 0:
+		// Already known to TorBox — use directly. We still poll for
+		// ready state below; if it's been deleted the GetTorrent call
+		// fails with a clear error.
+		created = &torbox.CreateResult{TorrentID: body.TorrentID}
+	case body.Magnet != "":
 		created, err = h.App.TorBox.AddMagnet(ctx, body.Magnet)
-	} else {
+	default:
 		var content []byte
 		var filename string
 		content, filename, err = fetchTorrentFromURL(ctx, body.DownloadURL)
@@ -365,8 +386,10 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 		})
 	}
 
-	// 3) Pick the file to stream — the largest video file in the torrent.
-	//    The caller can override (body.FileID > 0) to pick a specific file.
+	// 3) Pick the file to stream. Priority:
+	//      explicit body.FileID > 0  → use that
+	//      season+episode > 0        → SxxExx match in filenames
+	//      otherwise                 → largest video file
 	//
 	//    -1 is the sentinel for "no video file found": we bail explicitly
 	//    instead of silently asking TorBox for a zip URL the browser can't
@@ -375,7 +398,7 @@ func (h *Handler) HandleTorBoxPlay(c echo.Context) error {
 	if body.FileID > 0 {
 		fileID = body.FileID
 	} else if len(ready.Files) > 0 {
-		fileID = pickBestVideoFile(ready.Files)
+		fileID = pickBestVideoFile(ready.Files, body.Season, body.Episode)
 	}
 	if fileID < 0 {
 		// Surface what TorBox actually listed so the user knows whether
@@ -541,14 +564,47 @@ func (h *Handler) HandleTorBoxDelete(c echo.Context) error {
 	return RespondOK(c, true)
 }
 
-// pickBestVideoFile returns the id of the largest video file in the torrent,
-// or -1 if no file in the torrent has a recognised video extension.
-// Returning a real-but-sentinel-looking 0 was the bug that made the
-// previous version request a zip download URL the browser couldn't play.
+// pickBestVideoFile returns the id of the best-fit video file in the
+// torrent, or -1 if no file in the torrent has a recognised video
+// extension.
 //
-// Most torrents have one big movie file + small .nfo/.srt/.txt sidecars;
-// "largest video" is a reliable proxy for "the actual movie".
-func pickBestVideoFile(files []torbox.TorrentFile) int {
+// When season + episode > 0, we first try to find a filename that
+// matches SxxExx (with or without a dot/dash between letters and
+// numbers, eg. S01E05, s01.e05, 1x05). This handles "season pack"
+// torrents where the user is watching a specific episode — the
+// largest file in a 24-episode pack is essentially random.
+//
+// If no SxxExx match (or no hint provided), falls back to the
+// largest video file. That's a reliable proxy for "the actual movie"
+// on single-film torrents.
+//
+// season=0 OR episode=0 → skip the SxxExx pass, behave like before.
+func pickBestVideoFile(files []torbox.TorrentFile, season, episode int) int {
+	// Pass 1: episode-aware match (SxxExx in filename).
+	if season > 0 && episode > 0 {
+		// Build a flexible regex: matches "S01E05", "S1E5", "S01.E05",
+		// "S01-E05", "1x05", etc. We use a function rather than a
+		// single compiled regex because the s/e numbers vary per call.
+		needles := []string{
+			fmt.Sprintf("s%02de%02d", season, episode),
+			fmt.Sprintf("s%de%d", season, episode),
+			fmt.Sprintf("%dx%02d", season, episode),
+			fmt.Sprintf("%dx%d", season, episode),
+		}
+		for _, f := range files {
+			if !isVideoFile(f.Name) {
+				continue
+			}
+			lower := strings.ToLower(f.Name)
+			for _, n := range needles {
+				if strings.Contains(lower, n) {
+					return f.ID
+				}
+			}
+		}
+	}
+
+	// Pass 2: largest video file.
 	bestID := -1
 	var bestSize int64 = -1 // -1 so a single zero-size video still wins over nothing
 	for _, f := range files {
@@ -561,6 +617,102 @@ func pickBestVideoFile(files []torbox.TorrentFile) int {
 		}
 	}
 	return bestID
+}
+
+// HandleTorBoxUploadTorrent — POST /api/v1/torbox/upload-torrent
+//
+// Multipart form: field "torrent" = the .torrent file bytes.
+//
+// Pushes the .torrent to TorBox, polls until ready (max 90 s, same
+// budget as Play), and returns the torrent id + the list of video
+// files so the frontend can show a picker.
+//
+//	{
+//	  "torrentId": 12345,
+//	  "name": "Demon.Slayer.S01.MULTi.1080p.BluRay-FOO",
+//	  "cached": true,
+//	  "files": [
+//	    {"id":0,"name":"S01E01.mkv","size":2.4e9,"isVideo":true},
+//	    {"id":1,"name":"S01E02.mkv","size":2.5e9,"isVideo":true},
+//	    ...
+//	  ]
+//	}
+//
+// Subsequent /torbox/play with `torrentId + fileId` skips the
+// add/poll dance and streams immediately.
+func (h *Handler) HandleTorBoxUploadTorrent(c echo.Context) error {
+	fh, err := c.FormFile("torrent")
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error": "missing form field 'torrent' (.torrent file)",
+		})
+	}
+	if !strings.HasSuffix(strings.ToLower(fh.Filename), ".torrent") {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error": "expected a .torrent file",
+		})
+	}
+	src, err := fh.Open()
+	if err != nil {
+		return RespondErr(c, err)
+	}
+	defer src.Close()
+	content, err := io.ReadAll(src)
+	if err != nil {
+		return RespondErr(c, err)
+	}
+
+	ctx := c.Request().Context()
+
+	created, err := h.App.TorBox.AddTorrentFile(ctx, fh.Filename, content)
+	if err != nil {
+		return RespondErr(c, err)
+	}
+
+	// Same 90 s budget as Play. We need the file list to render the
+	// picker, so we have to wait for the torrent to be at least
+	// metadata-ready (TorBox usually has this within a few seconds).
+	var ready *torbox.Torrent
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		t, err := h.App.TorBox.GetTorrent(ctx, created.TorrentID)
+		if err != nil {
+			return RespondErr(c, err)
+		}
+		if t.DownloadFinished || t.DownloadPresent || len(t.Files) > 0 {
+			ready = t
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if ready == nil {
+		return c.JSON(http.StatusGatewayTimeout, map[string]any{
+			"error":     "TorBox: torrent not ready in 90s — try again later or another source",
+			"torrentId": created.TorrentID,
+		})
+	}
+
+	type fileEntry struct {
+		ID      int    `json:"id"`
+		Name    string `json:"name"`
+		Size    int64  `json:"size"`
+		IsVideo bool   `json:"isVideo"`
+	}
+	files := make([]fileEntry, 0, len(ready.Files))
+	for _, f := range ready.Files {
+		files = append(files, fileEntry{
+			ID:      f.ID,
+			Name:    f.Name,
+			Size:    f.Size,
+			IsVideo: isVideoFile(f.Name),
+		})
+	}
+	return RespondOK(c, map[string]any{
+		"torrentId": created.TorrentID,
+		"name":      ready.Name,
+		"cached":    ready.Cached,
+		"files":     files,
+	})
 }
 
 func isVideoFile(name string) bool {

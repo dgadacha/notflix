@@ -43,6 +43,8 @@ import { atom, useAtom, useSetAtom } from "jotai"
 import React from "react"
 import { useTranslation } from "react-i18next"
 import { BiCheck, BiPlay, BiPlus, BiX } from "react-icons/bi"
+import { LuUpload } from "react-icons/lu"
+import { TorrentSourceDialog, type TorrentSourceContext } from "@/app/(main)/_features/netflix/torrent-source-dialog"
 
 type ModalTarget = {
     id: number
@@ -139,6 +141,11 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
         target.initialSeason ?? null,
     )
 
+    // Torrent source dialog. Opened by the ".torrent" button — lets
+    // the user feed a .torrent file directly instead of going through
+    // the Prowlarr auto-search.
+    const [torrentDialogOpen, setTorrentDialogOpen] = React.useState(false)
+
     React.useEffect(() => {
         if (target.type !== "tv") return
         if (selectedSeason != null) return
@@ -207,7 +214,21 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
         router.push(buildWatchUrl(season, episode))
     }
 
+    // Build the context for the .torrent dialog. For TV we pass the
+    // currently-selected season + episode 1 by default (the user can
+    // still pick any file from the picker).
+    const torrentContext: TorrentSourceContext = {
+        tmdbId: data.id,
+        mediaType: type,
+        title,
+        posterPath: data.poster_path ?? "",
+        backdropPath: data.backdrop_path ?? "",
+        season: type === "tv" && selectedSeason != null ? selectedSeason : undefined,
+        episode: type === "tv" && selectedSeason != null ? 1 : undefined,
+    }
+
     return (
+        <>
         <div className="max-h-[90vh] sm:max-h-[85vh] overflow-y-auto">
             {/* Hero banner */}
             <div className="relative w-full aspect-[4/3] sm:aspect-[16/9] lg:aspect-[16/8] bg-black">
@@ -293,6 +314,26 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
                             />
                         )}
 
+                        {/* Custom .torrent source — bypasses Prowlarr
+                            entirely. Useful when the auto-search picks
+                            a bad release or when you want to use a
+                            torrent you already have on disk. */}
+                        <button
+                            type="button"
+                            onClick={() => setTorrentDialogOpen(true)}
+                            className={cn(
+                                "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md",
+                                "text-xs font-semibold",
+                                "bg-white/10 hover:bg-white/15 text-white/80 hover:text-white",
+                                "border border-white/10",
+                                "transition-colors",
+                            )}
+                            title={t("modal.torrent_source", "Lance depuis un fichier .torrent que tu fournis")}
+                        >
+                            <LuUpload className="size-3.5" />
+                            {t("modal.torrent_source_btn", ".torrent")}
+                        </button>
+
                         {/* TV-only: bulk mark every episode of every
                             season as watched. Hidden in single-user
                             mode since the action targets the active
@@ -368,6 +409,12 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
                 <CastCarousel cast={data.credits.cast} />
             )}
         </div>
+        <TorrentSourceDialog
+            open={torrentDialogOpen}
+            onClose={() => setTorrentDialogOpen(false)}
+            context={torrentContext}
+        />
+        </>
     )
 }
 

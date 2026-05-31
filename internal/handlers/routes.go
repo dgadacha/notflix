@@ -70,6 +70,10 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	tb.POST("/prefetch", h.HandleTorBoxPrefetch)
 	tb.GET("/list", h.HandleTorBoxList)
 	tb.DELETE("/torrent/:id", h.HandleTorBoxDelete)
+	// Custom source path: user uploads a .torrent file, gets back
+	// the torrent id + file list, then calls /play with the chosen
+	// fileId (and optional season/episode hint for season packs).
+	tb.POST("/upload-torrent", h.HandleTorBoxUploadTorrent)
 
 	// Prowlarr — torrent indexer aggregator (search → list of magnets,
 	// annotated with TorBox cache state).

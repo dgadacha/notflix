@@ -20,6 +20,7 @@
  */
 import { useNetflixDetailModal } from "@/app/(main)/_features/netflix/netflix-detail-modal"
 import { NetflixWatchHistorySaver } from "@/app/(main)/_features/netflix/netflix-watch-history-saver"
+import { consumeCustomStream } from "@/app/(main)/_features/netflix/torrent-source-dialog"
 import {
     getSubPrepStatus,
     Release,
@@ -156,7 +157,36 @@ function TorBoxWatchPage() {
     // picked release / stream URL / phase would leak across — we saw it
     // hand "Le Réveil de la Momie" to the player while the title above
     // already said "Super Mario Galaxy".
+    //
+    // ALSO handles the "custom source" flow: when ?customStream=1 is set,
+    // we consume the stash dropped by TorrentSourceDialog and short-
+    // circuit straight to "playing" without ever hitting Prowlarr.
+    const customStream = searchParams.get("customStream") === "1"
     React.useEffect(() => {
+        if (customStream) {
+            const stash = consumeCustomStream()
+            if (stash) {
+                setPickedRelease(null)
+                setStreamUrl(stash.streamUrl)
+                setStreamAudioCodec(stash.audioCodec ?? "")
+                setStreamVideoCodec(stash.videoCodec ?? "")
+                setStreamContainer(stash.container ?? "")
+                setStreamDurationSec(stash.durationSec ?? 0)
+                setStreamSubtitles(stash.subtitles ?? [])
+                setStreamSessionId(stash.sessionId ?? "")
+                setSubPrep(null)
+                setErrorMsg(null)
+                setAutoPickDisabled(true)
+                setSkipKeys(new Set())
+                setFallbackAttempt(0)
+                setPhase("playing")
+                return
+            }
+            // Stash missing/expired (e.g. user F5'd the /watch page) —
+            // fall through to the normal reset so they at least see a
+            // useful error instead of an infinite spinner.
+            setErrorMsg("Source personnalisée expirée — relance depuis la fiche du titre.")
+        }
         setPhase("searching")
         setPickedRelease(null)
         setStreamUrl(null)
@@ -173,7 +203,7 @@ function TorBoxWatchPage() {
         setAutoPickDisabled(sourcePickMode === "manual")
         setSkipKeys(new Set())
         setFallbackAttempt(0)
-    }, [mediaId, typeParam, season, episode, sourcePickMode])
+    }, [mediaId, typeParam, season, episode, sourcePickMode, customStream])
 
     // Prowlarr searches as soon as we know the title. No splash step — the
     // user's click on "Lecture" upstream IS the user gesture; we just keep
