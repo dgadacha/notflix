@@ -193,7 +193,10 @@ func (w *Watcher) scheduleScan() {
 		w.debounceTimer.Stop()
 	}
 	w.debounceTimer = time.AfterFunc(debounceDelay, func() {
-		if !TryRunInBackground(w.root, w.tmdb, w.db, "auto") {
+		// Auto-trigger doesn't sweep the .torrent dir — that's a
+		// user-driven action (manual scan button). The fsnotify
+		// TorrentWatcher handles new .torrent files separately.
+		if !TryRunInBackground(w.root, w.tmdb, w.db, "auto", "", nil) {
 			// A scan was already running — that scan picks up the new
 			// files anyway. No need to re-schedule.
 			log.Printf("library watcher: scan already in flight, skip")

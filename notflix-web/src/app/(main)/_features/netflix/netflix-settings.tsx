@@ -1417,6 +1417,12 @@ type ScanReport = {
     durationMs: number
     removed: number
     walkError?: string
+    // Optionnel : présent uniquement si un torrent-drop-dir était
+    // configuré et qu'au moins un .torrent a été processé.
+    torrentsProcessed?: number
+    torrentsImported?: number
+    torrentsFailed?: number
+    torrentErrors?: string[]
 }
 type ScanProgress = {
     running: boolean
@@ -2102,6 +2108,43 @@ function LibraryPanel() {
                                 r: lastReport.removed,
                             })}
                         </p>
+                    )}
+
+                    {/* Stats torrent — affichées seulement si le scan
+                        a fait un sweep (torrent-drop-dir configuré).
+                        Section visuellement séparée pour distinguer
+                        les fichiers locaux des entrées TorBox. */}
+                    {(lastReport.torrentsProcessed ?? 0) > 0 && (
+                        <div className="pt-2 mt-2 border-t border-white/10 space-y-1">
+                            <p className="text-[10px] text-blue-200 font-semibold uppercase tracking-wider">
+                                {t("settings.library_torrent_sweep", "Dossier .torrent")}
+                            </p>
+                            <div className="flex flex-wrap gap-3 text-[10px]">
+                                <span className="text-white/70">
+                                    {t("settings.library_torrents_processed", "{{n}} .torrent traités", { n: lastReport.torrentsProcessed })}
+                                </span>
+                                <span className="text-emerald-300">
+                                    ✓ {lastReport.torrentsImported ?? 0} {t("settings.library_torrents_imported", "ajoutés")}
+                                </span>
+                                {(lastReport.torrentsFailed ?? 0) > 0 && (
+                                    <span className="text-red-300">
+                                        ✗ {lastReport.torrentsFailed} {t("settings.library_torrents_failed", "échecs")}
+                                    </span>
+                                )}
+                            </div>
+                            {lastReport.torrentErrors && lastReport.torrentErrors.length > 0 && (
+                                <details>
+                                    <summary className="text-red-300/80 text-[10px] cursor-pointer">
+                                        {t("settings.library_torrents_show_errors", "Détail")} ({lastReport.torrentErrors.length})
+                                    </summary>
+                                    <ul className="mt-1 space-y-0.5 text-[10px] text-red-300/70 font-mono break-all">
+                                        {lastReport.torrentErrors.map((e, i) => (
+                                            <li key={i}>{e}</li>
+                                        ))}
+                                    </ul>
+                                </details>
+                            )}
+                        </div>
                     )}
                     {lastReport.walkError && (
                         <p className="text-red-300 text-[11px]">⚠ {lastReport.walkError}</p>

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"notflix/internal/database/db"
+	"notflix/internal/torbox"
 )
 
 // Scan coordination — shared by the manual HTTP trigger (handlers)
@@ -105,7 +106,7 @@ func LastTrigger() string {
 // The goroutine also performs the new-files diff and publishes a
 // LibraryEvent for each newly-added matched file. This is what powers
 // the toast notifications on the frontend.
-func TryRunInBackground(dir string, t TMDBSearcher, store *db.Database, trigger string) bool {
+func TryRunInBackground(dir string, t TMDBSearcher, store *db.Database, trigger string, torrentDir string, tb *torbox.Client) bool {
 	if !tryAcquire() {
 		return false
 	}
@@ -137,6 +138,32 @@ func TryRunInBackground(dir string, t TMDBSearcher, store *db.Database, trigger 
 		log.Printf("library scan (%s): done — %d matched, %d unmatched, %d removed in %.1fs",
 			trigger, rep.Matched, rep.Unmatched, rep.Removed,
 			float64(rep.DurationMs)/1000)
+
+		// Chain torrent sweep if a drop dir + TorBox client were
+		// provided. Stats are merged into the same ScanReport so
+		// the frontend's summary card shows everything from one
+		// payload, not from two endpoints.
+		if torrentDir != "" && tb != nil {
+			sweep, err := SweepTorrentDir(ctx, torrentDir, tb, store, t)
+			if err != nil {
+				log.Printf("library scan: torrent sweep: %v", err)
+			} else if sweep != nil {
+				runnerReportMu.Lock()
+				if runnerLastReport != nil {
+					runnerLastReport.TorrentsProcessed = sweep.Processed
+					runnerLastReport.TorrentsImported = sweep.Imported
+					runnerLastReport.TorrentsFailed = sweep.Failed
+					runnerLastReport.TorrentErrors = sweep.Errors
+					rep.TorrentsProcessed = sweep.Processed
+					rep.TorrentsImported = sweep.Imported
+					rep.TorrentsFailed = sweep.Failed
+					rep.TorrentErrors = sweep.Errors
+				}
+				runnerReportMu.Unlock()
+				log.Printf("library scan: torrent sweep done — %d processed, %d imported, %d failed",
+					sweep.Processed, sweep.Imported, sweep.Failed)
+			}
+		}
 
 		// Toasts only for auto-triggered scans — manual scans
 		// already show the progress bar + matched/unmatched in the

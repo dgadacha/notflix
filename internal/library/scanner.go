@@ -348,6 +348,12 @@ type ScanReport struct {
 	DurationMs int64     `json:"durationMs"`
 	Removed    int       `json:"removed"`
 	WalkError  string    `json:"walkError,omitempty"`
+	// Torrent sweep stats — populated only when the manual scan
+	// chains a sweep of the .torrent drop dir.
+	TorrentsProcessed int      `json:"torrentsProcessed,omitempty"` // .torrent files seen
+	TorrentsImported  int      `json:"torrentsImported,omitempty"`  // LocalFile rows added across all torrents
+	TorrentsFailed    int      `json:"torrentsFailed,omitempty"`
+	TorrentErrors     []string `json:"torrentErrors,omitempty"`
 }
 
 // TMDBSearcher is the slice of *tmdb.Client we actually use.
