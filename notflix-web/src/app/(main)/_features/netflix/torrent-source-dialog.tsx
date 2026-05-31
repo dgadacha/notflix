@@ -124,24 +124,38 @@ export function TorrentSourceDialog({
         }
     }, [open, context?.season, context?.episode])
 
-    // Window-level drag/drop handlers — capture les drops n'importe
-    // où sur la page (et pas seulement sur la dropzone). Sans ça,
-    // un drop hors de la dropzone fait que le browser ouvre le
-    // fichier comme une navigation. preventDefault sur dragover
-    // est REQUIS pour activer le drop.
+    // Document-level drag/drop handlers en PHASE CAPTURE — c'est
+    // important : Radix Dialog peut faire un stopPropagation côté
+    // bubble, ce qui empêcherait nos window listeners de se
+    // déclencher (l'utilisateur voyait son fichier s'ouvrir
+    // derrière la modal). Avec capture=true on attrape l'event en
+    // route descendante, AVANT que Radix puisse y toucher.
+    //
+    // preventDefault sur dragenter ET dragover EST OBLIGATOIRE
+    // pour activer le drop (specs HTML5) — sans ça, le browser
+    // refuse le drop et ouvre le fichier comme navigation.
     React.useEffect(() => {
         if (!open || uploadResult) return
-        const onDragOver = (e: DragEvent) => { e.preventDefault() }
-        const onDrop = (e: DragEvent) => {
-            e.preventDefault()
-            const f = e.dataTransfer?.files?.[0]
-            if (f) void handleFile(f)
+        const onDragEnter = (e: DragEvent) => {
+            if (e.dataTransfer?.types.includes("Files")) e.preventDefault()
         }
-        window.addEventListener("dragover", onDragOver)
-        window.addEventListener("drop", onDrop)
+        const onDragOver = (e: DragEvent) => {
+            if (e.dataTransfer?.types.includes("Files")) e.preventDefault()
+        }
+        const onDrop = (e: DragEvent) => {
+            const files = e.dataTransfer?.files
+            if (!files || files.length === 0) return
+            e.preventDefault()
+            e.stopPropagation()
+            void handleFile(files[0])
+        }
+        document.addEventListener("dragenter", onDragEnter, true)
+        document.addEventListener("dragover", onDragOver, true)
+        document.addEventListener("drop", onDrop, true)
         return () => {
-            window.removeEventListener("dragover", onDragOver)
-            window.removeEventListener("drop", onDrop)
+            document.removeEventListener("dragenter", onDragEnter, true)
+            document.removeEventListener("dragover", onDragOver, true)
+            document.removeEventListener("drop", onDrop, true)
         }
     }, [open, uploadResult]) // eslint-disable-line react-hooks/exhaustive-deps
 
