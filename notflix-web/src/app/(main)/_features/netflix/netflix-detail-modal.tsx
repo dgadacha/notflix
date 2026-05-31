@@ -169,7 +169,7 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
     // playLocalFile DOIT être déclaré ici (avant le early return)
     // pour respecter les Rules of Hooks — sinon React voit "more
     // hooks than the previous render" et crash en runtime.
-    const { playLocalFile } = usePlayLocal()
+    const { playLocalFile, resolving: localResolving } = usePlayLocal()
 
     if (isLoading || !data) return <BodySkeleton />
 
@@ -199,26 +199,31 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
         return `/watch?${params.toString()}`
     }
 
+    // Important : closeDetail() est appelé APRÈS playLocalFile pour
+    // les torbox. Si on close avant, le composant unmount pendant
+    // que le fetch est en cours → router.push échoue silencieusement.
+    // Pour les locaux + cloud (sync), l'ordre importe moins mais on
+    // garde le même pattern par cohérence.
     const onPlayMain = () => {
-        closeDetail()
         const targetSeason = type === "tv" ? (selectedSeason ?? undefined) : undefined
         const targetEpisode = type === "tv" && selectedSeason != null ? 1 : undefined
         const localPick = pickLocalFile(localFilesForTitle, type, targetSeason, targetEpisode)
         if (localPick) {
-            void playLocalFile(localPick)
+            void playLocalFile(localPick).finally(() => closeDetail())
             return
         }
         router.push(buildCloudWatchUrl(targetSeason, targetEpisode))
+        closeDetail()
     }
 
     const onPlayEpisode = (season: number, episode: number) => {
-        closeDetail()
         const localPick = pickLocalFile(localFilesForTitle, type, season, episode)
         if (localPick) {
-            void playLocalFile(localPick)
+            void playLocalFile(localPick).finally(() => closeDetail())
             return
         }
         router.push(buildCloudWatchUrl(season, episode))
+        closeDetail()
     }
 
     // Build the context for the .torrent dialog. For TV we pass the
@@ -255,13 +260,15 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
                         <Button
                             size="md"
                             onClick={onPlayMain}
-                            disabled={type === "tv" && selectedSeason == null}
+                            disabled={(type === "tv" && selectedSeason == null) || localResolving !== null}
                             className="bg-white !text-black hover:!bg-white/90 font-bold rounded-md px-6 lg:px-8 lg:!h-12 lg:!text-base disabled:opacity-50"
                             leftIcon={<BiPlay className="text-xl sm:text-2xl" />}
                         >
-                            {type === "tv" && selectedSeason != null
-                                ? `${t("modal.play", "Lecture")} · S${selectedSeason}E1`
-                                : t("modal.play", "Lecture")}
+                            {localResolving !== null
+                                ? t("modal.preparing", "Préparation…")
+                                : type === "tv" && selectedSeason != null
+                                    ? `${t("modal.play", "Lecture")} · S${selectedSeason}E1`
+                                    : t("modal.play", "Lecture")}
                         </Button>
                         {/* "LOCAL" badge — surfaces when at least one file
                             for this title is on disk. Tells the user the
