@@ -169,16 +169,16 @@ make dev
 ```
 
 - Frontend  → <http://127.0.0.1:43210> (Rsbuild dev server, hot reload)
-- Backend   → <http://127.0.0.1:43000>
+- Backend   → <http://127.0.0.1:43212>
 
 Le frontend proxifie `/api/*` vers le backend, donc tout passe par `:43210` en dev.
 
 ### 5. Vérifier que tout est branché
 
 ```sh
-curl http://127.0.0.1:43000/api/v1/status            # { app, tmdbKeySet }
-curl http://127.0.0.1:43000/api/v1/torbox/status     # { configured, email, plan, … }
-curl http://127.0.0.1:43000/api/v1/prowlarr/status   # { configured, version, enabledIndexers }
+curl http://127.0.0.1:43212/api/v1/status            # { app, tmdbKeySet }
+curl http://127.0.0.1:43212/api/v1/torbox/status     # { configured, email, plan, … }
+curl http://127.0.0.1:43212/api/v1/prowlarr/status   # { configured, version, enabledIndexers }
 ```
 
 Les trois doivent renvoyer `configured: true` ou la clé correspondante non vide.
@@ -251,7 +251,7 @@ Le binaire final embarque le frontend via `//go:embed all:web`. Une seule binair
 │   │   │   ├── preferences.ts           # Quality / Audio / feature-detect codecs
 │   │   │   └── profiles/                # CRUD profils côté client (optimistic)
 │   │   └── routes/                      # TanStack Router file-based
-│   └── rsbuild.config.ts                # Bundler + proxy /api → :43000
+│   └── rsbuild.config.ts                # Bundler + proxy /api → :43212
 ├── Makefile                             # make dev / build / run / clean
 ├── .env                                 # secrets locaux (gitignored)
 └── CLAUDE.md                            # contexte pour les agents Claude Code
@@ -307,7 +307,7 @@ Le pipe one-way ne permet pas le seek backward (le serveur ne peut pas répondre
 | Clé | Défaut | Description |
 |---|---|---|
 | `NOTFLIX_SERVER_HOST` | `127.0.0.1` | Bind |
-| `NOTFLIX_SERVER_PORT` | `43000` | Port HTTP |
+| `NOTFLIX_SERVER_PORT` | `43212` | Port HTTP |
 | `NOTFLIX_DATA_DIR` | `~/.notflix-data` | SQLite + caches |
 | `NOTFLIX_TMDB_API_KEY` | — | **Requis** pour le catalogue |
 | `NOTFLIX_TORBOX_API_KEY` | — | Requis pour la lecture |

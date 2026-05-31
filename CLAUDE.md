@@ -39,7 +39,7 @@ The Go binary serves both the React SPA (embedded via `//go:embed`) and the API.
 ### Dev
 
 ```sh
-make dev      # backend (43000) + frontend (43210), Ctrl+C stops both
+make dev      # backend (43212) + frontend (43210), Ctrl+C stops both
 make build    # bundles React → web/ → builds binary `./notflix`
 make run      # build then launch
 make clean    # nuke artifacts (datadir untouched)
@@ -62,7 +62,7 @@ Manifests under `k8s/`. Namespace `notflix`. Single PVC `notflix-data` (30 Gi). 
 ```sh
 make docker-bundle             # build the bundle image (Notflix + Prowlarr + FlareSolverr)
 make docker-bundle-push        # push to registry.gitlab.com/kidnar/notflix-bundle:latest
-make docker-bundle-run         # run locally for testing (ports 43000 + 9696)
+make docker-bundle-run         # run locally for testing (ports 43212 + 9696)
 make deploy-bundle             # build + push + apply k8s/bundle/*.yaml + rollout
 make bundle-logs               # tail with prefixes [notflix]/[prowlarr]/[flaresolverr]
 make bundle-prowlarr-ui        # port-forward Prowlarr → localhost:9696
@@ -72,7 +72,7 @@ Manifests under `k8s/bundle/`. Dedicated namespace `notflix-bundle` so it coexis
 
 ### Critical port note
 
-**Backend MUST bind on `43000`.** `43211` is Kuro's; running both in parallel is supported and intentional. If you change this, update:
+**Backend MUST bind on `43212`.** `43211` is Kuro's; running both in parallel is supported and intentional. If you change this, update:
 - `Makefile` (PORT)
 - `internal/core/config.go` default
 - `notflix-web/src/lib/server/config.ts` (`__DEV_SERVER_PORT`)
@@ -160,7 +160,7 @@ Manifests under `k8s/bundle/`. Dedicated namespace `notflix-bundle` so it coexis
 │   │   │   └── luffy-error.tsx                 # ★ N path replaced with BiErrorCircle
 │   │   └── routes/                        # TanStack Router file-based
 │   ├── public/notflix-logo.svg            # the N logo (red on dark) — top bar + login chrome only
-│   ├── rsbuild.config.ts                  # proxy /api → :43000, port 43210
+│   ├── rsbuild.config.ts                  # proxy /api → :43212, port 43210
 │   └── package.json                       # includes hls.js
 ├── Dockerfile                             # single-service runtime image
 ├── Dockerfile.bundle                      # ★ all-in-one: Notflix + Prowlarr + FlareSolverr + tini + Chromium
@@ -214,7 +214,7 @@ Manifests under `k8s/bundle/`. Dedicated namespace `notflix-bundle` so it coexis
   - Removed scrub-bar thumbnails (was shipped briefly, then reverted by user request).
 - **Phase 9 — Bundle deploy** (★ shipped):
   - `Dockerfile.bundle` + `docker/bundle/entrypoint.sh` — single image with Notflix + Prowlarr + FlareSolverr, supervised by a bash script under tini.
-  - `k8s/bundle/*.yaml` — dedicated namespace, single Pod, two exposed ports (43000 + 9696), init-container chown.
+  - `k8s/bundle/*.yaml` — dedicated namespace, single Pod, two exposed ports (43212 + 9696), init-container chown.
   - `k8s/bundle/migrate.sh` — copies state from existing k8s PVC OR local Docker volume into the bundle PVC via `kubectl exec | tar` (no local round-trip).
 
 ### Pending
@@ -281,7 +281,7 @@ A bulk `s/seanime/notflix/g` across the codebase **will break** things. Targeted
 - **TanStack Router state leak** — navigating `/watch?id=A → /watch?id=B` reuses the same component instance. A `useEffect` keyed on `[mediaId, typeParam, season, episode]` resets state.
 - **Dead-looking code that's NOT dead** — `_atoms/server-status.atoms.ts`, `_hooks/use-server-status.ts`, `simple-auth-wrapper.tsx` etc. are STUBS the build needs. Grep before deleting anything in `_atoms`, `_hooks`, `components/shared/*` that looks unused.
 - **CORS + `withCredentials`** — wildcard `Access-Control-Allow-Origin: *` is rejected by browsers when the request is credentialed. axios in `api/client/requests.ts` is set to `withCredentials: false`. Don't flip it back.
-- **`/api/*` proxy in dev** — `rsbuild.config.ts` proxies `/api → 127.0.0.1:43000`. Without it, relative `fetch('/api/v1/...')` hits the SPA fallback (returns `index.html` with 200) and pages go blank.
+- **`/api/*` proxy in dev** — `rsbuild.config.ts` proxies `/api → 127.0.0.1:43212`. Without it, relative `fetch('/api/v1/...')` hits the SPA fallback (returns `index.html` with 200) and pages go blank.
 - **`make dev` without `.env`** — the Makefile sources `.env` in the `backend` target. Missing keys → backend boots but `/api/v1/tmdb/*` returns 503. Check `.env` first when the home blanks.
 - **Optimistic updates** — every profile mutation in `lib/profiles/profiles.ts` patches React Query cache BEFORE the network call. Rail / lists / modal all flip instantly. The invalidate after the network reconciles placeholder ids.
 - **Don't resurrect the big-N splash** — `LoadingOverlayWithLogo` and `LuffyError` were intentionally gutted of the N logo because they flashed on every auth refetch / route transition. Their bodies render the small spinner / a `BiErrorCircle`. If you want a real branded boot splash later, build a NEW component — don't restore those two.
@@ -306,21 +306,21 @@ A bulk `s/seanime/notflix/g` across the codebase **will break** things. Targeted
 make dev
 
 # Verify the 3 external integrations
-curl http://127.0.0.1:43000/api/v1/status
-curl http://127.0.0.1:43000/api/v1/torbox/status
-curl http://127.0.0.1:43000/api/v1/prowlarr/status
+curl http://127.0.0.1:43212/api/v1/status
+curl http://127.0.0.1:43212/api/v1/torbox/status
+curl http://127.0.0.1:43212/api/v1/prowlarr/status
 
 # Live-ping a provider (admin auth required)
-curl -X POST http://127.0.0.1:43000/api/v1/admin/test/tmdb       # or torbox / prowlarr / anthropic
+curl -X POST http://127.0.0.1:43212/api/v1/admin/test/tmdb       # or torbox / prowlarr / anthropic
 
 # Inspect Prowlarr ranking for a title
-curl -s "http://127.0.0.1:43000/api/v1/prowlarr/search/movie?title=Tenet&year=2020" | jq '.data[:5]'
+curl -s "http://127.0.0.1:43212/api/v1/prowlarr/search/movie?title=Tenet&year=2020" | jq '.data[:5]'
 
 # Inspect Prowlarr health (per-indexer dots)
-curl -s http://127.0.0.1:43000/api/v1/prowlarr/health | jq '.data.indexers[] | {name, status, failures, queries}'
+curl -s http://127.0.0.1:43212/api/v1/prowlarr/health | jq '.data.indexers[] | {name, status, failures, queries}'
 
 # Backup everything to JSON
-curl -O http://127.0.0.1:43000/api/v1/admin/backup
+curl -O http://127.0.0.1:43212/api/v1/admin/backup
 
 # Frontend bundle smoke test (no tsgo)
 cd notflix-web && npx --no-install rsbuild build

@@ -81,7 +81,7 @@ func loadConfig() (*Config, error) {
 
 	// Server bind.
 	cfg.Server.Host = firstNonEmpty(os.Getenv("NOTFLIX_SERVER_HOST"), "127.0.0.1")
-	cfg.Server.Port = intOrDefault(os.Getenv("NOTFLIX_SERVER_PORT"), 43000)
+	cfg.Server.Port = intOrDefault(os.Getenv("NOTFLIX_SERVER_PORT"), 43212)
 
 	// TMDB key — required for any non-static endpoint to do real work, but
 	// the binary still starts without it so you can boot the UI and add the

@@ -1,6 +1,6 @@
 # Two-port service for the bundle.
 #
-# Port 80   → Notflix UI + API     (target 43000)
+# Port 80   → Notflix UI + API     (target 43212)
 # Port 9696 → Prowlarr UI + API    (target 9696)
 #
 # Ingress (see ingress.yaml) only routes to the Notflix port. Prowlarr
@@ -19,7 +19,7 @@ spec:
   ports:
     - name: http
       port: 80
-      targetPort: 43000
+      targetPort: 43212
       protocol: TCP
     - name: prowlarr
       port: 9696

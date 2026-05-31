@@ -43,7 +43,7 @@ spec:
           image: registry.gitlab.com/kidnar/notflix:latest
           imagePullPolicy: Always
           ports:
-            - containerPort: 43000
+            - containerPort: 43212
               name: http
           envFrom:
             - configMapRef:
@@ -59,16 +59,16 @@ spec:
             - name: data
               mountPath: /data
           # TCP probes — embedded HTTP handler doesn't expose /healthz
-          # but a successful TCP accept on 43000 means the binary is
+          # but a successful TCP accept on 43212 means the binary is
           # past config init.
           readinessProbe:
             tcpSocket:
-              port: 43000
+              port: 43212
             initialDelaySeconds: 15
             periodSeconds: 10
           livenessProbe:
             tcpSocket:
-              port: 43000
+              port: 43212
             initialDelaySeconds: 60
             periodSeconds: 30
           resources:
@@ -94,7 +94,7 @@ metadata:
   namespace: notflix
 data:
   NOTFLIX_SERVER_HOST: "0.0.0.0"
-  NOTFLIX_SERVER_PORT: "43000"
+  NOTFLIX_SERVER_PORT: "43212"
   NOTFLIX_PROWLARR_URL: "http://prowlarr.media.svc.cluster.local:9696"
   NOTFLIX_ANTHROPIC_MODEL: "claude-haiku-4-5"
 ---

@@ -56,7 +56,7 @@ spec:
           image: registry.gitlab.com/kidnar/notflix-bundle:latest
           imagePullPolicy: Always
           ports:
-            - containerPort: 43000
+            - containerPort: 43212
               name: http-notflix
             - containerPort: 9696
               name: http-prowlarr
@@ -79,18 +79,18 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-          # TCP probes — accept on 43000 means the supervisor has
+          # TCP probes — accept on 43212 means the supervisor has
           # started Notflix at minimum. We don't probe Prowlarr or
           # Flaresolverr separately: if Notflix is up but the others
           # aren't, the supervisor exits and the pod restarts anyway.
           readinessProbe:
             tcpSocket:
-              port: 43000
+              port: 43212
             initialDelaySeconds: 30 # Chromium boot adds ~5-10 s
             periodSeconds: 10
           livenessProbe:
             tcpSocket:
-              port: 43000
+              port: 43212
             initialDelaySeconds: 120
             periodSeconds: 30
           resources:
@@ -113,7 +113,7 @@ metadata:
   namespace: notflix-bundle
 data:
   NOTFLIX_SERVER_HOST: "0.0.0.0"
-  NOTFLIX_SERVER_PORT: "43000"
+  NOTFLIX_SERVER_PORT: "43212"
   NOTFLIX_ANTHROPIC_MODEL: "claude-haiku-4-5"
   # Flaresolverr listens on the loopback inside the pod — no env
   # override needed, the supervisor sets HOST=127.0.0.1 + PORT=8191.

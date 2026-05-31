@@ -8,8 +8,8 @@
 # Override defaults inline, e.g. `make dev DATADIR=/tmp/notflix PORT=43000`.
 
 DATADIR ?= $$HOME/.notflix-data
-# 43000 is the notflix default (seanime upstream). Kuro (anime fork) sur 43211 → cohabitation OK.
-PORT    ?= 43000
+# 43212 is the notflix default — cohabite with Kuro on 43211
+PORT    ?= 43212
 GO      ?= go
 NPM     ?= npm
 
@@ -107,7 +107,7 @@ docker-bundle-push: docker-bundle ## Build + push the bundle image
 
 docker-bundle-run: ## Run the bundle image locally for testing
 	@docker run --rm -it \
-		-p 43000:43000 \
+		-p 43212:43212 \
 		-p 9696:9696 \
 		-v notflix-bundle-data:/data \
 		--name notflix-bundle \

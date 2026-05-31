@@ -20,7 +20,7 @@ The build is multi-stage; final image is ~700–900 MB compressed
 ```sh
 docker run -d \
   --name notflix \
-  -p 43000:43000 \
+  -p 43212:43212 \
   -p 9696:9696 \
   -v notflix-data:/data \
   notflix-bundle:latest
@@ -28,7 +28,7 @@ docker run -d \
 
 Then open:
 
-- **Notflix UI**: <http://localhost:43000>
+- **Notflix UI**: <http://localhost:43212>
 - **Prowlarr UI**: <http://localhost:9696> — first boot redirects to the
   setup wizard. Authentication: pick "Forms (login page)" + set a
   password.
