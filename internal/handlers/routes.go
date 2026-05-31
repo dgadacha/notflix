@@ -100,6 +100,10 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	libAdmin.PUT("/dir", h.HandleSetLibraryDir)
 	libAdmin.POST("/scan", h.HandleScanLocalLibrary)
 	libAdmin.GET("/scan/status", h.HandleScanStatus)
+	// Manual TMDB re-match — when the auto-scan picked the wrong
+	// title (eg. Spider-Man 1994 → Spider-Man 2003), the admin
+	// picks the correct id and we patch the LocalFile row.
+	libAdmin.POST("/match/:id", h.HandleMatchLocalFile)
 	// MKV → MP4 batch conversion. Runs ffmpeg per MKV row in the DB,
 	// remuxing video bit-perfect and transcoding audio to AAC when
 	// the source isn't already AAC. Deletes the source on success.

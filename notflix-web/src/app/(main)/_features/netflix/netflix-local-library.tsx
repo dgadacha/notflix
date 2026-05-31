@@ -10,6 +10,7 @@
  * Self-hides when the scan has zero matched rows — keeps the home
  * clean for users who haven't set up a library yet.
  */
+import { LocalLibraryMatchEditor } from "@/app/(main)/_features/netflix/local-library-match-editor"
 import { useNetflixDetailModal } from "@/app/(main)/_features/netflix/netflix-detail-modal"
 import { ROW } from "@/app/(main)/_features/netflix/netflix.constants"
 import { cn } from "@/components/ui/core/styling"
@@ -20,6 +21,7 @@ import { useQuery } from "@tanstack/react-query"
 import React from "react"
 import { useTranslation } from "react-i18next"
 import { BiPlay } from "react-icons/bi"
+import { LuPencil } from "react-icons/lu"
 
 export type LocalFile = {
     id: number
@@ -257,6 +259,7 @@ function LocalCard({ entry }: { entry: LibraryEntry }) {
     const { openDetail } = useNetflixDetailModal()
     const backdrop = tmdbImage("w780", entry.backdropPath) || tmdbImage("w500", entry.posterPath)
     const file = entry.firstFile
+    const [editing, setEditing] = React.useState(false)
 
     const onClickPlay = (e: React.MouseEvent) => {
         e.stopPropagation()
@@ -264,6 +267,10 @@ function LocalCard({ entry }: { entry: LibraryEntry }) {
         // pick a different one from inside the modal later if we wire
         // the episode picker.
         router.push(`/watch?localId=${file.id}`)
+    }
+    const onClickEdit = (e: React.MouseEvent) => {
+        e.stopPropagation()
+        setEditing(true)
     }
     const onClickCard = () => {
         if (entry.tmdbId > 0) {
@@ -277,6 +284,7 @@ function LocalCard({ entry }: { entry: LibraryEntry }) {
     const displayTitle = entry.title || entry.parsedTitle
 
     return (
+        <>
         <button
             type="button"
             onClick={onClickCard}
@@ -322,6 +330,24 @@ function LocalCard({ entry }: { entry: LibraryEntry }) {
                     <p className="text-white/70 text-xs">{entry.year}</p>
                 )}
             </div>
+            {/* Edit button — top-right, appears on hover. Opens the
+                "corriger le match TMDB" dialog so the user can fix
+                a wrong auto-scan match (eg. Spider-Man 1994 →
+                Spider-Man 2003). */}
+            <span
+                onClick={onClickEdit}
+                role="button"
+                aria-label={t("home.rows.local_library_fix_match", "Corriger le match")}
+                title={t("home.rows.local_library_fix_match", "Corriger le match")}
+                className={cn(
+                    "absolute top-2 right-2 size-7 rounded-full",
+                    "bg-black/70 hover:bg-black/90 text-white/80 hover:text-white",
+                    "flex items-center justify-center backdrop-blur-sm",
+                    "opacity-0 group-hover:opacity-100 transition-opacity",
+                )}
+            >
+                <LuPencil className="size-3.5" />
+            </span>
             {/* Quick-play button — appears on hover. Pinned bottom-right. */}
             <span
                 onClick={onClickPlay}
@@ -337,5 +363,11 @@ function LocalCard({ entry }: { entry: LibraryEntry }) {
                 <BiPlay className="size-5 ml-0.5" />
             </span>
         </button>
+        <LocalLibraryMatchEditor
+            file={file}
+            open={editing}
+            onClose={() => setEditing(false)}
+        />
+        </>
     )
 }

@@ -625,6 +625,100 @@ func (h *Handler) HandleExtractSubtitle(c echo.Context) error {
 	return nil
 }
 
+// HandleMatchLocalFile — POST /api/v1/local-library/match/:id
+//
+// Body: { "tmdbId": <int>, "mediaType": "tv"|"movie" }
+//
+// Re-fetches TMDB metadata for the given id+type and updates the
+// LocalFile row in place. Used by the "ce n'est pas le bon match"
+// flow: when the auto-scan matched the wrong title (eg. Spider-Man
+// 1994 → Spider-Man 2003 because of name collision), the admin picks
+// the correct title from a search and we patch the row.
+func (h *Handler) HandleMatchLocalFile(c echo.Context) error {
+	id64, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	id := uint(id64)
+
+	var body struct {
+		TMDBID    int    `json:"tmdbId"`
+		MediaType string `json:"mediaType"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return RespondErr(c, err)
+	}
+	if body.TMDBID <= 0 {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error": "tmdbId is required and must be > 0",
+		})
+	}
+	if body.MediaType != "tv" && body.MediaType != "movie" {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error": "mediaType must be 'tv' or 'movie'",
+		})
+	}
+
+	f, err := h.App.Database.GetLocalFile(id)
+	if err != nil {
+		return c.NoContent(http.StatusNotFound)
+	}
+
+	// Fetch the new metadata from TMDB. Same JSON shape as the
+	// detail endpoint; we only pull the fields we store on the row.
+	var path string
+	if body.MediaType == "tv" {
+		path = fmt.Sprintf("/tv/%d", body.TMDBID)
+	} else {
+		path = fmt.Sprintf("/movie/%d", body.TMDBID)
+	}
+	var data struct {
+		Title        string `json:"title"`         // movie
+		Name         string `json:"name"`          // tv
+		Overview     string `json:"overview"`
+		PosterPath   string `json:"poster_path"`
+		BackdropPath string `json:"backdrop_path"`
+		ReleaseDate  string `json:"release_date"`   // movie
+		FirstAirDate string `json:"first_air_date"` // tv
+	}
+	ctx, cancel := context.WithTimeout(c.Request().Context(), 10*time.Second)
+	defer cancel()
+	if err := h.App.TMDB.GetJSON(ctx, path, nil, &data); err != nil {
+		return c.JSON(http.StatusBadGateway, map[string]any{
+			"error": "TMDB fetch failed: " + err.Error(),
+		})
+	}
+
+	title := data.Title
+	if title == "" {
+		title = data.Name
+	}
+	dateStr := data.ReleaseDate
+	if dateStr == "" {
+		dateStr = data.FirstAirDate
+	}
+	year := 0
+	if len(dateStr) >= 4 {
+		year, _ = strconv.Atoi(dateStr[:4])
+	}
+
+	f.TMDBID = body.TMDBID
+	f.MediaType = body.MediaType
+	f.Title = title
+	f.Overview = data.Overview
+	f.PosterPath = data.PosterPath
+	f.BackdropPath = data.BackdropPath
+	if year > 0 {
+		f.Year = year
+	}
+
+	updated, err := h.App.Database.UpsertLocalFile(f)
+	if err != nil {
+		return RespondErr(c, err)
+	}
+	return RespondOK(c, updated)
+}
+
 // resolveLocalFilePath looks up the LocalFile row, security-checks
 // it's still under the configured library dir, and returns the
 // absolute file path. On any failure returns an *echo.Response error
