@@ -112,6 +112,10 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	// each video file, persist as LocalFile rows with source=torbox.
 	// They appear in the home rail next to on-disk files.
 	libAdmin.POST("/import-torrent", h.HandleImportTorrent)
+	// Dossier dédié aux .torrent : un fsnotify watcher l'écoute et
+	// importe automatiquement tout ce qui y est déposé.
+	libAdmin.GET("/torrent-drop-dir", h.HandleGetTorrentDropDir)
+	libAdmin.PUT("/torrent-drop-dir", h.HandleSetTorrentDropDir)
 	// Resolve a stream URL on demand for torbox-sourced rows.
 	// (Local-source rows go through /stream/:id directly.)
 	lib.POST("/resolve-stream/:id", h.HandleResolveStream)

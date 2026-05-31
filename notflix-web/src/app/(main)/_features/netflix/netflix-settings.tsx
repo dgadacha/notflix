@@ -1446,6 +1446,19 @@ function useLibraryDir() {
     })
 }
 
+function useTorrentDropDir() {
+    return useQuery<{ dir: string }>({
+        queryKey: ["library", "torrent-drop-dir"],
+        queryFn: async () => {
+            const r = await fetch("/api/v1/local-library/torrent-drop-dir")
+            if (!r.ok) throw new Error(`torrent-drop-dir ${r.status}`)
+            const j = await r.json()
+            return (j.data ?? j) as { dir: string }
+        },
+        staleTime: 60_000,
+    })
+}
+
 function useScanStatus(_enabled: boolean) {
     return useQuery<ScanStatusResp>({
         queryKey: ["library", "scan-status"],
@@ -1864,6 +1877,11 @@ function LibraryPanel() {
                 )}
             </div>
 
+            {/* Torrent drop dir row — séparé du dossier vidéo car
+                c'est un dossier dédié aux .torrent. Le watcher
+                fsnotify l'écoute et auto-importe. */}
+            <TorrentDropDirRow />
+
             {/* Scan row + progress */}
             <div className="space-y-2 pt-2 border-t border-white/10">
                 <div className="flex flex-wrap items-center gap-2">
@@ -2104,6 +2122,110 @@ function Stat({ label, value, className }: { label: string; value: number | stri
         <div>
             <div className="text-[--muted] uppercase tracking-wider text-[9px]">{label}</div>
             <div className={cn("text-white font-bold tabular-nums", className)}>{value}</div>
+        </div>
+    )
+}
+
+/** Input + button "Modifier/Enregistrer" pour le dossier .torrent
+ *  watché. Stylé pour être visuellement plus discret que la row
+ *  principale "Répertoire" (c'est une feature optionnelle). */
+function TorrentDropDirRow() {
+    const { t } = useTranslation()
+    const qc = useQueryClient()
+    const { data, isLoading } = useTorrentDropDir()
+    const [editing, setEditing] = React.useState(false)
+    const [draft, setDraft] = React.useState("")
+    const [err, setErr] = React.useState<string | null>(null)
+    const dir = data?.dir ?? ""
+
+    React.useEffect(() => {
+        if (!editing) setDraft(dir)
+    }, [dir, editing])
+
+    const save = async (next: string) => {
+        setErr(null)
+        try {
+            const r = await fetch("/api/v1/local-library/torrent-drop-dir", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ dir: next }),
+            })
+            const j = await r.json()
+            if (!r.ok) throw new Error(j.error ?? `dir ${r.status}`)
+            setEditing(false)
+            qc.invalidateQueries({ queryKey: ["library", "torrent-drop-dir"] })
+        } catch (e) {
+            setErr((e as Error).message)
+        }
+    }
+
+    if (isLoading) return null
+
+    return (
+        <div className="space-y-2 pt-2 border-t border-white/5">
+            <div className="flex items-center justify-between gap-2">
+                <label className="text-xs font-semibold text-white/80">
+                    {t("settings.library_torrent_dir", "Dossier .torrent (auto-import)")}
+                </label>
+                {dir && !editing && (
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-emerald-500/20 text-emerald-300">
+                        actif
+                    </span>
+                )}
+            </div>
+            {!editing ? (
+                <div className="flex items-center gap-2">
+                    <code className="flex-1 min-w-0 truncate bg-black/40 border border-white/10 rounded px-2 py-1.5 text-xs text-white/90 font-mono">
+                        {dir || t("settings.library_torrent_dir_unset", "(désactivé — clique Modifier pour activer)")}
+                    </code>
+                    <button
+                        type="button"
+                        onClick={() => setEditing(true)}
+                        className="px-2.5 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider bg-white/10 hover:bg-white/15 text-white"
+                    >
+                        {t("common.modify", "Modifier")}
+                    </button>
+                </div>
+            ) : (
+                <div className="space-y-2">
+                    <input
+                        type="text"
+                        value={draft}
+                        onChange={(e) => setDraft(e.target.value)}
+                        placeholder="/Users/dylan/Desktop/torrents (vide = désactivé)"
+                        className="w-full bg-black/40 border border-white/15 rounded px-2 py-1.5 text-xs text-white font-mono outline-none focus:border-brand-500"
+                        autoFocus
+                        spellCheck={false}
+                    />
+                    <div className="flex items-center gap-2">
+                        <button
+                            type="button"
+                            onClick={() => save(draft.trim())}
+                            className="px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider bg-brand-500 hover:bg-brand-400 text-white"
+                        >
+                            {t("common.save", "Enregistrer")}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => { setEditing(false); setDraft(dir); setErr(null) }}
+                            className="px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider text-white/70 hover:text-white"
+                        >
+                            {t("common.cancel", "Annuler")}
+                        </button>
+                    </div>
+                    {err && (
+                        <p className="text-red-300 text-xs bg-red-500/10 border border-red-500/30 rounded px-2 py-1">
+                            {err}
+                        </p>
+                    )}
+                </div>
+            )}
+            <p className="text-[10px] text-[--muted]/70 leading-relaxed">
+                {t(
+                    "settings.library_torrent_dir_hint",
+                    "Tout .torrent déposé dans ce dossier sera automatiquement envoyé à TorBox et ajouté à ta bibliothèque. Les fichiers traités sont déplacés dans un sous-dossier .processed/. Doit être différent du dossier des fichiers vidéo.",
+                )}
+            </p>
         </div>
     )
 }

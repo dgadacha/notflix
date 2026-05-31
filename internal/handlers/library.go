@@ -17,7 +17,6 @@ import (
 	"notflix/internal/core"
 	"notflix/internal/database/models"
 	"notflix/internal/library"
-	"notflix/internal/torbox"
 
 	"github.com/labstack/echo/v4"
 )
@@ -362,6 +361,44 @@ func (h *Handler) HandleSetAutoConvert(c echo.Context) error {
 	return RespondOK(c, map[string]any{"enabled": body.Enabled})
 }
 
+// HandleGetTorrentDropDir — GET /api/v1/local-library/torrent-drop-dir
+// Returns the directory the TorrentWatcher polls for incoming
+// .torrent files. Empty string = feature off.
+func (h *Handler) HandleGetTorrentDropDir(c echo.Context) error {
+	return RespondOK(c, map[string]any{
+		"dir": h.App.TorrentDropDir(),
+	})
+}
+
+// HandleSetTorrentDropDir — PUT /api/v1/local-library/torrent-drop-dir
+// Body: {"dir":"/abs/path"} ; empty string stops the watcher.
+func (h *Handler) HandleSetTorrentDropDir(c echo.Context) error {
+	var body struct {
+		Dir string `json:"dir"`
+	}
+	if err := c.Bind(&body); err != nil {
+		return RespondErr(c, err)
+	}
+	body.Dir = strings.TrimSpace(body.Dir)
+	if body.Dir != "" {
+		info, err := os.Stat(body.Dir)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]any{
+				"error": "dir not accessible: " + err.Error(),
+			})
+		}
+		if !info.IsDir() {
+			return c.JSON(http.StatusBadRequest, map[string]any{
+				"error": "path is not a directory",
+			})
+		}
+	}
+	if err := h.App.ApplyTorrentDropDir(body.Dir); err != nil {
+		return RespondErr(c, err)
+	}
+	return RespondOK(c, map[string]any{"dir": body.Dir})
+}
+
 // HandleGetAudioLangPrefs — GET /api/v1/local-library/audio-langs
 // Returns the two preferred audio language codes (default + anime).
 func (h *Handler) HandleGetAudioLangPrefs(c echo.Context) error {
@@ -667,101 +704,15 @@ func (h *Handler) HandleImportTorrent(c echo.Context) error {
 	}
 
 	ctx := c.Request().Context()
-
-	// Step 1+2 : add to TorBox + poll until ready (or at least
-	// metadata-ready so we can enumerate files).
-	created, err := h.App.TorBox.AddTorrentFile(ctx, fh.Filename, content)
+	result, err := library.ImportTorrentFromBytes(
+		ctx, content, fh.Filename, h.App.TorBox, h.App.Database, h.App.TMDB,
+	)
 	if err != nil {
-		return RespondErr(c, err)
-	}
-	var ready *torbox.Torrent
-	deadline := time.Now().Add(90 * time.Second)
-	for time.Now().Before(deadline) {
-		t, err := h.App.TorBox.GetTorrent(ctx, created.TorrentID)
-		if err != nil {
-			return RespondErr(c, err)
-		}
-		if t.DownloadFinished || t.DownloadPresent || len(t.Files) > 0 {
-			ready = t
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
-	if ready == nil {
-		return c.JSON(http.StatusGatewayTimeout, map[string]any{
-			"error":     "TorBox: torrent not ready in 90s",
-			"torrentId": created.TorrentID,
+		return c.JSON(http.StatusBadGateway, map[string]any{
+			"error": err.Error(),
 		})
 	}
-
-	// Step 3 : for each video file, parse + TMDB match + upsert.
-	// We use the torrent root name as a hint for episodes that lack
-	// the show name in the filename itself (eg. "S01E07.mkv" inside
-	// a "Demon.Slayer.S01.MULTi..." folder → hint = "Demon Slayer").
-	hintShowName := library.FolderShowName(ready.Name)
-
-	imported := 0
-	skipped := 0
-	failed := 0
-	var errors []string
-	for _, f := range ready.Files {
-		if !isVideoFile(f.Name) {
-			skipped++
-			continue
-		}
-		// Use the base name for parsing — TorBox returns paths like
-		// "Demon.Slayer.S01.MULTi/S01E07.mkv" sometimes, we want
-		// just the file portion.
-		base := filepath.Base(f.Name)
-		match, err := library.MatchOneFile(ctx, h.App.TMDB, base, hintShowName)
-		if err != nil {
-			failed++
-			if len(errors) < 10 {
-				errors = append(errors, fmt.Sprintf("%s: %v", base, err))
-			}
-			continue
-		}
-		if match == nil {
-			skipped++
-			continue
-		}
-		row := &models.LocalFile{
-			Path:          fmt.Sprintf("torbox://%d/%d", created.TorrentID, f.ID),
-			SizeBytes:     f.Size,
-			ScannedAt:     time.Now(),
-			Source:        "torbox",
-			TorrentID:     created.TorrentID,
-			TorrentFileID: f.ID,
-			ParsedTitle:   match.ParsedTitle,
-			ParsedYear:    match.ParsedYear,
-			TMDBID:        match.TMDBID,
-			MediaType:     match.MediaType,
-			Title:         match.Title,
-			PosterPath:    match.PosterPath,
-			BackdropPath:  match.BackdropPath,
-			Overview:      match.Overview,
-			Year:          match.Year,
-			Season:        match.Season,
-			Episode:       match.Episode,
-		}
-		if _, err := h.App.Database.UpsertLocalFile(row); err != nil {
-			failed++
-			if len(errors) < 10 {
-				errors = append(errors, fmt.Sprintf("%s: %v", base, err))
-			}
-			continue
-		}
-		imported++
-	}
-
-	return RespondOK(c, map[string]any{
-		"torrentId": created.TorrentID,
-		"name":      ready.Name,
-		"imported":  imported,
-		"skipped":   skipped,
-		"failed":    failed,
-		"errors":    errors,
-	})
+	return RespondOK(c, result)
 }
 
 // HandleResolveStream — POST /api/v1/local-library/resolve-stream/:id

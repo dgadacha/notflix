@@ -35,6 +35,11 @@ type App struct {
 	// library dir is configured.
 	libWatcherMu sync.Mutex
 	libWatcher   *library.Watcher
+
+	// torrentWatcher is the parallel watcher on the dedicated
+	// .torrent drop dir. Same hot-swap pattern.
+	torrentWatcherMu sync.Mutex
+	torrentWatcher   *library.TorrentWatcher
 }
 
 // Setting keys used by the admin UI to override env-var defaults.
@@ -48,6 +53,14 @@ const (
 	SettingAnthropicAPIKey = "anthropic_api_key"
 	SettingAnthropicModel  = "anthropic_model"
 	SettingLibraryDir      = "local_library_dir"
+	// SettingLibraryTorrentDropDir — when non-empty, a separate
+	// fsnotify watcher picks up any .torrent file that lands in
+	// this directory and runs it through the same import pipeline
+	// as the manual "Importer un .torrent" button. Use case : you
+	// download a .torrent from your indexer of choice, drop it
+	// here, and it ends up in your Notflix library a minute later
+	// without you ever opening the app.
+	SettingLibraryTorrentDropDir = "library_torrent_drop_dir"
 	// SettingLibraryAutoConvert — when "true", any successful scan
 	// (manual or fsnotify-triggered) chain-triggers the MKV→MP4
 	// batch converter. Default off so existing installs keep their
@@ -109,6 +122,7 @@ func New() (*App, error) {
 	// a watcher failure is logged but doesn't abort startup (the user
 	// can always trigger manual scans from the settings UI).
 	app.startLibraryWatcher()
+	app.startTorrentWatcher()
 
 	// Chain MKV→MP4 batch conversion after every successful scan
 	// when the admin opts in. The hook itself checks the toggle on
@@ -351,6 +365,51 @@ func (a *App) NewAudioLangPicker() func(*models.LocalFile) string {
 	}
 }
 
+// TorrentDropDir reads the setting from DB. Empty means feature off.
+func (a *App) TorrentDropDir() string {
+	rows, err := a.Database.GetSettings([]string{SettingLibraryTorrentDropDir})
+	if err != nil {
+		return ""
+	}
+	return rows[SettingLibraryTorrentDropDir]
+}
+
+// ApplyTorrentDropDir persists the new dir and hot-swaps the watcher.
+// Empty dir = stop the watcher (feature off).
+func (a *App) ApplyTorrentDropDir(dir string) error {
+	if err := a.Database.SetSetting(SettingLibraryTorrentDropDir, dir); err != nil {
+		return err
+	}
+	a.startTorrentWatcher()
+	return nil
+}
+
+// startTorrentWatcher (re)starts the watcher on whatever dir is
+// currently configured. Replaces any previous instance.
+func (a *App) startTorrentWatcher() {
+	a.torrentWatcherMu.Lock()
+	defer a.torrentWatcherMu.Unlock()
+
+	if a.torrentWatcher != nil {
+		a.torrentWatcher.Stop()
+		a.torrentWatcher = nil
+	}
+	dir := a.TorrentDropDir()
+	if dir == "" {
+		return
+	}
+	w, err := library.NewTorrentWatcher(dir, a.TorBox, a.Database, a.TMDB)
+	if err != nil {
+		log.Printf("torrent watcher: %v (auto-import disabled)", err)
+		return
+	}
+	if err := w.Start(); err != nil {
+		log.Printf("torrent watcher: start: %v", err)
+		return
+	}
+	a.torrentWatcher = w
+}
+
 // ApplyLibraryDir is the hot-swap path the admin UI hits when the user
 // changes the local-library directory. Persists to the settings table
 // and updates the in-memory config. Empty string clears the setting
@@ -435,6 +494,12 @@ func (a *App) Close() {
 		a.libWatcher = nil
 	}
 	a.libWatcherMu.Unlock()
+	a.torrentWatcherMu.Lock()
+	if a.torrentWatcher != nil {
+		a.torrentWatcher.Stop()
+		a.torrentWatcher = nil
+	}
+	a.torrentWatcherMu.Unlock()
 	if a.Database != nil {
 		_ = a.Database.Close()
 	}
