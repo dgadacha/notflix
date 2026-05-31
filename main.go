@@ -36,7 +36,7 @@ func main() {
 	e.Use(middleware.Logger())
 
 	// CORS — the dev frontend (rsbuild) runs on :43210 while the API
-	// listens on :43212. Session cookies require AllowCredentials: true,
+	// listens on :43000. Session cookies require AllowCredentials: true,
 	// which means AllowOrigins can't be a wildcard — we list the dev
 	// origins explicitly. In production the SPA is served by this same
 	// Echo instance (same-origin) so CORS doesn't fire there.

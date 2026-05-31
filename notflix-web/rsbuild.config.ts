@@ -85,7 +85,7 @@ export default defineConfig({
         // of getting the dev server's SPA index.html fallback.
         proxy: {
             "/api": {
-                target: "http://127.0.0.1:43212",
+                target: "http://127.0.0.1:43000",
                 changeOrigin: true,
             },
         },

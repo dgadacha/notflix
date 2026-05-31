@@ -9,6 +9,6 @@ spec:
   ports:
     - name: http
       port: 80
-      targetPort: 43212
+      targetPort: 43000
       protocol: TCP
   type: ClusterIP
