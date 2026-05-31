@@ -275,7 +275,12 @@ export function TorrentSourceDialog({
                 }`.trim()
                 : undefined
             }
-            contentClass="max-w-2xl"
+            // z-[100] : le NetflixDetailModal parent utilise le
+            // z-index Radix par défaut (~z-50) ; cette modal est
+            // imbriquée dedans, sans override elle passe DERRIÈRE
+            // le parent. On la force au-dessus.
+            overlayClass="z-[100]"
+            contentClass="max-w-2xl z-[100]"
         >
             <div className="space-y-3">
                 {!uploadResult && (
