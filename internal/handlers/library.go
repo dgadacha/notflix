@@ -789,7 +789,36 @@ func (h *Handler) HandleResolveStream(c echo.Context) error {
 			"error": "TorBox: " + err.Error(),
 		})
 	}
+
+	// Cache-first probe : si on a déjà probé ce fichier une fois,
+	// on retourne les codec/duration depuis la row LocalFile (lecture
+	// instantanée). Sinon on probe + persiste pour les prochaines
+	// fois (l'URL TorBox change à chaque appel mais le contenu du
+	// fichier reste le même → codec/duration restent valides).
+	if f.AudioCodec != "" || f.DurationSec > 0 {
+		return RespondOK(c, map[string]any{
+			"streamUrl":   streamURL,
+			"torrentId":   f.TorrentID,
+			"fileId":      f.TorrentFileID,
+			"audioCodec":  f.AudioCodec,
+			"videoCodec":  f.VideoCodec,
+			"container":   f.Container,
+			"durationSec": f.DurationSec,
+			"subtitles":   []any{},
+		})
+	}
+
 	probe := probeMediaResult(ctx, streamURL)
+	// Persist for next time. Best-effort — if upsert fails, the next
+	// /resolve-stream just re-probes (no functional regression).
+	f.AudioCodec = probe.AudioCodec
+	f.VideoCodec = probe.VideoCodec
+	f.Container = probe.Container
+	f.DurationSec = probe.Duration
+	if _, err := h.App.Database.UpsertLocalFile(f); err != nil {
+		log.Printf("resolve-stream: cache update failed for id=%d: %v", id64, err)
+	}
+
 	return RespondOK(c, map[string]any{
 		"streamUrl":   streamURL,
 		"torrentId":   f.TorrentID,

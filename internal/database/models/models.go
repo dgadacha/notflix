@@ -137,6 +137,13 @@ type LocalFile struct {
 	Source        string `gorm:"column:source;size:16;default:'local';index" json:"source"`
 	TorrentID     int    `gorm:"column:torrent_id;default:0" json:"torrentId,omitempty"`
 	TorrentFileID int    `gorm:"column:torrent_file_id;default:0" json:"torrentFileId,omitempty"`
+	// Cached ffprobe result. For source=torbox, the first /resolve-
+	// stream call fills these in (one ~5 s probe on the remote URL),
+	// subsequent plays return them instantly. Empty = not probed yet.
+	AudioCodec  string  `gorm:"column:audio_codec;size:32" json:"audioCodec,omitempty"`
+	VideoCodec  string  `gorm:"column:video_codec;size:32" json:"videoCodec,omitempty"`
+	Container   string  `gorm:"column:container;size:64" json:"container,omitempty"`
+	DurationSec float64 `gorm:"column:duration_sec" json:"durationSec,omitempty"`
 }
 
 // TMDBCacheEntry persists TMDB API responses so home/detail pages stay
