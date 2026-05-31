@@ -161,10 +161,21 @@ function TorBoxWatchPage() {
     // ALSO handles the "custom source" flow: when ?customStream=1 is set,
     // we consume the stash dropped by TorrentSourceDialog and short-
     // circuit straight to "playing" without ever hitting Prowlarr.
+    //
+    // The customStashRef trick guarantees we consume sessionStorage ONCE
+    // even when React StrictMode double-fires the effect in dev — the
+    // 2nd run sees the ref already populated and uses the cached copy
+    // instead of trying to re-read (and finding an empty key).
     const customStream = searchParams.get("customStream") === "1"
+    const customStashRef = React.useRef<ReturnType<typeof consumeCustomStream> | undefined>(undefined)
     React.useEffect(() => {
         if (customStream) {
-            const stash = consumeCustomStream()
+            // First call: actually consume. Subsequent calls (re-render,
+            // StrictMode double-fire): reuse the cached value.
+            if (customStashRef.current === undefined) {
+                customStashRef.current = consumeCustomStream()
+            }
+            const stash = customStashRef.current
             if (stash) {
                 setPickedRelease(null)
                 setStreamUrl(stash.streamUrl)
@@ -186,6 +197,11 @@ function TorBoxWatchPage() {
             // fall through to the normal reset so they at least see a
             // useful error instead of an infinite spinner.
             setErrorMsg("Source personnalisée expirée — relance depuis la fiche du titre.")
+        } else {
+            // Reset the cached stash when the URL no longer indicates
+            // a custom stream — so a subsequent custom stream gets a
+            // fresh consume.
+            customStashRef.current = undefined
         }
         setPhase("searching")
         setPickedRelease(null)

@@ -404,8 +404,8 @@ export function TorrentSourceDialog({
                                         onClick={() => file.isVideo && onClickPlay(file)}
                                         disabled={!file.isVideo || playing !== null}
                                         className={cn(
-                                            "w-full text-left flex items-center gap-3 px-3 py-2 rounded-md text-xs",
-                                            "transition-colors",
+                                            "w-full text-left flex items-start gap-3 px-3 py-2 rounded-md text-xs",
+                                            "transition-colors max-w-full",
                                             file.isVideo
                                                 ? "bg-black/30 hover:bg-white/10 border border-white/5 hover:border-white/15 cursor-pointer"
                                                 : "bg-black/10 border border-transparent text-white/40 cursor-not-allowed",
@@ -413,7 +413,11 @@ export function TorrentSourceDialog({
                                             playing !== null && !isPlayingThis && "opacity-40",
                                         )}
                                     >
-                                        <span className="flex-1 min-w-0 break-all">
+                                        {/* break-words + overflow-hidden cap
+                                            les rip names ultra-longs à la
+                                            largeur dispo, sans déborder
+                                            horizontalement la modal. */}
+                                        <span className="flex-1 min-w-0 overflow-hidden break-words leading-snug">
                                             {isMatch && (
                                                 <span className="text-brand-300 font-bold mr-1.5">
                                                     ★ MATCH
@@ -421,11 +425,11 @@ export function TorrentSourceDialog({
                                             )}
                                             {file.name}
                                         </span>
-                                        <span className="text-[10px] text-[--muted] tabular-nums shrink-0">
+                                        <span className="text-[10px] text-[--muted] tabular-nums shrink-0 mt-0.5">
                                             {fmtSize(file.size)}
                                         </span>
                                         {isPlayingThis && (
-                                            <div className="size-3.5 rounded-full border-2 border-white/10 border-t-brand-500 animate-spin shrink-0" />
+                                            <div className="size-3.5 rounded-full border-2 border-white/10 border-t-brand-500 animate-spin shrink-0 mt-0.5" />
                                         )}
                                     </button>
                                 )
