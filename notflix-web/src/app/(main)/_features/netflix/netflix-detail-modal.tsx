@@ -45,6 +45,7 @@ import { useTranslation } from "react-i18next"
 import { BiCheck, BiPlay, BiPlus, BiX } from "react-icons/bi"
 import { LuUpload } from "react-icons/lu"
 import { TorrentSourceDialog, type TorrentSourceContext } from "@/app/(main)/_features/netflix/torrent-source-dialog"
+import { usePlayLocal } from "@/app/(main)/_features/netflix/use-play-local"
 
 type ModalTarget = {
     id: number
@@ -179,16 +180,12 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
     // Build the /watch URL with current prefs + (for TV) the requested
     // season/episode. Movies omit the season/episode params entirely.
     //
-    // Local-library short-circuit: if we already have the requested
-    // (movie OR episode) on disk, route via /watch?localId=N. The watch
-    // page detects localId and skips the entire Prowlarr+TorBox flow.
-    // Without this short-circuit, opening a film from the local rail
-    // would (re-)search torrents which is both wasteful and confusing.
-    const buildWatchUrl = (season?: number, episode?: number) => {
-        const localId = pickLocalFileId(localFilesForTitle, type, season, episode)
-        if (localId != null) {
-            return `/watch?localId=${localId}`
-        }
+    const { playLocalFile } = usePlayLocal()
+
+    // Build the URL for the cloud (Prowlarr → TorBox) flow when no
+    // local file exists. The LOCAL short-circuit goes through
+    // playLocalFile() instead (handles source=local + source=torbox).
+    const buildCloudWatchUrl = (season?: number, episode?: number) => {
         const params = new URLSearchParams({ id: String(data.id), type })
         if (quality !== "auto") params.set("quality", quality)
         if (audio !== "auto") params.set("audio", audio)
@@ -202,16 +199,24 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
 
     const onPlayMain = () => {
         closeDetail()
-        if (type === "tv" && selectedSeason != null) {
-            router.push(buildWatchUrl(selectedSeason, 1))
-        } else {
-            router.push(buildWatchUrl())
+        const targetSeason = type === "tv" ? (selectedSeason ?? undefined) : undefined
+        const targetEpisode = type === "tv" && selectedSeason != null ? 1 : undefined
+        const localPick = pickLocalFile(localFilesForTitle, type, targetSeason, targetEpisode)
+        if (localPick) {
+            void playLocalFile(localPick)
+            return
         }
+        router.push(buildCloudWatchUrl(targetSeason, targetEpisode))
     }
 
     const onPlayEpisode = (season: number, episode: number) => {
         closeDetail()
-        router.push(buildWatchUrl(season, episode))
+        const localPick = pickLocalFile(localFilesForTitle, type, season, episode)
+        if (localPick) {
+            void playLocalFile(localPick)
+            return
+        }
+        router.push(buildCloudWatchUrl(season, episode))
     }
 
     // Build the context for the .torrent dialog. For TV we pass the
@@ -267,6 +272,7 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
                                 isMovie={type === "movie"}
                                 tvCount={type === "tv" ? localFilesForTitle.length : 0}
                                 localId={type === "movie" ? localFilesForTitle[0]?.id : undefined}
+                                isTorBox={localFilesForTitle.every(f => f.source === "torbox")}
                             />
                         )}
 
@@ -436,25 +442,35 @@ function MovieLocalBadge({
     isMovie,
     tvCount,
     localId,
+    isTorBox = false,
 }: {
     isMovie: boolean
     tvCount: number
     localId?: number
+    /** Pour les rows source="torbox", on skip /probe (qui retourne
+     *  403 sur un path "torbox://...") et on label "TorBox" au lieu
+     *  de "Local" pour que l'utilisateur sache d'où ça vient. */
+    isTorBox?: boolean
 }) {
     const { t } = useTranslation()
-    const { data: audioLangCode } = useLocalAudioLang(localId, isMovie)
-    const langLbl = isMovie ? langLabel(audioLangCode) : null
+    const { data: audioLangCode } = useLocalAudioLang(localId, isMovie && !isTorBox)
+    const langLbl = isMovie && !isTorBox ? langLabel(audioLangCode) : null
     return (
         <span
             className={cn(
                 "inline-flex items-center gap-1 px-2 py-1 rounded-md",
-                "bg-emerald-500/15 border border-emerald-500/40 text-emerald-300",
+                isTorBox
+                    ? "bg-blue-500/15 border border-blue-500/40 text-blue-300"
+                    : "bg-emerald-500/15 border border-emerald-500/40 text-emerald-300",
                 "text-[10px] font-bold uppercase tracking-wider",
             )}
-            title={t("modal.local_available", "Disponible dans ta bibliothèque locale")}
+            title={isTorBox
+                ? t("modal.torbox_available", "Disponible via TorBox (importé depuis un .torrent)")
+                : t("modal.local_available", "Disponible dans ta bibliothèque locale")
+            }
         >
-            <span className="size-1.5 rounded-full bg-emerald-400" />
-            {t("modal.local_badge", "Local")}
+            <span className={cn("size-1.5 rounded-full", isTorBox ? "bg-blue-400" : "bg-emerald-400")} />
+            {isTorBox ? "TorBox" : t("modal.local_badge", "Local")}
             {langLbl && (
                 <span className="text-emerald-300/85 font-normal">· {langLbl}</span>
             )}
@@ -473,17 +489,30 @@ function pickLocalFileId(
     season?: number,
     episode?: number,
 ): number | null {
+    const f = pickLocalFile(files, type, season, episode)
+    return f ? f.id : null
+}
+
+/** Same as pickLocalFileId but returns the full LocalFile row so
+ *  the caller can distinguish source=local from source=torbox
+ *  (which routes differently — direct /stream vs /resolve-stream). */
+function pickLocalFile(
+    files: LocalFile[],
+    type: "movie" | "tv",
+    season?: number,
+    episode?: number,
+): LocalFile | null {
     if (!files || files.length === 0) return null
     if (type === "movie") {
-        return files[0].id
+        return files[0]
     }
     if (season != null && episode != null) {
         const exact = files.find(f => f.season === season && f.episode === episode)
-        if (exact) return exact.id
+        if (exact) return exact
     }
     if (season != null) {
         const inSeason = files.find(f => f.season === season)
-        if (inSeason) return inSeason.id
+        if (inSeason) return inSeason
     }
     return null
 }

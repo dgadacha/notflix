@@ -541,6 +541,42 @@ func (h *Handler) HandleProbeLocalFile(c echo.Context) error {
 	if err != nil {
 		return c.NoContent(http.StatusBadRequest)
 	}
+	// Pour les rows torbox, on doit résoudre l'URL TorBox d'abord
+	// puis probe dessus (le path "torbox://..." n'est PAS un chemin
+	// filesystem). resolveLocalFilePath rejette ces rows à raison
+	// (security check anchored under library dir), donc on
+	// court-circuite.
+	if row, errLookup := h.App.Database.GetLocalFile(uint(id)); errLookup == nil && row != nil && row.Source == "torbox" {
+		if row.TorrentID <= 0 {
+			return c.JSON(http.StatusUnprocessableEntity, map[string]any{
+				"error": "torbox row missing TorrentID",
+			})
+		}
+		streamURL, err := h.App.TorBox.RequestDownloadURL(c.Request().Context(), row.TorrentID, row.TorrentFileID)
+		if err != nil {
+			return c.JSON(http.StatusBadGateway, map[string]any{
+				"error": "TorBox: " + err.Error(),
+			})
+		}
+		probe := probeMediaResult(c.Request().Context(), streamURL)
+		// Match the shape of the local probe path : isAnime computed
+		// the same way + subtitles list.
+		resp := localProbeResp{
+			Duration:  probe.Duration,
+			Audio:     []localAudioTrack{},
+			Subtitles: []localSubTrack{},
+		}
+		resp.IsAnime = h.App.IsAnime(row.MediaType, row.TMDBID)
+		for i, s := range probe.Subtitles {
+			resp.Subtitles = append(resp.Subtitles, localSubTrack{
+				StreamIndex: i,
+				Lang:        s.Language,
+				Codec:       s.Codec,
+				Title:       s.Title,
+			})
+		}
+		return RespondOK(c, resp)
+	}
 	absFile, errResp := h.resolveLocalFilePath(c, uint(id))
 	if errResp != nil {
 		return errResp

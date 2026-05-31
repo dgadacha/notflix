@@ -21,6 +21,7 @@
 import { useNetflixDetailModal } from "@/app/(main)/_features/netflix/netflix-detail-modal"
 import { NetflixWatchHistorySaver } from "@/app/(main)/_features/netflix/netflix-watch-history-saver"
 import { consumeCustomStream } from "@/app/(main)/_features/netflix/torrent-source-dialog"
+import { usePlayLocal } from "@/app/(main)/_features/netflix/use-play-local"
 import {
     getSubPrepStatus,
     Release,
@@ -2148,7 +2149,7 @@ type LocalProbe = {
     subtitles?: LocalSubTrack[]
 }
 
-function useLocalFileProbe(localId: number) {
+function useLocalFileProbe(localId: number, enabled: boolean = true) {
     return useQuery<LocalProbe>({
         queryKey: ["local-library", "probe", localId],
         queryFn: async () => {
@@ -2157,6 +2158,7 @@ function useLocalFileProbe(localId: number) {
             const j = await r.json()
             return (j.data ?? j) as LocalProbe
         },
+        enabled,
         staleTime: 60 * 60_000,
     })
 }
@@ -2190,7 +2192,19 @@ function LocalWatch({ localId }: { localId: number }) {
     const searchParams = useSearchParams()
     const resumeSec = parseInt(searchParams.get("t") ?? "0", 10) || 0
     const { data: file, isLoading, error } = useLocalFile(localId)
-    const { data: probe } = useLocalFileProbe(localId)
+    // For torbox-sourced rows, /probe and /stream return 403 — the
+    // path is "torbox://..." which doesn't live under the library dir.
+    // We have to go through /resolve-stream + sessionStorage stash,
+    // which is what usePlayLocal does. Detect + redirect ASAP so we
+    // never even attempt the broken endpoints.
+    const isTorBox = file?.source === "torbox"
+    const { playLocalFile, error: playError } = usePlayLocal()
+    React.useEffect(() => {
+        if (!file || !isTorBox) return
+        void playLocalFile(file, resumeSec)
+    }, [file, isTorBox, resumeSec, playLocalFile])
+
+    const { data: probe } = useLocalFileProbe(localId, !isTorBox)
     const videoRef = React.useRef<HTMLVideoElement>(null)
 
     const subs = probe?.subtitles ?? []
