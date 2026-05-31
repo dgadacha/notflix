@@ -102,6 +102,85 @@ func (w *TorrentWatcher) processExistingFiles() {
 	}
 }
 
+// SweepResult summarises a one-shot scan of a torrent drop dir.
+// Used by the manual "Scanner maintenant" button which chains the
+// video walk + a torrent sweep so the admin doesn't have to wait
+// for the fsnotify watcher to catch up.
+type SweepResult struct {
+	Processed int      `json:"processed"` // .torrent files we tried to import
+	Imported  int      `json:"imported"`  // total LocalFile rows added across all torrents
+	Failed    int      `json:"failed"`
+	Errors    []string `json:"errors,omitempty"`
+}
+
+// SweepTorrentDir is the synchronous version of what the watcher
+// does on Create events: walk a directory, import every .torrent
+// found, move successes to .processed/.
+//
+// Caller's responsibility to bound it with a context timeout —
+// each import can take up to 90 s.
+func SweepTorrentDir(
+	ctx context.Context,
+	dir string,
+	tb *torbox.Client,
+	store *db.Database,
+	tmdb TMDBSearcher,
+) (*SweepResult, error) {
+	if strings.TrimSpace(dir) == "" {
+		return nil, errors.New("torrent dir not configured")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &SweepResult{}
+	processedDir := filepath.Join(dir, ".processed")
+	for _, e := range entries {
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		if e.IsDir() {
+			continue
+		}
+		if !isTorrentFile(e.Name()) {
+			continue
+		}
+		// Hidden files (eg. .DS_Store renamed to .torrent for kicks).
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+
+		result.Processed++
+		path := filepath.Join(dir, e.Name())
+		content, err := os.ReadFile(path)
+		if err != nil {
+			result.Failed++
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", e.Name(), err))
+			continue
+		}
+		if len(content) == 0 {
+			continue
+		}
+
+		imp, err := ImportTorrentFromBytes(ctx, content, e.Name(), tb, store, tmdb)
+		if err != nil {
+			result.Failed++
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", e.Name(), err))
+			continue
+		}
+		result.Imported += imp.Imported
+
+		// Move processed .torrent so the next sweep / watcher event
+		// doesn't re-trigger.
+		if err := os.MkdirAll(processedDir, 0o755); err != nil {
+			continue
+		}
+		_ = os.Rename(path, filepath.Join(processedDir, e.Name()))
+	}
+	return result, nil
+}
+
 func (w *TorrentWatcher) loop() {
 	for {
 		select {

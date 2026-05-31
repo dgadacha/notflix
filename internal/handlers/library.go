@@ -162,6 +162,27 @@ func (h *Handler) HandleScanLocalLibrary(c echo.Context) error {
 			"error": "scan already in progress",
 		})
 	}
+
+	// Chain a torrent sweep in the background. The user expects
+	// the "Scanner maintenant" button to rattraper everything,
+	// including .torrent that landed while the fsnotify watcher
+	// was missing events (race after dir change, etc).
+	// Fire-and-forget : we don't want to block the scan response
+	// on potentially 90s+ of TorBox polling.
+	if torrentDir := h.App.TorrentDropDir(); torrentDir != "" {
+		go func(dir string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			defer cancel()
+			res, err := library.SweepTorrentDir(ctx, dir, h.App.TorBox, h.App.Database, h.App.TMDB)
+			if err != nil {
+				log.Printf("torrent sweep: %v", err)
+				return
+			}
+			log.Printf("torrent sweep: processed %d, imported %d, failed %d",
+				res.Processed, res.Imported, res.Failed)
+		}(torrentDir)
+	}
+
 	return c.JSON(http.StatusAccepted, map[string]any{
 		"started": true,
 		"dir":     dir,
