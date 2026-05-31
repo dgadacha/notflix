@@ -166,6 +166,10 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
     const prefetchTitle = data && mediaTypeOf(data, target.type) === "movie" ? titleOf(data) : ""
     const prefetchYear = data ? yearOf(data) : undefined
     useTorBoxPrefetch(prefetchTitle, prefetchYear)
+    // playLocalFile DOIT être déclaré ici (avant le early return)
+    // pour respecter les Rules of Hooks — sinon React voit "more
+    // hooks than the previous render" et crash en runtime.
+    const { playLocalFile } = usePlayLocal()
 
     if (isLoading || !data) return <BodySkeleton />
 
@@ -180,8 +184,6 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
     // Build the /watch URL with current prefs + (for TV) the requested
     // season/episode. Movies omit the season/episode params entirely.
     //
-    const { playLocalFile } = usePlayLocal()
-
     // Build the URL for the cloud (Prowlarr → TorBox) flow when no
     // local file exists. The LOCAL short-circuit goes through
     // playLocalFile() instead (handles source=local + source=torbox).
