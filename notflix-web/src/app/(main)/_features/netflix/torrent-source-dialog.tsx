@@ -105,6 +105,13 @@ export function TorrentSourceDialog({
     const [error, setError] = React.useState<string | null>(null)
     const fileInputRef = React.useRef<HTMLInputElement>(null)
 
+    // Picker S/E pour les torrents multi-saisons. Initialisé depuis
+    // le contexte (modal ouverte sur S04 → S04E01 par défaut), mais
+    // l'utilisateur peut le changer pour cibler n'importe quel
+    // épisode du pack. Pilote le tri + le badge ★ MATCH.
+    const [pickSeason, setPickSeason] = React.useState<number>(context?.season ?? 1)
+    const [pickEpisode, setPickEpisode] = React.useState<number>(context?.episode ?? 1)
+
     // Reset state every time the dialog opens for a new context.
     React.useEffect(() => {
         if (open) {
@@ -112,8 +119,31 @@ export function TorrentSourceDialog({
             setUploading(false)
             setPlaying(null)
             setError(null)
+            setPickSeason(context?.season ?? 1)
+            setPickEpisode(context?.episode ?? 1)
         }
-    }, [open])
+    }, [open, context?.season, context?.episode])
+
+    // Window-level drag/drop handlers — capture les drops n'importe
+    // où sur la page (et pas seulement sur la dropzone). Sans ça,
+    // un drop hors de la dropzone fait que le browser ouvre le
+    // fichier comme une navigation. preventDefault sur dragover
+    // est REQUIS pour activer le drop.
+    React.useEffect(() => {
+        if (!open || uploadResult) return
+        const onDragOver = (e: DragEvent) => { e.preventDefault() }
+        const onDrop = (e: DragEvent) => {
+            e.preventDefault()
+            const f = e.dataTransfer?.files?.[0]
+            if (f) void handleFile(f)
+        }
+        window.addEventListener("dragover", onDragOver)
+        window.addEventListener("drop", onDrop)
+        return () => {
+            window.removeEventListener("dragover", onDragOver)
+            window.removeEventListener("drop", onDrop)
+        }
+    }, [open, uploadResult]) // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleFile = async (file: File) => {
         if (!file.name.toLowerCase().endsWith(".torrent")) {
@@ -152,8 +182,13 @@ export function TorrentSourceDialog({
                 torrentId: uploadResult.torrentId,
                 fileId: file.id,
             }
-            if (context.season && context.season > 0) playBody.season = context.season
-            if (context.episode && context.episode > 0) playBody.episode = context.episode
+            // Pass the user-picked S/E rather than the modal context.
+            // For TV the user might be diving into a different episode
+            // than the one currently selected in the modal.
+            if (context.mediaType === "tv") {
+                if (pickSeason > 0) playBody.season = pickSeason
+                if (pickEpisode > 0) playBody.episode = pickEpisode
+            }
 
             const r = await fetch("/api/v1/torbox/play", {
                 method: "POST",
@@ -184,8 +219,10 @@ export function TorrentSourceDialog({
                 id: String(context.tmdbId),
                 type: context.mediaType,
             })
-            if (context.season) params.set("season", String(context.season))
-            if (context.episode) params.set("episode", String(context.episode))
+            if (context.mediaType === "tv") {
+                params.set("season", String(pickSeason))
+                params.set("episode", String(pickEpisode))
+            }
             router.push(`/watch?${params.toString()}`)
             onClose()
         } catch (e) {
@@ -195,18 +232,21 @@ export function TorrentSourceDialog({
     }
 
     // Sort: episode-matching first, then videos, then everything else.
+    const isTV = context?.mediaType === "tv"
     const sortedFiles = React.useMemo(() => {
         if (!uploadResult) return []
         const arr = [...uploadResult.files]
+        const season = isTV ? pickSeason : undefined
+        const episode = isTV ? pickEpisode : undefined
         arr.sort((a, b) => {
-            const aMatch = matchesEpisode(a.name, context?.season, context?.episode) ? 1 : 0
-            const bMatch = matchesEpisode(b.name, context?.season, context?.episode) ? 1 : 0
+            const aMatch = matchesEpisode(a.name, season, episode) ? 1 : 0
+            const bMatch = matchesEpisode(b.name, season, episode) ? 1 : 0
             if (aMatch !== bMatch) return bMatch - aMatch
             if (a.isVideo !== b.isVideo) return a.isVideo ? -1 : 1
             return a.name.localeCompare(b.name)
         })
         return arr
-    }, [uploadResult, context?.season, context?.episode])
+    }, [uploadResult, isTV, pickSeason, pickEpisode])
 
     return (
         <Modal
@@ -291,6 +331,41 @@ export function TorrentSourceDialog({
                             <span>{uploadResult.cached ? "en cache" : "téléchargé"}</span>
                         </div>
 
+                        {/* Picker S/E — pour les torrents qui contiennent
+                            plusieurs saisons / épisodes. Permet de
+                            déplacer le badge ★ MATCH sur l'épisode
+                            qu'on veut vraiment regarder. */}
+                        {isTV && (
+                            <div className="flex items-center gap-2 bg-black/30 border border-white/10 rounded-md px-3 py-2 text-xs">
+                                <span className="text-white/70 font-semibold">Je veux</span>
+                                <label className="flex items-center gap-1">
+                                    <span className="text-[--muted]">S</span>
+                                    <input
+                                        type="number"
+                                        min={1}
+                                        max={99}
+                                        value={pickSeason}
+                                        onChange={(e) => setPickSeason(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                                        className="w-12 bg-black/40 border border-white/15 rounded px-1.5 py-0.5 text-white tabular-nums outline-none focus:border-brand-500"
+                                    />
+                                </label>
+                                <label className="flex items-center gap-1">
+                                    <span className="text-[--muted]">E</span>
+                                    <input
+                                        type="number"
+                                        min={1}
+                                        max={999}
+                                        value={pickEpisode}
+                                        onChange={(e) => setPickEpisode(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                                        className="w-12 bg-black/40 border border-white/15 rounded px-1.5 py-0.5 text-white tabular-nums outline-none focus:border-brand-500"
+                                    />
+                                </label>
+                                <span className="text-[--muted] text-[10px] ml-auto">
+                                    le fichier qui match remontera en haut avec ★ MATCH
+                                </span>
+                            </div>
+                        )}
+
                         <div className="max-h-[55vh] overflow-y-auto space-y-1.5 pr-1">
                             {sortedFiles.length === 0 && (
                                 <p className="text-[--muted] text-sm text-center py-6">
@@ -298,7 +373,10 @@ export function TorrentSourceDialog({
                                 </p>
                             )}
                             {sortedFiles.map(file => {
-                                const isMatch = matchesEpisode(file.name, context?.season, context?.episode)
+                                const isMatch = matchesEpisode(file.name,
+                                    isTV ? pickSeason : undefined,
+                                    isTV ? pickEpisode : undefined,
+                                )
                                 const isPlayingThis = playing === file.id
                                 return (
                                     <button
