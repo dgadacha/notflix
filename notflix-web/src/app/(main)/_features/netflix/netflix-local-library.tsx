@@ -12,10 +12,10 @@
  */
 import { LocalLibraryMatchEditor } from "@/app/(main)/_features/netflix/local-library-match-editor"
 import { useNetflixDetailModal } from "@/app/(main)/_features/netflix/netflix-detail-modal"
+import { usePlayLocal } from "@/app/(main)/_features/netflix/use-play-local"
 import { ROW } from "@/app/(main)/_features/netflix/netflix.constants"
 import { cn } from "@/components/ui/core/styling"
 import { Skeleton } from "@/components/ui/skeleton"
-import { useRouter } from "@/lib/navigation"
 import { tmdbImage } from "@/lib/tmdb"
 import { useQuery } from "@tanstack/react-query"
 import React from "react"
@@ -39,6 +39,13 @@ export type LocalFile = {
     year: number
     season: number
     episode: number
+    // "local" → file on disk, /stream/:id direct.
+    // "torbox" → file on TorBox, requires /resolve-stream to get a
+    // fresh URL on each play. May be missing on rows created before
+    // this column existed → default to "local".
+    source?: "local" | "torbox"
+    torrentId?: number
+    torrentFileId?: number
 }
 
 // A LibraryEntry is what we actually render on the rail. For movies
@@ -254,19 +261,21 @@ export function NetflixLocalLibrary() {
 }
 
 function LocalCard({ entry }: { entry: LibraryEntry }) {
-    const router = useRouter()
     const { t } = useTranslation()
     const { openDetail } = useNetflixDetailModal()
+    const { playLocalFile, resolving } = usePlayLocal()
     const backdrop = tmdbImage("w780", entry.backdropPath) || tmdbImage("w500", entry.posterPath)
     const file = entry.firstFile
     const [editing, setEditing] = React.useState(false)
+    const isResolving = resolving === file.id
+    const isTorBox = file.source === "torbox"
 
     const onClickPlay = (e: React.MouseEvent) => {
         e.stopPropagation()
         // TV → plays the first episode (S01E01 typically). User can
         // pick a different one from inside the modal later if we wire
         // the episode picker.
-        router.push(`/watch?localId=${file.id}`)
+        void playLocalFile(file)
     }
     const onClickEdit = (e: React.MouseEvent) => {
         e.stopPropagation()
@@ -276,7 +285,7 @@ function LocalCard({ entry }: { entry: LibraryEntry }) {
         if (entry.tmdbId > 0) {
             openDetail(entry.tmdbId, entry.mediaType)
         } else {
-            router.push(`/watch?localId=${file.id}`)
+            void playLocalFile(file)
         }
     }
     const isTV = entry.mediaType === "tv"
@@ -310,17 +319,32 @@ function LocalCard({ entry }: { entry: LibraryEntry }) {
                     </div>
                 )}
             </div>
-            {/* Top-left chip for TV shows — "12 ép." badge. Lets the
-                user see at a glance that a card represents a season
-                pack vs a single film. */}
-            {isTV && entry.episodeCount > 0 && (
-                <span className={cn(
-                    "absolute top-2 left-2 px-1.5 py-0.5 rounded",
-                    "bg-black/70 backdrop-blur-sm border border-white/15",
-                    "text-[10px] font-bold text-white tracking-wide",
-                )}>
-                    {entry.episodeCount} {t("home.rows.local_library_ep_short", "ép.")}
-                </span>
+            {/* Top-left chips : TV count + TorBox source indicator. */}
+            <div className="absolute top-2 left-2 flex items-center gap-1.5">
+                {isTV && entry.episodeCount > 0 && (
+                    <span className={cn(
+                        "px-1.5 py-0.5 rounded",
+                        "bg-black/70 backdrop-blur-sm border border-white/15",
+                        "text-[10px] font-bold text-white tracking-wide",
+                    )}>
+                        {entry.episodeCount} {t("home.rows.local_library_ep_short", "ép.")}
+                    </span>
+                )}
+                {isTorBox && (
+                    <span className={cn(
+                        "px-1.5 py-0.5 rounded inline-flex items-center gap-1",
+                        "bg-blue-500/30 backdrop-blur-sm border border-blue-400/40",
+                        "text-[10px] font-bold text-blue-100 tracking-wide",
+                    )} title="Stream via TorBox (pas sur disque)">
+                        ☁ TorBox
+                    </span>
+                )}
+            </div>
+            {/* Resolving spinner while we ask TorBox for a fresh URL. */}
+            {isResolving && (
+                <div className="absolute inset-0 bg-black/60 flex items-center justify-center z-10">
+                    <div className="size-8 rounded-full border-4 border-white/10 border-t-brand-500 animate-spin" />
+                </div>
             )}
             <div className="absolute inset-x-0 bottom-0 p-3 bg-gradient-to-t from-black/95 via-black/60 to-transparent pointer-events-none">
                 <p className="text-white font-semibold text-sm lg:text-base line-clamp-1 drop-shadow-md">

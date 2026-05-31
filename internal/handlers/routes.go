@@ -108,6 +108,13 @@ func RegisterRoutes(e *echo.Echo, h *Handler) {
 	// title (eg. Spider-Man 1994 → Spider-Man 2003), the admin
 	// picks the correct id and we patch the LocalFile row.
 	libAdmin.POST("/match/:id", h.HandleMatchLocalFile)
+	// Import a .torrent : push it to TorBox, parse + TMDB-match
+	// each video file, persist as LocalFile rows with source=torbox.
+	// They appear in the home rail next to on-disk files.
+	libAdmin.POST("/import-torrent", h.HandleImportTorrent)
+	// Resolve a stream URL on demand for torbox-sourced rows.
+	// (Local-source rows go through /stream/:id directly.)
+	lib.POST("/resolve-stream/:id", h.HandleResolveStream)
 	// MKV → MP4 batch conversion. Runs ffmpeg per MKV row in the DB,
 	// remuxing video bit-perfect and transcoding audio to AAC when
 	// the source isn't already AAC. Deletes the source on success.

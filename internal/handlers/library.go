@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"notflix/internal/core"
 	"notflix/internal/database/models"
 	"notflix/internal/library"
+	"notflix/internal/torbox"
 
 	"github.com/labstack/echo/v4"
 )
@@ -623,6 +625,193 @@ func (h *Handler) HandleExtractSubtitle(c echo.Context) error {
 			id, idx, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// HandleImportTorrent — POST /api/v1/local-library/import-torrent
+//
+// Multipart form: field "torrent" = the .torrent file bytes.
+//
+// Flow :
+//   1. Push the .torrent to TorBox (AddTorrentFile)
+//   2. Poll until ready (90 s budget)
+//   3. For each video file in the torrent :
+//        - parse the filename + match TMDB (reuses scanner logic)
+//        - upsert a LocalFile row with source="torbox",
+//          path="torbox://<torrentId>/<fileId>"
+//   4. Return summary { imported, skipped, errors }
+//
+// The frontend then refreshes /local-library and the new entries
+// appear in the home rail alongside on-disk files. Playback goes
+// through /resolve-stream/:id which materialises the TorBox URL
+// on demand (those URLs expire so we don't cache them).
+func (h *Handler) HandleImportTorrent(c echo.Context) error {
+	fh, err := c.FormFile("torrent")
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error": "missing form field 'torrent' (.torrent file)",
+		})
+	}
+	if !strings.HasSuffix(strings.ToLower(fh.Filename), ".torrent") {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error": "expected a .torrent file",
+		})
+	}
+	src, err := fh.Open()
+	if err != nil {
+		return RespondErr(c, err)
+	}
+	defer src.Close()
+	content, err := io.ReadAll(src)
+	if err != nil {
+		return RespondErr(c, err)
+	}
+
+	ctx := c.Request().Context()
+
+	// Step 1+2 : add to TorBox + poll until ready (or at least
+	// metadata-ready so we can enumerate files).
+	created, err := h.App.TorBox.AddTorrentFile(ctx, fh.Filename, content)
+	if err != nil {
+		return RespondErr(c, err)
+	}
+	var ready *torbox.Torrent
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		t, err := h.App.TorBox.GetTorrent(ctx, created.TorrentID)
+		if err != nil {
+			return RespondErr(c, err)
+		}
+		if t.DownloadFinished || t.DownloadPresent || len(t.Files) > 0 {
+			ready = t
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if ready == nil {
+		return c.JSON(http.StatusGatewayTimeout, map[string]any{
+			"error":     "TorBox: torrent not ready in 90s",
+			"torrentId": created.TorrentID,
+		})
+	}
+
+	// Step 3 : for each video file, parse + TMDB match + upsert.
+	// We use the torrent root name as a hint for episodes that lack
+	// the show name in the filename itself (eg. "S01E07.mkv" inside
+	// a "Demon.Slayer.S01.MULTi..." folder → hint = "Demon Slayer").
+	hintShowName := library.FolderShowName(ready.Name)
+
+	imported := 0
+	skipped := 0
+	failed := 0
+	var errors []string
+	for _, f := range ready.Files {
+		if !isVideoFile(f.Name) {
+			skipped++
+			continue
+		}
+		// Use the base name for parsing — TorBox returns paths like
+		// "Demon.Slayer.S01.MULTi/S01E07.mkv" sometimes, we want
+		// just the file portion.
+		base := filepath.Base(f.Name)
+		match, err := library.MatchOneFile(ctx, h.App.TMDB, base, hintShowName)
+		if err != nil {
+			failed++
+			if len(errors) < 10 {
+				errors = append(errors, fmt.Sprintf("%s: %v", base, err))
+			}
+			continue
+		}
+		if match == nil {
+			skipped++
+			continue
+		}
+		row := &models.LocalFile{
+			Path:          fmt.Sprintf("torbox://%d/%d", created.TorrentID, f.ID),
+			SizeBytes:     f.Size,
+			ScannedAt:     time.Now(),
+			Source:        "torbox",
+			TorrentID:     created.TorrentID,
+			TorrentFileID: f.ID,
+			ParsedTitle:   match.ParsedTitle,
+			ParsedYear:    match.ParsedYear,
+			TMDBID:        match.TMDBID,
+			MediaType:     match.MediaType,
+			Title:         match.Title,
+			PosterPath:    match.PosterPath,
+			BackdropPath:  match.BackdropPath,
+			Overview:      match.Overview,
+			Year:          match.Year,
+			Season:        match.Season,
+			Episode:       match.Episode,
+		}
+		if _, err := h.App.Database.UpsertLocalFile(row); err != nil {
+			failed++
+			if len(errors) < 10 {
+				errors = append(errors, fmt.Sprintf("%s: %v", base, err))
+			}
+			continue
+		}
+		imported++
+	}
+
+	return RespondOK(c, map[string]any{
+		"torrentId": created.TorrentID,
+		"name":      ready.Name,
+		"imported":  imported,
+		"skipped":   skipped,
+		"failed":    failed,
+		"errors":    errors,
+	})
+}
+
+// HandleResolveStream — POST /api/v1/local-library/resolve-stream/:id
+//
+// For "torbox" sources, request a fresh streamable URL from TorBox
+// (those URLs expire so we don't cache them in the DB), then probe
+// duration + codecs + subtitles like the regular Play handler does.
+// Returns the same shape as /torbox/play so the frontend can stash
+// it for /watch?customStream=1.
+//
+// For "local" sources, returns 400 — the frontend should hit
+// /local-library/stream/:id directly instead (HTTP Range native).
+func (h *Handler) HandleResolveStream(c echo.Context) error {
+	id64, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		return c.NoContent(http.StatusBadRequest)
+	}
+	f, err := h.App.Database.GetLocalFile(uint(id64))
+	if err != nil {
+		return c.NoContent(http.StatusNotFound)
+	}
+	if f.Source != "torbox" {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"error": "resolve-stream is only for source=torbox; use /stream/:id for local files",
+		})
+	}
+	if f.TorrentID <= 0 {
+		return c.JSON(http.StatusUnprocessableEntity, map[string]any{
+			"error": "torbox row missing TorrentID",
+		})
+	}
+
+	ctx := c.Request().Context()
+	streamURL, err := h.App.TorBox.RequestDownloadURL(ctx, f.TorrentID, f.TorrentFileID)
+	if err != nil {
+		return c.JSON(http.StatusBadGateway, map[string]any{
+			"error": "TorBox: " + err.Error(),
+		})
+	}
+	probe := probeMediaResult(ctx, streamURL)
+	return RespondOK(c, map[string]any{
+		"streamUrl":   streamURL,
+		"torrentId":   f.TorrentID,
+		"fileId":      f.TorrentFileID,
+		"audioCodec":  probe.AudioCodec,
+		"videoCodec":  probe.VideoCodec,
+		"container":   probe.Container,
+		"durationSec": probe.Duration,
+		"subtitles":   probe.Subtitles,
+	})
 }
 
 // HandleMatchLocalFile — POST /api/v1/local-library/match/:id

@@ -129,6 +129,14 @@ type LocalFile struct {
 	// Season > 0 lets the frontend group cards on the home rail.
 	Season  int `gorm:"column:season" json:"season"`
 	Episode int `gorm:"column:episode" json:"episode"`
+	// Source: "local" (file on disk under the configured library
+	// dir, Path = abs filesystem path) or "torbox" (file living in
+	// a torrent uploaded to TorBox, Path = "torbox://<torrentId>/<fileId>",
+	// streamed on-demand via RequestDownloadURL). Defaults to "local"
+	// for backwards-compat with rows created before this column existed.
+	Source        string `gorm:"column:source;size:16;default:'local';index" json:"source"`
+	TorrentID     int    `gorm:"column:torrent_id;default:0" json:"torrentId,omitempty"`
+	TorrentFileID int    `gorm:"column:torrent_file_id;default:0" json:"torrentFileId,omitempty"`
 }
 
 // TMDBCacheEntry persists TMDB API responses so home/detail pages stay

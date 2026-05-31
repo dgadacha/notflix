@@ -15,6 +15,7 @@
  * jotai atomWithStorage atoms the player + modal already read from, so
  * a change here applies on the very next /watch open without a refresh.
  */
+import { LocalLibraryImportDialog } from "@/app/(main)/_features/netflix/local-library-import-dialog"
 import { useLocalLibrary } from "@/app/(main)/_features/netflix/netflix-local-library"
 import { LanguageSwitcher } from "@/components/shared/language-switcher"
 import { cn } from "@/components/ui/core/styling"
@@ -1592,6 +1593,7 @@ function LibraryPanel() {
     const running = (status?.running ?? false) || (status?.progress?.running ?? false)
     const converting = convertStatus?.running ?? false
     const [convertErr, setConvertErr] = React.useState<string | null>(null)
+    const [importDialogOpen, setImportDialogOpen] = React.useState(false)
     const autoConvertEnabled = autoConvert?.enabled ?? false
 
     const setAudioLangs = async (def: string, anime: string) => {
@@ -1901,6 +1903,21 @@ function LibraryPanel() {
                     </button>
                     <button
                         type="button"
+                        onClick={() => setImportDialogOpen(true)}
+                        className={cn(
+                            "inline-flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider",
+                            "bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-100",
+                        )}
+                        title={t(
+                            "settings.library_import_torrent_hint",
+                            "Pousse un .torrent à TorBox et ajoute ses fichiers à ta bibliothèque comme s'ils étaient en local.",
+                        )}
+                    >
+                        <LuUpload className="size-3.5" />
+                        {t("settings.library_import_torrent", "Importer un .torrent")}
+                    </button>
+                    <button
+                        type="button"
                         onClick={triggerReorder}
                         disabled={!dir || converting}
                         className={cn(
@@ -2073,6 +2090,11 @@ function LibraryPanel() {
                     )}
                 </div>
             )}
+
+            <LocalLibraryImportDialog
+                open={importDialogOpen}
+                onClose={() => setImportDialogOpen(false)}
+            />
         </div>
     )
 }
