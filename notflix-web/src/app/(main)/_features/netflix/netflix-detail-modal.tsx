@@ -417,6 +417,20 @@ function Body({ target }: { target: NonNullable<ModalTarget> }) {
                 />
             )}
 
+            {/* Imported torrent files — escape hatch quand le match
+                exact (saison, épisode) foire (anime absolute numbering,
+                filename parse fail, etc). Liste TOUS les LocalFile
+                de cette série pour qu'on puisse les lancer direct. */}
+            {type === "tv" && localFilesForTitle.length > 0 && (
+                <ImportedTorrentFilesSection
+                    files={localFilesForTitle}
+                    onPickFile={(file) => {
+                        void playLocalFile(file).finally(() => closeDetail())
+                    }}
+                    resolving={localResolving}
+                />
+            )}
+
             {/* Cast carousel — TMDB credits.cast surfaced as a horizontal
                 row of photos + names + characters. Click → open the
                 NetflixPersonModal with the actor's filmography. */}
@@ -537,6 +551,90 @@ function pickLocalFile(
 // ---------------------------------------------------------------------------
 // Cast carousel
 // ---------------------------------------------------------------------------
+
+/** Liste TOUS les LocalFile de cette série (locaux + torbox) avec
+ *  un bouton play par ligne. Sert d'escape hatch quand le match
+ *  exact (saison, épisode) entre les rows et l'episode list TMDB
+ *  échoue — typiquement pour les animes en absolute numbering, ou
+ *  les rips dont le filename n'a pas un SxxExx parseable. */
+function ImportedTorrentFilesSection({
+    files,
+    onPickFile,
+    resolving,
+}: {
+    files: LocalFile[]
+    onPickFile: (file: LocalFile) => void
+    resolving: number | null
+}) {
+    const { t } = useTranslation()
+    // Tri : par saison puis épisode, puis par ID si tout égal.
+    const sorted = React.useMemo(() => {
+        return [...files].sort((a, b) => {
+            if (a.season !== b.season) return a.season - b.season
+            if (a.episode !== b.episode) return a.episode - b.episode
+            return a.id - b.id
+        })
+    }, [files])
+
+    if (sorted.length === 0) return null
+
+    return (
+        <section className="px-5 sm:px-8 lg:px-12 pb-6 space-y-3">
+            <h3 className="text-sm sm:text-base font-bold text-white tracking-tight">
+                {t("modal.imported_files_title", "Fichiers importés depuis tes .torrent")}
+            </h3>
+            <p className="text-[11px] text-[--muted] leading-relaxed">
+                {t(
+                    "modal.imported_files_hint",
+                    "Si le bon épisode n'est pas trouvé via le clic sur la liste TMDB ci-dessus (numérotation différente, parsing du filename foiré), tu peux lancer directement depuis cette liste.",
+                )}
+            </p>
+            <ul className="space-y-1 max-h-[40vh] overflow-y-auto pr-1">
+                {sorted.map(file => {
+                    const isResolving = resolving === file.id
+                    const isTorBox = file.source === "torbox"
+                    const sLabel = file.season > 0 ? `S${String(file.season).padStart(2, "0")}` : ""
+                    const eLabel = file.episode > 0 ? `E${String(file.episode).padStart(2, "0")}` : ""
+                    const seLabel = sLabel || eLabel ? `${sLabel}${eLabel}` : "??"
+                    return (
+                        <li key={file.id}>
+                            <button
+                                type="button"
+                                onClick={() => onPickFile(file)}
+                                disabled={resolving !== null}
+                                className={cn(
+                                    "w-full flex items-center gap-3 px-3 py-2 rounded-md",
+                                    "bg-black/30 hover:bg-white/10 border border-white/5 hover:border-white/15",
+                                    "transition-colors text-left text-xs disabled:opacity-50 disabled:cursor-wait",
+                                )}
+                            >
+                                <span className={cn(
+                                    "px-1.5 py-0.5 rounded shrink-0 font-bold text-[10px] tracking-wide",
+                                    isTorBox
+                                        ? "bg-blue-500/20 text-blue-300 border border-blue-500/40"
+                                        : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40",
+                                )}>
+                                    {isTorBox ? "☁ TorBox" : "Local"}
+                                </span>
+                                <span className="text-white font-bold tabular-nums w-12 shrink-0">
+                                    {seLabel}
+                                </span>
+                                <span className="flex-1 min-w-0 truncate text-white/80 font-mono text-[11px]" title={file.path}>
+                                    {file.parsedTitle || file.title || file.path.split("/").pop()}
+                                </span>
+                                {isResolving ? (
+                                    <div className="size-3.5 rounded-full border-2 border-white/10 border-t-brand-500 animate-spin shrink-0" />
+                                ) : (
+                                    <BiPlay className="size-4 text-white/70 shrink-0" />
+                                )}
+                            </button>
+                        </li>
+                    )
+                })}
+            </ul>
+        </section>
+    )
+}
 
 function CastCarousel({ cast }: { cast: TMDBCastMember[] }) {
     const { t } = useTranslation()
