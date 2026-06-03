@@ -229,13 +229,17 @@ function pickResumeLocalFile(files: LocalFile[], entry: ProfileWatchEntry): Loca
     if (entry.mediaType === "movie") {
         return matchingTitle[0]
     }
-    // TV — exact (season, episode) first, then any of the season.
+    // TV — pour les épisodes précis (history entry), on exige le
+    // match EXACT (saison + épisode). Sinon on bascule sur le cloud :
+    // un fallback "n'importe quel épisode de la saison" lancerait
+    // S01E01 alors que tu veux reprendre S01E07 → confusion totale.
     if (entry.season > 0 && entry.episode > 0) {
-        const exact = matchingTitle.find(
+        return matchingTitle.find(
             f => f.season === entry.season && f.episode === entry.episode,
-        )
-        if (exact) return exact
+        ) ?? null
     }
+    // Cas dégradé : history sans episode précis (rare) → premier
+    // épisode disponible de la saison.
     if (entry.season > 0) {
         const inSeason = matchingTitle.find(f => f.season === entry.season)
         if (inSeason) return inSeason

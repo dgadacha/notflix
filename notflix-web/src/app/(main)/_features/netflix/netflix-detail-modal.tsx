@@ -504,7 +504,12 @@ function pickLocalFileId(
 
 /** Same as pickLocalFileId but returns the full LocalFile row so
  *  the caller can distinguish source=local from source=torbox
- *  (which routes differently — direct /stream vs /resolve-stream). */
+ *  (which routes differently — direct /stream vs /resolve-stream).
+ *
+ *  IMPORTANT : on ne fait PAS de fallback "any episode in the same
+ *  season". Si l'utilisateur clique S04E07 et qu'on n'a que S04E01,
+ *  on retourne null (donc le caller bascule sur la recherche cloud).
+ *  Sinon on lance le mauvais épisode silencieusement. */
 function pickLocalFile(
     files: LocalFile[],
     type: "movie" | "tv",
@@ -517,8 +522,11 @@ function pickLocalFile(
     }
     if (season != null && episode != null) {
         const exact = files.find(f => f.season === season && f.episode === episode)
-        if (exact) return exact
+        return exact ?? null
     }
+    // Pas d'épisode spécifique demandé (genre "Lecture" sur la série
+    // entière) → on prend n'importe quel fichier (l'utilisateur a
+    // accepté un default).
     if (season != null) {
         const inSeason = files.find(f => f.season === season)
         if (inSeason) return inSeason
